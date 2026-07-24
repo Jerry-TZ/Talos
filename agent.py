@@ -21,6 +21,7 @@ the TALOS_PROVIDER env var (default "claude"); each reads its own *_API_KEY.
 from __future__ import annotations
 
 import glob
+import importlib.util
 import json
 import os
 import sys
@@ -105,6 +106,41 @@ def run_bash(command: str) -> str:
     p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
     return (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
 
+# ── self-extension: the agent writes NEW tools for itself (Pi-style) ───────────
+# ⚠️ create_tool exec()s model-written code IN THIS PROCESS — scarier than
+# run_bash's subprocess. It's gated (perm-class "bash"); real isolation = Step 3.
+
+TOOLS_DIR = "tools"      # agent-written tools live here; auto-loaded on startup, so they persist
+
+def _load_tool(path: str) -> str:
+    """Import a tool file and register it. File must define TOOL(dict) + run(args)->str."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    spec = importlib.util.spec_from_file_location("talos_tool_" + name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)                       # runs the file -> defines TOOL + run
+    meta = mod.TOOL
+    if not callable(getattr(mod, "run", None)):
+        raise ValueError("工具文件必须定义 run(args) 函数")
+    TOOLS[name] = (mod.run, meta.get("parameters", {}), meta.get("required", []),
+                   meta["description"], "bash")
+    return name
+
+def create_tool(name: str, code: str) -> str:
+    path = os.path.join(TOOLS_DIR, name + ".py")
+    write_file(path, code)
+    _load_tool(path)                                   # load NOW so it's callable this turn
+    return f"工具 {name} 已创建并加载,现在可以直接调用它"
+
+def load_dynamic_tools() -> list:
+    """Load all previously-created tools on startup (skip broken ones)."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(TOOLS_DIR, "*.py"))):
+        try:
+            out.append(_load_tool(path))
+        except Exception:
+            pass
+    return out
+
 # Registry: name -> (fn, input-properties, required-keys, description, PERM-CLASS).
 # perm-class is one of: "read" (never gated) | "edit" (write/edit files) | "bash".
 TOOLS = {
@@ -128,6 +164,14 @@ TOOLS = {
         lambda a: run_bash(a["command"]),
         {"command": {"type": "string"}}, ["command"],
         "Run a shell command and return its combined stdout+stderr.", "bash",
+    ),
+    "create_tool": (
+        lambda a: create_tool(a["name"], a["code"]),
+        {"name": {"type": "string"}, "code": {"type": "string"}}, ["name", "code"],
+        "Create a NEW tool for yourself when no built-in tool fits the job. `code` is a full Python "
+        "file that defines TOOL = {'description': str, 'parameters': {<json-schema properties>}, "
+        "'required': [<param names>]} and def run(args: dict) -> str. After creating it, call the "
+        "new tool by its `name` on your next step.", "bash",
     ),
 }
 
@@ -334,6 +378,9 @@ def repl(resume=None) -> None:
 
     ui.banner(state["mode"], PROVIDER, model)
     ui.note(f"会话 {sess.sid}" + (f" · 续上 {len(messages)} 条消息" if messages else " · 存于 .talos/sessions/"))
+    made = load_dynamic_tools()                        # re-load tools the agent built in past sessions
+    if made:
+        ui.note(f"已加载 {len(made)} 个自建工具: {', '.join(made)}")
     while True:
         try:
             task = ui.read_task(state["mode"])

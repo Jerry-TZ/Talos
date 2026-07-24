@@ -76,6 +76,7 @@ it still runs directly on your machine. Only allow commands you understand.
 | 2 ✅ | **permission gate + terminal UI** | 你要的安全 |
 | 3 | **sandbox** — run tools inside Docker (no host mounts, limited net) | 你要的安全 |
 | 4 ✅ | **self-learning** — `reflect` writes `skills/*.md` + `memory.md`, loaded on demand (→ SELF_LEARNING.md) | Hermes (成长) |
+| ✅ | **self-extension** — `create_tool`: agent writes a new tool, loaded at runtime & persisted in `tools/` (Pi-style) | Pi (可定制) |
 | 5 | (optional) channels/web UI — only when you want phone/sharing | Hermes (全能) |
 
 ## Choosing a model / provider

@@ -10,6 +10,7 @@ env/
 # learned runtime state — un-ignore if you want to version the agent's knowledge
 memory.md
 skills/
+tools/
 .talos/
 
 # IDE
