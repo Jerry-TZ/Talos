@@ -341,6 +341,15 @@ def _reasoning(msg) -> str:
     extra = getattr(msg, "model_extra", None) or {}
     return str(extra.get("reasoning_content") or extra.get("reasoning") or "")
 
+def _usage(resp):
+    """Token usage from a response (0s if the provider doesn't report it). -> (in, out, cached)."""
+    u = getattr(resp, "usage", None)
+    if not u:
+        return (0, 0, 0)
+    d = getattr(u, "prompt_tokens_details", None)
+    cached = (getattr(d, "cached_tokens", 0) or 0) if d is not None else 0
+    return (getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0, cached)
+
 def _chat(client, **kwargs):
     """Call the model, retrying briefly on rate-limit / 'busy' / transient errors.
     Free tiers (esp. glm-4.7-flash) get congested — '当前模型用户多' is just a busy signal."""
@@ -374,16 +383,21 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
             recalled = ""
     system = (SYSTEM + ("\n\n" + learned if learned else "")
               + ("\n\n" + recalled if recalled else ""))
+    state.setdefault("tok", {"in": 0, "out": 0, "cached": 0})
+    turn = {"in": 0, "out": 0, "cached": 0}
     calls = steps = 0
     while True:
         steps += 1
         if steps > MAX_STEPS:                          # safety cap — don't spin forever
             state["last_calls"] = calls
+            state["last_tok"] = turn
             return f"(已到 {MAX_STEPS} 步上限,停下了 — 任务可能太大或卡在空转;拆小些、或 /compact 后再试。)"
         with ui.thinking():
             resp = _chat(client, model=model,
                          messages=[{"role": "system", "content": system}] + messages,
                          tools=tool_specs())
+        for _k, _v in zip(("in", "out", "cached"), _usage(resp)):
+            turn[_k] += _v; state["tok"][_k] += _v
         msg = resp.choices[0].message
         view = state.get("view", "normal")
         if view in ("verbose", "transcript"):
@@ -405,6 +419,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
 
         if not tool_calls:                              # no tool wanted -> final answer
             state["last_calls"] = calls
+            state["last_tok"] = turn
             return msg.content or ""
 
         for c in tool_calls:
@@ -551,6 +566,11 @@ def repl(resume=None) -> None:
             except Exception as e:
                 ui.error(e)
             continue
+        if task == "/tokens":
+            t = state.get("tok", {"in": 0, "out": 0, "cached": 0})
+            ui.note(f"本会话累计:输入 {t['in']} + 输出 {t['out']} = {t['in'] + t['out']} tok"
+                    + (f",缓存命中 {t['cached']}" if t.get("cached") else ""))
+            continue
         if task.startswith("/recall"):                 # 看联想回忆的激活分数
             try:
                 import recall
@@ -608,6 +628,10 @@ def repl(resume=None) -> None:
             ui.error(e)
             continue
         ui.answer(result)
+        _tk = state.get("last_tok") or {}
+        if _tk.get("in") or _tk.get("out"):
+            ui.note(f"🎫 本轮 {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
+                    + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
         _corr = _is_correction(task)
         if _corr or state.get("last_calls", 0) >= REFLECT_AFTER:
             ui.note("🧠 你纠正了它 — 复盘把这条教训记下…" if _corr
