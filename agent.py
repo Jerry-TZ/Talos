@@ -33,7 +33,7 @@ PROVIDERS = {
     "openai":   ("OPENAI_API_KEY",    None,                                                        "gpt-4o-mini"),
     "gemini":   ("GEMINI_API_KEY",    "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
     "deepseek": ("DEEPSEEK_API_KEY",  "https://api.deepseek.com/v1",                               "deepseek-chat"),
-    "glm":      ("ZHIPUAI_API_KEY",   "https://open.bigmodel.cn/api/paas/v4",                      "glm-4-flash"),
+    "glm":      ("ZHIPUAI_API_KEY",   "https://open.bigmodel.cn/api/paas/v4",                      "glm-4.7-flash"),
     "kimi":     ("MOONSHOT_API_KEY",  "https://api.moonshot.cn/v1",                                "moonshot-v1-8k"),
 }
 PROVIDER = os.environ.get("TALOS_PROVIDER", "claude").lower()
