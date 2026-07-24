@@ -296,6 +296,15 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
 
 # ── the loop (OpenAI-compatible chat format) ──────────────────────────────────
 
+def _reasoning(msg) -> str:
+    """A model's thinking, IF the provider returns it (reasoning models expose reasoning_content)."""
+    for a in ("reasoning_content", "reasoning"):
+        v = getattr(msg, a, None)
+        if v:
+            return str(v)
+    extra = getattr(msg, "model_extra", None) or {}
+    return str(extra.get("reasoning_content") or extra.get("reasoning") or "")
+
 def agent_turn(client, model: str, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
@@ -310,6 +319,13 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
                 tools=tool_specs(),
             )
         msg = resp.choices[0].message
+        view = state.get("view", "normal")
+        if view in ("verbose", "transcript"):
+            r = _reasoning(msg)
+            if r:
+                ui.think(r)                                # show the model's thinking, if any
+        if view == "transcript" and msg.content and (msg.tool_calls or []):
+            ui.assistant_text(msg.content)                 # inline commentary alongside tool calls
         tool_calls = msg.tool_calls or []
 
         entry = {"role": "assistant", "content": msg.content or ""}   # record the assistant turn
@@ -336,12 +352,14 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
             allowed, reason = check_permission(state, cls, name, args)
             if not allowed:
                 out, is_error = f"permission denied: {reason}", True
-                ui.denied(name, reason)
+                if view != "quiet":
+                    ui.denied(name, reason)
             elif name not in TOOLS:
                 out, is_error = f"error: unknown tool {name}", True
             else:
                 out, is_error = run_tool(name, args)
-                ui.show_tool(name, args, out, is_error)
+                if view != "quiet":
+                    ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
             messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
@@ -402,7 +420,7 @@ def repl(resume=None) -> None:
     else:
         sess = S.Session.new()
         messages = []
-    state = {"mode": "default", "allow": set()}   # ← permission state for the session
+    state = {"mode": "default", "allow": set(), "view": "normal"}   # ← permission + display state
 
     ui.banner(state["mode"], PROVIDER, model)
     ui.note(f"会话 {sess.sid}" + (f" · 续上 {len(messages)} 条消息" if messages else " · 存于 .talos/sessions/"))
@@ -425,6 +443,14 @@ def repl(resume=None) -> None:
                 ui.mode_set(arg)
             else:
                 ui.mode_help(state["mode"], MODES)
+            continue
+        if task.startswith("/show"):
+            arg = task[5:].strip()
+            if arg in ("quiet", "normal", "verbose", "transcript"):
+                state["view"] = arg
+                ui.note(f"显示模式 → {arg}")
+            else:
+                ui.note(f"当前显示: {state.get('view', 'normal')}。可选: quiet · normal · verbose · transcript")
             continue
         if task == "/reflect":
             reflect(client, model, messages, state)

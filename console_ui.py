@@ -37,7 +37,7 @@ def banner(mode: str, provider: str, model: str) -> None:
         Text.assemble(("Talos ", f"bold {C_MODEL}"), ("· 最小自学习编程 agent", "dim")),
         border_style=C_MODEL, padding=(0, 2)))
     console.print(f"[dim]模型[/] [bold {C_CODE}]{provider}[/] · {model}    "
-                  "[dim]命令[/] [bold]/mode[/]·[bold]/reflect[/]·[bold]/consolidate[/]·[bold]/history[/]·[bold]/compact[/]·[bold]quit[/]")
+                  "[dim]命令[/] [bold]/mode[/]·[bold]/show[/]·[bold]/reflect[/]·[bold]/consolidate[/]·[bold]/history[/]·[bold]/compact[/]·[bold]quit[/]")
     console.print("[dim]权限档: plan(只读)·default(每次问)·acceptEdits(自动改文件)·bypass(全放行)   "
                   "自学习: 复杂任务后自动复盘并存 skills/[/]\n")
 
@@ -48,11 +48,21 @@ def thinking():
     """上下文管理器:模型思考时转个圈。"""
     return console.status(f"[{C_MODEL}]模型思考中…[/]", spinner="dots")
 
-def show_tool(name: str, args: dict, result: str, is_error: bool) -> None:
+def show_tool(name: str, args: dict, result: str, is_error: bool, full: bool = False) -> None:
     mark = "[red]✗[/]" if is_error else f"[{C_CODE}]⚙[/]"
-    console.print(f"  {mark} [{C_CODE}]{name}[/][dim]({escape(_short(args))})[/]")
+    argstr = escape(str(args) if full else _short(args))
+    console.print(f"  {mark} [{C_CODE}]{name}[/][dim]({argstr})[/]")
     if result:
-        console.print(Text(_short(result, 240), style=("red" if is_error else "dim")), highlight=False)
+        shown = result if full else _short(result, 240)
+        console.print(Text(shown, style=("red" if is_error else "dim")), highlight=False)
+
+def think(text: str) -> None:
+    console.print(Panel(Text(text.strip()), border_style="grey42", title="💭 思考", title_align="left"))
+
+def assistant_text(text: str) -> None:
+    line = Text("🤖 ", style=C_MODEL)
+    line.append(text)
+    console.print(line)
 
 def preview(name: str, args: dict) -> None:
     console.print(f"  [bold]● {name}[/] 想执行:")
