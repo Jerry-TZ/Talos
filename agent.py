@@ -64,6 +64,7 @@ SYSTEM = (
 )
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
+MAX_STEPS = 25       # loop safety cap: stop after this many model round-trips (guards against 空转)
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 _RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
@@ -329,8 +330,12 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
     learned = retrieve()                               # inject memory + skill descriptions
     system = SYSTEM + ("\n\n" + learned if learned else "")
-    calls = 0
+    calls = steps = 0
     while True:
+        steps += 1
+        if steps > MAX_STEPS:                          # safety cap — don't spin forever
+            state["last_calls"] = calls
+            return f"(已到 {MAX_STEPS} 步上限,停下了 — 任务可能太大或卡在空转;拆小些、或 /compact 后再试。)"
         with ui.thinking():
             resp = _chat(client, model=model,
                          messages=[{"role": "system", "content": system}] + messages,
