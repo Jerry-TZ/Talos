@@ -73,6 +73,9 @@ def preview(name: str, args: dict) -> None:
 def ask() -> str:
     return console.input(r"  [yellow]允许? \[y]一次  \[a]本会话都允许该工具  \[N]拒绝(默认) ›[/] ").strip()
 
+def ask_yes(prompt: str) -> bool:
+    return console.input(f"  [yellow]{escape(prompt)} \\[y/N] ›[/] ").strip().lower() == "y"
+
 def denied(name: str, reason: str) -> None:
     console.print(f"  [red]⛔ {name} 被拒绝 — {reason}[/]")
 
@@ -97,11 +100,13 @@ def sessions_list(rows) -> None:
     import time as _t
     t = Table(title="历史会话 (.talos/sessions/)", title_style=f"bold {C_MODEL}",
               title_justify="left", border_style="dim")
-    t.add_column("会话 id"); t.add_column("时间"); t.add_column("条", justify="right"); t.add_column("开头")
-    for sid, mtime, first, n in rows:
+    t.add_column("#", justify="right"); t.add_column("会话 id"); t.add_column("时间")
+    t.add_column("条", justify="right"); t.add_column("标题 / 开头")
+    for i, (sid, mtime, first, n) in enumerate(rows, 1):
         head = (first[:36] + "…") if len(first) > 36 else (first or "—")
-        t.add_row(sid, _t.strftime("%m-%d %H:%M", _t.localtime(mtime)), str(n), head)
+        t.add_row(str(i), sid, _t.strftime("%m-%d %H:%M", _t.localtime(mtime)), str(n), head)
     console.print(t)
+    console.print("[dim]  /resume <#或id> 继续 · /view <#> 看内容 · /delete <#> 删除[/]")
 
 def show_session(messages) -> None:
     if not messages:

@@ -368,8 +368,8 @@ def repl(resume=None) -> None:
     import session as S                  # local conversation storage (Claude-Code-style)
     client, model = make_client()        # OpenAI-compatible client for the chosen provider
     if resume is not None:               # --continue (latest) / --resume <id>
-        sid = S.latest_sid() if resume is True else resume
-        sess = S.Session(sid) if sid else S.Session.new()
+        sid = S.latest_sid() if resume is True else S.resolve(resume)
+        sess = S.open_session(sid) if sid else S.Session.new()
         messages: list = sess.load()
     else:
         sess = S.Session.new()
@@ -414,6 +414,30 @@ def repl(resume=None) -> None:
                 sess.save(messages)
             except Exception as e:
                 ui.error(e)
+            continue
+        if task.startswith("/view"):
+            sid = S.resolve(task[5:])
+            ui.show_session(S.open_session(sid).load() if sid else [])
+            continue
+        if task.startswith("/resume"):
+            sid = S.resolve(task[7:])
+            if sid:
+                sess = S.open_session(sid)
+                messages[:] = sess.load()
+                ui.note(f"已切到会话 {sess.sid} · {len(messages)} 条消息,可继续编辑")
+            else:
+                ui.note("没找到该会话 — 用 /history 看编号")
+            continue
+        if task.startswith("/delete"):
+            sid = S.resolve(task[7:])
+            if not sid:
+                ui.note("没找到该会话 — 用 /history 看编号")
+            elif ui.ask_yes(f"确认删除会话 {sid}?(不可恢复)"):
+                if sid == sess.sid:                    # 删的是当前会话 → 开一个新空会话
+                    sess = S.Session.new()
+                    messages[:] = []
+                S.delete(sid)
+                ui.note(f"已删除 {sid}")
             continue
         mark = len(messages)
         messages.append({"role": "user", "content": task})
@@ -489,8 +513,13 @@ if __name__ == "__main__":
     elif "--view" in argv:
         import console_ui as ui, session as S
         i = argv.index("--view")
-        sid = argv[i + 1] if len(argv) > i + 1 else S.latest_sid()
-        ui.show_session(S.Session(sid).load() if sid else [])
+        sid = S.resolve(argv[i + 1]) if len(argv) > i + 1 else S.latest_sid()
+        ui.show_session(S.open_session(sid).load() if sid else [])
+    elif "--delete" in argv:
+        import session as S
+        i = argv.index("--delete")
+        sid = S.resolve(argv[i + 1]) if len(argv) > i + 1 else None
+        print(f"deleted {sid}" if (sid and S.delete(sid)) else "not found")
     elif "--continue" in argv:
         repl(resume=True)
     elif "--resume" in argv:
