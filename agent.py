@@ -97,9 +97,22 @@ def _in_workspace(path: str) -> str:
         raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})")
     return full
 
-def read_file(path: str) -> str:
+READ_MAX_LINES = 250   # cap lines returned to the model (token saver); page with offset/limit
+BASH_MAX_CHARS = 4000  # cap run_bash output sent to the model
+
+def _read_full(path: str) -> str:
     with open(_in_workspace(path), "r", encoding="utf-8") as f:
         return f.read()
+
+def read_file(path: str, offset: int = 0, limit=None) -> str:
+    lines = _read_full(path).splitlines(keepends=True)
+    total = len(lines)
+    start = max(0, offset)
+    end = min(total, start + limit) if limit is not None else min(total, start + READ_MAX_LINES)
+    out = "".join(lines[start:end])
+    if start > 0 or end < total:
+        out += f"\n…(显示第 {start + 1}-{end} 行 / 共 {total} 行;用 offset/limit 翻页,或 grep 定位)"
+    return out
 
 def write_file(path: str, content: str) -> str:
     full = _in_workspace(path)
@@ -109,7 +122,7 @@ def write_file(path: str, content: str) -> str:
     return f"wrote {len(content)} chars to {path}"
 
 def edit_file(path: str, old: str, new: str) -> str:
-    text = read_file(path)
+    text = _read_full(path)                             # FULL read — a truncated read would corrupt the edit
     n = text.count(old)
     if n == 0:
         raise ValueError("`old` string not found in file")
@@ -123,7 +136,10 @@ def run_bash(command: str) -> str:
     # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
     import subprocess
     p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
-    return (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
+    out = (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
+    if len(out) > BASH_MAX_CHARS:
+        out = out[:BASH_MAX_CHARS] + f"\n…(输出共 {len(out)} 字符,已截断到 {BASH_MAX_CHARS};用更精确的命令/grep 缩小范围)"
+    return out
 
 # ── self-extension: the agent writes NEW tools for itself (Pi-style) ───────────
 # ⚠️ create_tool exec()s model-written code IN THIS PROCESS — scarier than
@@ -182,9 +198,12 @@ def spawn_subagent(task: str) -> str:
 # perm-class is one of: "read" (never gated) | "edit" (write/edit files) | "bash".
 TOOLS = {
     "read_file": (
-        lambda a: read_file(a["path"]),
-        {"path": {"type": "string"}}, ["path"],
-        "Read a text file and return its contents.", "read",
+        lambda a: read_file(a["path"], a.get("offset", 0), a.get("limit")),
+        {"path": {"type": "string"},
+         "offset": {"type": "integer", "description": "起始行(0 起),用于分页"},
+         "limit": {"type": "integer", "description": "读多少行;省略则用默认上限"}},
+        ["path"],
+        "Read a text file. Long files are truncated — use offset/limit to page to the part you need.", "read",
     ),
     "write_file": (
         lambda a: write_file(a["path"], a["content"]),
@@ -262,14 +281,14 @@ def retrieve() -> str:
     read_file. So context cost = memory + N one-liners, NOT N full skills."""
     parts = []
     if os.path.exists(MEMORY_FILE):
-        mem = read_file(MEMORY_FILE).strip()
+        mem = _read_full(MEMORY_FILE).strip()
         if mem:
             parts.append("# 记住的事实 (memory.md)\n" + mem)
     skills = sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md")))
     if skills:
         lines = []
         for path in skills:
-            meta, _ = _parse_frontmatter(read_file(path))
+            meta, _ = _parse_frontmatter(_read_full(path))
             name = meta.get("name") or os.path.splitext(os.path.basename(path))[0]
             lines.append(f"- {name} — {meta.get('description', '')}  (需要时 read_file `{path}` 看步骤)")
         parts.append("# 可用技能 (skills/) — 相关时才读正文\n" + "\n".join(lines))
@@ -445,6 +464,15 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
     return [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary},
             {"role": "assistant", "content": "了解,以上是之前的进展,我们继续。"}]
 
+def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
+    """Stub OLD, bulky tool outputs in place so they stop getting resent every step (token saver).
+    Keeps the last `keep` messages untouched. Note: this rewrites saved history (/view shows stubs)."""
+    old = messages[:-keep] if len(messages) > keep else []
+    for m in old:
+        if (m.get("role") == "tool" and isinstance(m.get("content"), str)
+                and len(m["content"]) > 600 and not m["content"].startswith("[已省略")):
+            m["content"] = f"[已省略工具输出,{len(m['content'])} 字符 — 需要就重新读]"
+
 def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
@@ -549,6 +577,7 @@ def repl(resume=None) -> None:
             messages[:] = maybe_compact(client, model, messages)   # auto-compact if history got long
         except Exception as e:
             ui.error(e)
+        _prune_old_tool_results(messages)                          # stub old bulky tool outputs (token saver)
         sess.save(messages)                                        # persist after every turn
 
 # ── offline self-check (no key / no deps):  python agent.py --selfcheck ────────
