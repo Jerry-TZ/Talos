@@ -81,6 +81,13 @@ def answer(text: str) -> None:
 def note(text: str) -> None:
     console.print(f"[dim]  {text}[/]")
 
+def error(e) -> None:
+    msg = str(e)
+    if len(msg) > 320:
+        msg = msg[:320] + " …"
+    console.print(Panel(msg, border_style="red", title=f"⚠ {type(e).__name__}", title_align="left"))
+    console.print("[dim]  常见原因: key 错 · 额度用尽(429)· 模型名不对(404)· 网络。可换 TALOS_MODEL / TALOS_PROVIDER 再试。[/]")
+
 def mode_set(mode: str) -> None:
     console.print(f"  [green]→ 已切到 {mode}[/]\n")
 

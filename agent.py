@@ -313,12 +313,21 @@ def repl() -> None:
             ui.note("🧹 整理技能中…")
             consolidate(client, model, state)
             continue
+        mark = len(messages)
         messages.append({"role": "user", "content": task})
-        result = agent_turn(client, model, messages, state)
+        try:
+            result = agent_turn(client, model, messages, state)
+        except Exception as e:
+            del messages[mark:]                    # roll back the failed turn; keep history valid
+            ui.error(e)
+            continue
         ui.answer(result)
         if state.get("last_calls", 0) >= REFLECT_AFTER:
             ui.note(f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
-            reflect(client, model, messages, state)
+            try:
+                reflect(client, model, messages, state)
+            except Exception as e:
+                ui.error(e)
 
 # ── offline self-check (no key / no deps):  python agent.py --selfcheck ────────
 
