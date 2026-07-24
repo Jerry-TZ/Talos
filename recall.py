@@ -113,16 +113,78 @@ def _activate(nodes: list, edges: dict, query: str) -> dict:
         act = nxt
     return act
 
-def explain(query: str, k: int = 8) -> list:
-    """[(score, kind, text), ...] top-k —— 给 /recall 调试用,能看到激活扩散的结果。"""
+def _rank(query: str):
     nodes = _load_nodes()
     act = _activate(nodes, _edges(nodes), query)
-    ranked = sorted(act.items(), key=lambda x: -x[1])
-    return [(round(a, 2), nodes[i]["kind"], nodes[i]["text"]) for i, a in ranked if a > THRESH][:k]
+    ranked = [(round(a, 2), i) for i, a in sorted(act.items(), key=lambda x: -x[1]) if a > THRESH]
+    return nodes, ranked
+
+def explain(query: str, k: int = 8) -> list:
+    """[(score, kind, text), ...] top-k —— 给 /recall 调试用(无副作用)。"""
+    nodes, ranked = _rank(query)
+    return [(a, nodes[i]["kind"], nodes[i]["text"]) for a, i in ranked][:k]
 
 def recall(query: str, k: int = 5) -> str:
-    """要注入上下文的"联想到的相关记忆"文本块(没有就返回空串)。"""
-    rows = explain(query, k)
-    if not rows:
+    """注入上下文的"联想记忆"文本块;顺便记录命中(供 usage-based 遗忘)。"""
+    nodes, ranked = _rank(query)
+    top = ranked[:k]
+    _record_usage(nodes, {_key(nodes[i]) for _a, i in top})
+    if not top:
         return ""
-    return "# 回忆(联想到的相关记忆)\n" + "\n".join(f"- [{kind}] {text}" for _s, kind, text in rows)
+    return "# 回忆(联想到的相关记忆)\n" + "\n".join(f"- [{nodes[i]['kind']}] {nodes[i]['text']}" for _a, i in top)
+
+# ── usage tracking:让"用没用到"决定记忆去留 ─────────────────────────────────────
+HITS_FILE = os.path.join(".talos", "recall_hits.json")
+
+def _key(node: dict) -> str:
+    return node["kind"] + ":" + node["text"][:80]
+
+def _load_hits() -> dict:
+    try:
+        with open(HITS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _record_usage(nodes: list, recalled: set) -> None:
+    h = _load_hits()
+    for n in nodes:
+        if n["kind"] in ("事实", "技能"):          # 只统计知识;往事(会话)是原始记录,不参与遗忘
+            k = _key(n)
+            seen, hits = h.get(k, [0, 0])
+            h[k] = [seen + 1, hits + (1 if k in recalled else 0)]
+    try:
+        os.makedirs(os.path.dirname(HITS_FILE), exist_ok=True)
+        with open(HITS_FILE, "w", encoding="utf-8") as f:
+            json.dump(h, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+def dead(min_seen: int = 8) -> list:
+    """[(kind, text), ...] —— 出现过 >= min_seen 次、却从没被想起的知识 = 死重。"""
+    h = _load_hits()
+    out = []
+    for n in _load_nodes():
+        if n["kind"] in ("事实", "技能"):
+            seen, hits = h.get(_key(n), [0, 0])
+            if seen >= min_seen and hits == 0:
+                out.append((n["kind"], n["text"]))
+    return out
+
+def forget(items: list) -> None:
+    """删掉这些从没被想起的事实(从 memory.md 移除行)和技能(删文件)。"""
+    facts = {t for k, t in items if k == "事实"}
+    skills = {t for k, t in items if k == "技能"}
+    if facts and os.path.exists(MEMORY_FILE):
+        with open(MEMORY_FILE, encoding="utf-8") as f:
+            lines = f.readlines()
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            f.writelines(ln for ln in lines if ln.strip().lstrip("-*# ").strip() not in facts)
+    for p in glob.glob(os.path.join(SKILLS_DIR, "*.md")):
+        try:
+            with open(p, encoding="utf-8") as f:
+                doomed = _frontmatter_desc(f.read()) in skills
+            if doomed:
+                os.remove(p)
+        except Exception:
+            pass

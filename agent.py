@@ -483,6 +483,13 @@ def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
                 and len(m["content"]) > 600 and not m["content"].startswith("[已省略")):
             m["content"] = f"[已省略工具输出,{len(m['content'])} 字符 — 需要就重新读]"
 
+_CORRECTION_MARKERS = ("不对", "错了", "搞错", "不是这样", "不应该", "不该", "重来", "别这样",
+                       "不是这个", "写错", "wrong", "incorrect", "not what", "should have", "instead")
+def _is_correction(text: str) -> bool:
+    """用户在纠正吗?—— 最强的'该记下教训'信号。关键词启发式;误判 = 多复盘一次,无害。"""
+    t = (text or "").lower()
+    return any(m in t for m in _CORRECTION_MARKERS)
+
 def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
@@ -556,6 +563,18 @@ def repl(resume=None) -> None:
             else:
                 ui.note("没联想到相关记忆(关键词没匹配上,或长期记忆还太少)")
             continue
+        if task == "/forget":                          # usage-based 遗忘:删从没被想起过的死记忆
+            import recall
+            d = recall.dead()
+            if not d:
+                ui.note("没有'见过多次却从没被想起'的死记忆(或使用数据还不够)")
+                continue
+            for kind, text in d:
+                ui.note(f"[{kind}] {text}")
+            if ui.ask_yes(f"删掉这 {len(d)} 条从没被想起的记忆?(不可恢复)"):
+                recall.forget(d)
+                ui.note(f"已遗忘 {len(d)} 条")
+            continue
         if task.startswith("/view"):
             sid = S.resolve(task[5:])
             ui.show_session(S.open_session(sid).load() if sid else [])
@@ -589,8 +608,10 @@ def repl(resume=None) -> None:
             ui.error(e)
             continue
         ui.answer(result)
-        if state.get("last_calls", 0) >= REFLECT_AFTER:
-            ui.note(f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
+        _corr = _is_correction(task)
+        if _corr or state.get("last_calls", 0) >= REFLECT_AFTER:
+            ui.note("🧠 你纠正了它 — 复盘把这条教训记下…" if _corr
+                    else f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
             try:
                 reflect(client, model, messages, state)
             except Exception as e:
