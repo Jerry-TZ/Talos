@@ -39,6 +39,9 @@ MODEL = "claude-opus-4-8"     # cheap tinkering: swap to "claude-haiku-4-5"
 MAX_TOKENS = 16000
 REFLECT_AFTER = 5             # after a task with >= this many tool calls, auto-run a learning pass
 
+ui = None                    # 界面 handle, set by repl() via `import console_ui`. Kept out of
+                             # module scope so `--selfcheck` stays dependency-free (no rich needed).
+
 SYSTEM = (
     "You are Talos, a minimal coding agent working inside the user's project "
     "directory. Use the tools to read, write, and edit files and to run shell "
@@ -172,24 +175,6 @@ def _policy(mode: str, cls: str, name: str, allow: set) -> str:
     if name in allow:                               return "allow"   # user chose "allow this tool"
     return "ask"
 
-# tiny ANSI color layer (auto-off when output isn't a terminal)
-_COLOR = False
-DIM, RED, GREEN, CYAN, YELLOW, BOLD = "2", "31", "32", "36", "33", "1"
-def paint(s: str, code: str) -> str:
-    return f"\033[{code}m{s}\033[0m" if _COLOR else s
-
-def _preview(name: str, args: dict) -> str:
-    if name == "run_bash":
-        return "    " + paint("$ " + args.get("command", ""), CYAN)
-    if name == "write_file":
-        c = args.get("content", "")
-        return f"    写入 {args.get('path', '?')} ({len(c)} chars)\n      " + paint(_short(c, 100), DIM)
-    if name == "edit_file":
-        return (f"    改 {args.get('path', '?')}\n"
-                f"      " + paint("- " + _short(args.get("old", "")), RED) + "\n"
-                f"      " + paint("+ " + _short(args.get("new", "")), GREEN))
-    return f"    {name}({_short(args)})"
-
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
     decision = _policy(state["mode"], cls, name, state["allow"])
@@ -198,10 +183,9 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     if decision == "deny":
         return False, f"{state['mode']} 模式禁止 {cls} 操作"
     # decision == "ask"
-    print(paint(f"  ● {name} 想执行:", BOLD))
-    print(_preview(name, args))
+    ui.preview(name, args)
     try:
-        ans = input(paint("  允许? [y]一次  [a]本会话都允许该工具  [N]拒绝(默认) › ", YELLOW)).strip()
+        ans = ui.ask()
     except (KeyboardInterrupt, EOFError):
         return False, "用户中断"
     low = ans.lower()
@@ -222,10 +206,11 @@ def agent_turn(client, messages: list, state: dict) -> str:
     system = SYSTEM + ("\n\n" + learned if learned else "")
     calls = 0
     while True:
-        reply = client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS,
-            system=system, tools=tool_specs(), messages=messages,
-        )
+        with ui.thinking():
+            reply = client.messages.create(
+                model=MODEL, max_tokens=MAX_TOKENS,
+                system=system, tools=tool_specs(), messages=messages,
+            )
         messages.append({"role": "assistant", "content": reply.content})
 
         if reply.stop_reason != "tool_use":     # no tool wanted -> final answer
@@ -240,11 +225,10 @@ def agent_turn(client, messages: list, state: dict) -> str:
                 allowed, reason = check_permission(state, cls, block.name, block.input)
                 if not allowed:
                     out, is_error = f"permission denied: {reason}", True
-                    print("  " + paint(f"⛔ {block.name} 被拒绝 — {reason}", RED))
+                    ui.denied(block.name, reason)
                 else:
                     out, is_error = run_tool(block.name, block.input)
-                    mark = paint("✗", RED) if is_error else paint("⚙", GREEN)
-                    print(f"  {mark} {block.name}({_short(block.input)}) -> {_short(out)}")
+                    ui.show_tool(block.name, block.input, out, is_error)
                 results.append({
                     "type": "tool_result", "tool_use_id": block.id,
                     "content": out, "is_error": is_error,
@@ -275,24 +259,19 @@ def reflect(client, messages: list, state: dict) -> str:
 def consolidate(client, state: dict) -> str:
     return agent_turn(client, [{"role": "user", "content": CONSOLIDATE_PROMPT}], state)
 
-def _short(x, n: int = 70) -> str:
-    s = str(x).replace("\n", " ")
-    return s if len(s) <= n else s[:n] + "…"
-
 def repl() -> None:
+    global ui
+    import console_ui as ui             # the 界面 (needs rich); lazy so --selfcheck stays dep-free
     import anthropic                     # only talking to the model needs the SDK
     client = anthropic.Anthropic()      # reads ANTHROPIC_API_KEY from the env
     messages: list = []                 # ← this list IS the memory; it grows every turn
     state = {"mode": "default", "allow": set()}   # ← permission state for the session
 
-    print("Talos (Step 4). 输入任务,`quit` 退出。命令: `/mode` 权限档 · `/reflect` 立即复盘 · `/consolidate` 整理技能。\n")
-    print(paint("  权限档: plan(只读) · default(每次问) · acceptEdits(自动放行改文件) · bypass(全放行)", DIM))
-    print(paint("  自学习: 复杂任务后自动复盘,把学到的存进 skills/ 和 memory.md(写盘也走权限门)\n", DIM))
+    ui.banner(state["mode"])
     while True:
         try:
-            task = input(paint(f"你 ({state['mode']}) › ", BOLD)).strip()
+            task = ui.read_task(state["mode"])
         except (EOFError, KeyboardInterrupt):
-            print()
             break
         if task in ("quit", "exit"):
             break
@@ -302,22 +281,22 @@ def repl() -> None:
             arg = task[5:].strip()
             if arg in MODES:
                 state["mode"] = arg
-                print(paint(f"  → 已切到 {arg}\n", GREEN))
+                ui.mode_set(arg)
             else:
-                print(paint(f"  当前: {state['mode']}。可选: {' · '.join(MODES)}\n", DIM))
+                ui.mode_help(state["mode"], MODES)
             continue
         if task == "/reflect":
             reflect(client, messages, state)
             continue
         if task == "/consolidate":
-            print(paint("  🧹 整理技能中…", DIM))
+            ui.note("🧹 整理技能中…")
             consolidate(client, state)
             continue
         messages.append({"role": "user", "content": task})
-        answer = agent_turn(client, messages, state)
-        print(f"\n🤖 {answer}\n")
+        result = agent_turn(client, messages, state)
+        ui.answer(result)
         if state.get("last_calls", 0) >= REFLECT_AFTER:
-            print(paint(f"  🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…", DIM))
+            ui.note(f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
             reflect(client, messages, state)
 
 # ── offline self-check (no API key needed):  python agent.py --selfcheck ───────
@@ -358,17 +337,9 @@ def _selfcheck() -> None:
 
 if __name__ == "__main__":
     try:
-        sys.stdout.reconfigure(encoding="utf-8")   # Windows consoles default to GBK; emoji/CJK would crash
+        sys.stdout.reconfigure(encoding="utf-8")   # selfcheck prints emoji; rich manages its own console
     except Exception:
         pass
-    if os.name == "nt":                            # enable ANSI colors on Windows terminals
-        try:
-            import ctypes
-            k = ctypes.windll.kernel32
-            k.SetConsoleMode(k.GetStdHandle(-11), 7)
-        except Exception:
-            pass
-    _COLOR = sys.stdout.isatty()
     if "--selfcheck" in sys.argv:
         _selfcheck()
     else:
