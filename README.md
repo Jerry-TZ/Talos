@@ -78,10 +78,28 @@ it still runs directly on your machine. Only allow commands you understand.
 | 4 ✅ | **self-learning** — `reflect` writes `skills/*.md` + `memory.md`, loaded on demand (→ SELF_LEARNING.md) | Hermes (成长) |
 | 5 | (optional) channels/web UI — only when you want phone/sharing | Hermes (全能) |
 
-## Swapping the model
+## Choosing a model / provider
 
-Everything lives behind one `client.messages.create(...)` call. To use a free
-**Gemini** key instead, that one function changes (Gemini's SDK + tool-call
-field shapes differ); the loop, tools, memory, and permission gate stay identical.
+Talos talks to every model through the **OpenAI-compatible** API, so switching
+providers is config, not code — one loop drives all of them.
+
+```bash
+# 例:用 DeepSeek(PowerShell 用 $env:NAME="...")
+export TALOS_PROVIDER=deepseek
+export DEEPSEEK_API_KEY=sk-...
+python agent.py
+```
+
+| TALOS_PROVIDER | key env var | 默认模型(用 `TALOS_MODEL` 覆盖) |
+|---|---|---|
+| `claude` (默认) | `ANTHROPIC_API_KEY` | claude-haiku-4-5-20251001 |
+| `openai` | `OPENAI_API_KEY` | gpt-4o-mini |
+| `gemini` | `GEMINI_API_KEY` | gemini-2.0-flash |
+| `deepseek` | `DEEPSEEK_API_KEY` | deepseek-chat |
+| `glm` (智谱) | `ZHIPUAI_API_KEY` | glm-4-flash |
+| `kimi` (Moonshot) | `MOONSHOT_API_KEY` | moonshot-v1-8k |
+
+模型名常变 —— 默认模型若报错,`TALOS_MODEL=<确切模型名>` 覆盖即可。base_url 都写死在
+`agent.py` 的 `PROVIDERS` 里,加新厂商 = 加一行。
 
 The Pi source is cloned in `../PI_Agent` for reference.

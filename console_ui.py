@@ -30,12 +30,12 @@ C_MODEL = "medium_purple"
 C_CODE = "dark_orange"
 C_YOU = "turquoise2"
 
-def banner(mode: str) -> None:
+def banner(mode: str, provider: str, model: str) -> None:
     console.print(Panel.fit(
         Text.assemble(("Talos ", f"bold {C_MODEL}"), ("· 最小自学习编程 agent", "dim")),
         border_style=C_MODEL, padding=(0, 2)))
-    console.print("[dim]命令[/]  [bold]/mode[/] 权限档 · [bold]/reflect[/] 复盘 · "
-                  "[bold]/consolidate[/] 整理技能 · [bold]quit[/] 退出")
+    console.print(f"[dim]模型[/] [bold {C_CODE}]{provider}[/] · {model}    "
+                  "[dim]命令[/] [bold]/mode[/]·[bold]/reflect[/]·[bold]/consolidate[/]·[bold]quit[/]")
     console.print("[dim]权限档: plan(只读)·default(每次问)·acceptEdits(自动改文件)·bypass(全放行)   "
                   "自学习: 复杂任务后自动复盘并存 skills/[/]\n")
 

@@ -1,46 +1,42 @@
 """
-Talos — a minimal, self-extending coding agent.  [STEP 4: self-learning]
+Talos — a minimal, self-extending coding agent.  [multi-provider]
 
-The core loop is unchanged from Step 1:
+The core loop never changed:
 
     你 ──▶ 模型(只是"说") ──▶ 代码执行工具("做") ──▶ 结果回传 ──▶ … ──▶ 回答
                      └──────────────── 循环,直到模型不再要工具 ─────────────┘
 
-Step 2 adds a **permission gate modeled on Claude Code** — 4 permission *tiers*
-(modes) plus a per-call approve/deny prompt. Reads are never gated; anything that
-mutates (write / edit / run_bash) is previewed and must be approved.
+Talos talks to any model through the **OpenAI-compatible** chat API, so ONE code
+path drives Claude / GPT / Gemini / DeepSeek / GLM / Kimi. Pick a provider with
+the TALOS_PROVIDER env var (default "claude"); each reads its own *_API_KEY.
 
-权限分级 (the tiers), exactly like Claude Code's modes:
+  权限分级 (Claude-Code-style tiers), /mode 切换:  plan · default · acceptEdits · bypass
+  自学习: 复杂任务后 reflect 写 skills/*.md + memory.md,下次自动加载 (见 SELF_LEARNING.md)
+  界面: 终端 UI 在 console_ui.py (rich);内核不直接 print。
 
-    plan         只读:拒绝一切改动(写/改/命令),适合先规划
-    default      每次改动都先问你 (y/a/N)          ← 启动默认
-    acceptEdits  自动放行 写/改文件,但命令(bash)仍要问
-    bypass       全部放行(危险,"yolo")
-
-Step 4 adds **self-learning**: after a substantive task the agent reflects and
-writes reusable *skills* (skills/*.md) or durable *facts* (memory.md) for itself,
-then loads them next time. Learning = notes-to-self, not model training; every
-save goes through the same permission gate. See SELF_LEARNING.md.
-
-⚠️  SAFETY: the gate is a CHECK, not a sandbox. Once you approve a run_bash, it
-    still runs on your real machine. This matches Claude Code on native Windows
-    (no OS sandbox there either — the permission prompt IS the protection).
-    Real isolation = a later step (WSL2/Docker), only when you actually need it.
+⚠️  SAFETY: the permission gate is a CHECK, not a sandbox. Once you allow a
+    run_bash it runs on your real machine. Real isolation = a later step.
 """
 
 from __future__ import annotations
 
 import glob
+import json
 import os
-import subprocess
 import sys
 
-MODEL = "claude-opus-4-8"     # cheap tinkering: swap to "claude-haiku-4-5"
-MAX_TOKENS = 16000
-REFLECT_AFTER = 5             # after a task with >= this many tool calls, auto-run a learning pass
-
-ui = None                    # 界面 handle, set by repl() via `import console_ui`. Kept out of
-                             # module scope so `--selfcheck` stays dependency-free (no rich needed).
+# ── providers: 大家都讲 OpenAI 兼容 API,只有 base_url + 模型名不同 ────────────────
+# base_url 稳定;模型名常变 —— 用 TALOS_MODEL 环境变量覆盖成你有权限的那个。
+PROVIDERS = {
+    #  name        key 环境变量          base_url (None = OpenAI 官方)                                默认模型
+    "claude":   ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/",                            "claude-haiku-4-5-20251001"),
+    "openai":   ("OPENAI_API_KEY",    None,                                                        "gpt-4o-mini"),
+    "gemini":   ("GEMINI_API_KEY",    "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
+    "deepseek": ("DEEPSEEK_API_KEY",  "https://api.deepseek.com/v1",                               "deepseek-chat"),
+    "glm":      ("ZHIPUAI_API_KEY",   "https://open.bigmodel.cn/api/paas/v4",                      "glm-4-flash"),
+    "kimi":     ("MOONSHOT_API_KEY",  "https://api.moonshot.cn/v1",                                "moonshot-v1-8k"),
+}
+PROVIDER = os.environ.get("TALOS_PROVIDER", "claude").lower()
 
 SYSTEM = (
     "You are Talos, a minimal coding agent working inside the user's project "
@@ -50,6 +46,20 @@ SYSTEM = (
     "your approach or ask the user. When the task is done, reply with a one- or "
     "two-sentence summary of what you did."
 )
+REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
+
+ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
+
+def make_client():
+    """Build an OpenAI-compatible client for the selected provider. Returns (client, model)."""
+    if PROVIDER not in PROVIDERS:
+        raise SystemExit(f"未知 TALOS_PROVIDER: {PROVIDER}。可选: {', '.join(PROVIDERS)}")
+    key_env, base_url, default_model = PROVIDERS[PROVIDER]
+    key = os.environ.get(key_env)
+    if not key:
+        raise SystemExit(f"缺少环境变量 {key_env} —— 设置你的 {PROVIDER} API key(或换 TALOS_PROVIDER)")
+    from openai import OpenAI                       # lazy: only needed to actually talk to a model
+    return OpenAI(api_key=key, base_url=base_url), (os.environ.get("TALOS_MODEL") or default_model)
 
 # ── tools: just plain Python functions ────────────────────────────────────────
 
@@ -74,14 +84,14 @@ def edit_file(path: str, old: str, new: str) -> str:
     return f"edited {path}"
 
 def run_bash(command: str) -> str:
-    # ponytail: runs on the HOST, unsandboxed. The permission gate below is the
-    # guard for now; real isolation (WSL2/Docker) is a later step, if ever needed.
+    # ponytail: runs on the HOST, unsandboxed. The permission gate is the guard
+    # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
+    import subprocess
     p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
     return (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
 
 # Registry: name -> (fn, input-properties, required-keys, description, PERM-CLASS).
 # perm-class is one of: "read" (never gated) | "edit" (write/edit files) | "bash".
-# Adding a tool = adding one row; its perm-class decides how the gate treats it.
 TOOLS = {
     "read_file": (
         lambda a: read_file(a["path"]),
@@ -107,12 +117,13 @@ TOOLS = {
 }
 
 def tool_specs() -> list[dict]:
+    """OpenAI-compatible function-tool schema."""
     return [
-        {
+        {"type": "function", "function": {
             "name": name,
             "description": desc,
-            "input_schema": {"type": "object", "properties": props, "required": required},
-        }
+            "parameters": {"type": "object", "properties": props, "required": required},
+        }}
         for name, (_fn, props, required, desc, _cls) in TOOLS.items()
     ]
 
@@ -144,9 +155,8 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
 def retrieve() -> str:
     """Build the 'what I've learned' block injected into the system prompt.
     memory.md loads in FULL (small, always-on). Skills contribute only their
-    one-line description — progressive disclosure; the model reads a skill's
-    body on demand with read_file. So context cost = memory + N one-liners,
-    NOT N full skills. That's how it stays minimal while the library grows."""
+    one-line description — the model reads a skill's body on demand with
+    read_file. So context cost = memory + N one-liners, NOT N full skills."""
     parts = []
     if os.path.exists(MEMORY_FILE):
         mem = read_file(MEMORY_FILE).strip()
@@ -198,46 +208,58 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         return False, "用户拒绝了这次调用"
     return False, f"用户拒绝,并说:{ans}"          # like Claude Code's "No, and tell it what to do"
 
-# ── the loop ──────────────────────────────────────────────────────────────────
+# ── the loop (OpenAI-compatible chat format) ──────────────────────────────────
 
-def agent_turn(client, messages: list, state: dict) -> str:
+def agent_turn(client, model: str, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
     learned = retrieve()                               # inject memory + skill descriptions
     system = SYSTEM + ("\n\n" + learned if learned else "")
     calls = 0
     while True:
         with ui.thinking():
-            reply = client.messages.create(
-                model=MODEL, max_tokens=MAX_TOKENS,
-                system=system, tools=tool_specs(), messages=messages,
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system}] + messages,
+                tools=tool_specs(),
             )
-        messages.append({"role": "assistant", "content": reply.content})
+        msg = resp.choices[0].message
+        tool_calls = msg.tool_calls or []
 
-        if reply.stop_reason != "tool_use":     # no tool wanted -> final answer
+        entry = {"role": "assistant", "content": msg.content or ""}   # record the assistant turn
+        if tool_calls:
+            entry["tool_calls"] = [
+                {"id": c.id, "type": "function",
+                 "function": {"name": c.function.name, "arguments": c.function.arguments}}
+                for c in tool_calls
+            ]
+        messages.append(entry)
+
+        if not tool_calls:                              # no tool wanted -> final answer
             state["last_calls"] = calls
-            return "".join(b.text for b in reply.content if b.type == "text")
+            return msg.content or ""
 
-        results = []
-        for block in reply.content:
-            if block.type == "tool_use":
-                calls += 1
-                cls = TOOLS[block.name][4]
-                allowed, reason = check_permission(state, cls, block.name, block.input)
-                if not allowed:
-                    out, is_error = f"permission denied: {reason}", True
-                    ui.denied(block.name, reason)
-                else:
-                    out, is_error = run_tool(block.name, block.input)
-                    ui.show_tool(block.name, block.input, out, is_error)
-                results.append({
-                    "type": "tool_result", "tool_use_id": block.id,
-                    "content": out, "is_error": is_error,
-                })
-        messages.append({"role": "user", "content": results})   # results are a USER turn
+        for c in tool_calls:
+            calls += 1
+            name = c.function.name
+            try:
+                args = json.loads(c.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            cls = TOOLS[name][4] if name in TOOLS else "bash"
+            allowed, reason = check_permission(state, cls, name, args)
+            if not allowed:
+                out, is_error = f"permission denied: {reason}", True
+                ui.denied(name, reason)
+            elif name not in TOOLS:
+                out, is_error = f"error: unknown tool {name}", True
+            else:
+                out, is_error = run_tool(name, args)
+                ui.show_tool(name, args, out, is_error)
+            messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
 # Both are just another agent_turn with a special prompt — so saving reuses the
-# same gated write_file/edit_file. That's why Step 4 is mostly prompts, not code.
+# same gated write_file/edit_file. That's why self-learning is mostly prompts.
 
 REFLECT_PROMPT = (
     "复盘刚才的对话。如果有**可复用的做法**值得留下,用 write_file 存成 "
@@ -251,23 +273,22 @@ CONSOLIDATE_PROMPT = (
     "没用的(用 run_bash 删文件),让每条 description 更好匹配。保持这套技能小而精。"
 )
 
-def reflect(client, messages: list, state: dict) -> str:
+def reflect(client, model: str, messages: list, state: dict) -> str:
     """One extra learning turn — saves skills/facts, reusing the gated tools.
     Runs on a COPY of messages so the reflection prompt never pollutes memory."""
-    return agent_turn(client, messages + [{"role": "user", "content": REFLECT_PROMPT}], state)
+    return agent_turn(client, model, messages + [{"role": "user", "content": REFLECT_PROMPT}], state)
 
-def consolidate(client, state: dict) -> str:
-    return agent_turn(client, [{"role": "user", "content": CONSOLIDATE_PROMPT}], state)
+def consolidate(client, model: str, state: dict) -> str:
+    return agent_turn(client, model, [{"role": "user", "content": CONSOLIDATE_PROMPT}], state)
 
 def repl() -> None:
     global ui
-    import console_ui as ui             # the 界面 (needs rich); lazy so --selfcheck stays dep-free
-    import anthropic                     # only talking to the model needs the SDK
-    client = anthropic.Anthropic()      # reads ANTHROPIC_API_KEY from the env
-    messages: list = []                 # ← this list IS the memory; it grows every turn
+    import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
+    client, model = make_client()        # OpenAI-compatible client for the chosen provider
+    messages: list = []                  # ← this list IS the memory; it grows every turn
     state = {"mode": "default", "allow": set()}   # ← permission state for the session
 
-    ui.banner(state["mode"])
+    ui.banner(state["mode"], PROVIDER, model)
     while True:
         try:
             task = ui.read_task(state["mode"])
@@ -286,20 +307,20 @@ def repl() -> None:
                 ui.mode_help(state["mode"], MODES)
             continue
         if task == "/reflect":
-            reflect(client, messages, state)
+            reflect(client, model, messages, state)
             continue
         if task == "/consolidate":
             ui.note("🧹 整理技能中…")
-            consolidate(client, state)
+            consolidate(client, model, state)
             continue
         messages.append({"role": "user", "content": task})
-        result = agent_turn(client, messages, state)
+        result = agent_turn(client, model, messages, state)
         ui.answer(result)
         if state.get("last_calls", 0) >= REFLECT_AFTER:
             ui.note(f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
-            reflect(client, messages, state)
+            reflect(client, model, messages, state)
 
-# ── offline self-check (no API key needed):  python agent.py --selfcheck ───────
+# ── offline self-check (no key / no deps):  python agent.py --selfcheck ────────
 
 def _selfcheck() -> None:
     import tempfile
@@ -309,31 +330,34 @@ def _selfcheck() -> None:
     assert read_file(p) == "hello world"
     assert edit_file(p, "world", "talos").startswith("edited")
     assert read_file(p) == "hello talos"
-    for bad in ("missing",):                       # 0 matches -> error
+    for bad in ("missing",):
         try:
             edit_file(p, bad, "x"); assert False
         except ValueError:
             pass
-    write_file(p, "aa")                            # 2 matches -> not-unique error
+    write_file(p, "aa")
     try:
         edit_file(p, "a", "b"); assert False
     except ValueError:
         pass
-    # permission tiers (Claude-Code-style)
-    assert _policy("default", "read", "read_file", set()) == "allow"     # reads never gated
-    assert _policy("plan", "edit", "write_file", set()) == "deny"        # plan = read-only
+    # permission tiers
+    assert _policy("default", "read", "read_file", set()) == "allow"
+    assert _policy("plan", "edit", "write_file", set()) == "deny"
     assert _policy("plan", "bash", "run_bash", set()) == "deny"
-    assert _policy("bypass", "bash", "run_bash", set()) == "allow"       # yolo
+    assert _policy("bypass", "bash", "run_bash", set()) == "allow"
     assert _policy("acceptEdits", "edit", "write_file", set()) == "allow"
-    assert _policy("acceptEdits", "bash", "run_bash", set()) == "ask"    # edits auto, bash still asks
+    assert _policy("acceptEdits", "bash", "run_bash", set()) == "ask"
     assert _policy("default", "edit", "write_file", set()) == "ask"
-    assert _policy("default", "bash", "run_bash", {"run_bash"}) == "allow"  # session-allowed tool
+    assert _policy("default", "bash", "run_bash", {"run_bash"}) == "allow"
     # learned-knowledge frontmatter parsing
     m, b = _parse_frontmatter("---\nname: run-tests\ndescription: 何时用\n---\nstep 1\nstep 2")
     assert m["name"] == "run-tests" and m["description"] == "何时用" and b.strip() == "step 1\nstep 2"
     m, b = _parse_frontmatter("no frontmatter")
     assert m == {} and b == "no frontmatter"
-    print("selfcheck ok ✅  (tools + permission tiers + skill parsing verified)")
+    # OpenAI-compatible tool schema shape
+    spec = tool_specs()[0]
+    assert spec["type"] == "function" and "parameters" in spec["function"]
+    print("selfcheck ok ✅  (tools + permission tiers + skill parsing + tool schema verified)")
 
 if __name__ == "__main__":
     try:
