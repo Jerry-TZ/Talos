@@ -25,6 +25,20 @@ import json
 import os
 import sys
 
+def _load_dotenv(path: str = ".env") -> None:
+    """Load KEY=VALUE lines from a .env file into the environment (real env vars win),
+    so you set provider + key ONCE in .env instead of every shell session."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+_load_dotenv()   # BEFORE reading TALOS_PROVIDER / keys below
+
 # ── providers: 大家都讲 OpenAI 兼容 API,只有 base_url + 模型名不同 ────────────────
 # base_url 稳定;模型名常变 —— 用 TALOS_MODEL 环境变量覆盖成你有权限的那个。
 PROVIDERS = {

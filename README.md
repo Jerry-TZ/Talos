@@ -102,4 +102,8 @@ python agent.py
 模型名常变 —— 默认模型若报错,`TALOS_MODEL=<确切模型名>` 覆盖即可。base_url 都写死在
 `agent.py` 的 `PROVIDERS` 里,加新厂商 = 加一行。
 
+**一次配好(推荐)**:把 `.env.example` 复制成 `.env`,填一次 provider + key,以后
+`python agent.py` 直接自动加载,不用每次设环境变量。`.env` 已 gitignore,key 不进仓库;
+真实环境变量优先级更高(可临时覆盖 `.env`)。
+
 The Pi source is cloned in `../PI_Agent` for reference.
