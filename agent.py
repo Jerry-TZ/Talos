@@ -25,6 +25,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 
 def _load_dotenv(path: str = ".env") -> None:
     """Load KEY=VALUE lines from a .env file into the environment (real env vars win),
@@ -305,6 +306,24 @@ def _reasoning(msg) -> str:
     extra = getattr(msg, "model_extra", None) or {}
     return str(extra.get("reasoning_content") or extra.get("reasoning") or "")
 
+def _chat(client, **kwargs):
+    """Call the model, retrying briefly on rate-limit / 'busy' / transient errors.
+    Free tiers (esp. glm-4.7-flash) get congested — '当前模型用户多' is just a busy signal."""
+    for attempt in range(3):
+        try:
+            return client.chat.completions.create(**kwargs)
+        except Exception as e:
+            s = str(e).lower()
+            transient = (any(k in s for k in ("429", "rate limit", "ratelimit", "timeout",
+                        "overload", "too many", "busy", "503", "502", "并发", "繁忙"))
+                        or "用户多" in str(e))
+            if attempt < 2 and transient:
+                if ui is not None:
+                    ui.note(f"模型繁忙,{2 ** attempt}s 后重试 ({attempt + 1}/2)…")
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
 def agent_turn(client, model: str, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
@@ -313,11 +332,9 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
     calls = 0
     while True:
         with ui.thinking():
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system}] + messages,
-                tools=tool_specs(),
-            )
+            resp = _chat(client, model=model,
+                         messages=[{"role": "system", "content": system}] + messages,
+                         tools=tool_specs())
         msg = resp.choices[0].message
         view = state.get("view", "normal")
         if view in ("verbose", "transcript"):
@@ -399,7 +416,7 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
              if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
              and m["content"] and "tool_calls" not in m]
     with ui.thinking():
-        resp = client.chat.completions.create(model=model, messages=(
+        resp = _chat(client, model=model, messages=(
             [{"role": "system", "content": "你在压缩一段编程 agent 的对话历史。产出一段简报,保留:"
               "当前任务、已做的决定、改动过的文件、还没完成的线索。简洁、要点式。"}]
             + clean + [{"role": "user", "content": "把以上压成简报。"}]))
