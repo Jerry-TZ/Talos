@@ -47,6 +47,7 @@ SYSTEM = (
     "two-sentence summary of what you did."
 )
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
+COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 
@@ -281,14 +282,44 @@ def reflect(client, model: str, messages: list, state: dict) -> str:
 def consolidate(client, model: str, state: dict) -> str:
     return agent_turn(client, model, [{"role": "user", "content": CONSOLIDATE_PROMPT}], state)
 
-def repl() -> None:
+# ── context compression (仿 Claude Code 的 auto-compact) ───────────────────────
+
+def _ctx_chars(messages: list) -> int:
+    return sum(len(str(m.get("content") or "")) for m in messages)
+
+def maybe_compact(client, model: str, messages: list, force: bool = False) -> list:
+    """History got long? Replace it with a summary + a continue marker. Returns the new list."""
+    if len(messages) < 3 or (not force and _ctx_chars(messages) < COMPACT_AT):
+        return messages
+    clean = [{"role": m["role"], "content": m["content"]} for m in messages
+             if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+             and m["content"] and "tool_calls" not in m]
+    with ui.thinking():
+        resp = client.chat.completions.create(model=model, messages=(
+            [{"role": "system", "content": "你在压缩一段编程 agent 的对话历史。产出一段简报,保留:"
+              "当前任务、已做的决定、改动过的文件、还没完成的线索。简洁、要点式。"}]
+            + clean + [{"role": "user", "content": "把以上压成简报。"}]))
+    summary = resp.choices[0].message.content or "(空)"
+    ui.note(f"🗜 上下文已压缩({len(messages)} 条 → 2 条)")
+    return [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary},
+            {"role": "assistant", "content": "了解,以上是之前的进展,我们继续。"}]
+
+def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
+    import session as S                  # local conversation storage (Claude-Code-style)
     client, model = make_client()        # OpenAI-compatible client for the chosen provider
-    messages: list = []                  # ← this list IS the memory; it grows every turn
+    if resume is not None:               # --continue (latest) / --resume <id>
+        sid = S.latest_sid() if resume is True else resume
+        sess = S.Session(sid) if sid else S.Session.new()
+        messages: list = sess.load()
+    else:
+        sess = S.Session.new()
+        messages = []
     state = {"mode": "default", "allow": set()}   # ← permission state for the session
 
     ui.banner(state["mode"], PROVIDER, model)
+    ui.note(f"会话 {sess.sid}" + (f" · 续上 {len(messages)} 条消息" if messages else " · 存于 .talos/sessions/"))
     while True:
         try:
             task = ui.read_task(state["mode"])
@@ -313,6 +344,16 @@ def repl() -> None:
             ui.note("🧹 整理技能中…")
             consolidate(client, model, state)
             continue
+        if task == "/history":
+            ui.sessions_list(S.list_sessions())
+            continue
+        if task == "/compact":
+            try:
+                messages[:] = maybe_compact(client, model, messages, force=True)
+                sess.save(messages)
+            except Exception as e:
+                ui.error(e)
+            continue
         mark = len(messages)
         messages.append({"role": "user", "content": task})
         try:
@@ -328,6 +369,11 @@ def repl() -> None:
                 reflect(client, model, messages, state)
             except Exception as e:
                 ui.error(e)
+        try:
+            messages[:] = maybe_compact(client, model, messages)   # auto-compact if history got long
+        except Exception as e:
+            ui.error(e)
+        sess.save(messages)                                        # persist after every turn
 
 # ── offline self-check (no key / no deps):  python agent.py --selfcheck ────────
 
@@ -373,7 +419,22 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")   # selfcheck prints emoji; rich manages its own console
     except Exception:
         pass
-    if "--selfcheck" in sys.argv:
+    argv = sys.argv[1:]
+    if "--selfcheck" in argv:
         _selfcheck()
+    elif "--list" in argv:
+        import console_ui as ui, session as S
+        ui.sessions_list(S.list_sessions())
+    elif "--view" in argv:
+        import console_ui as ui, session as S
+        i = argv.index("--view")
+        sid = argv[i + 1] if len(argv) > i + 1 else S.latest_sid()
+        ui.show_session(S.Session(sid).load() if sid else [])
+    elif "--continue" in argv:
+        repl(resume=True)
+    elif "--resume" in argv:
+        i = argv.index("--resume")
+        sid = argv[i + 1] if len(argv) > i + 1 and not argv[i + 1].startswith("-") else True
+        repl(resume=sid)
     else:
         repl()

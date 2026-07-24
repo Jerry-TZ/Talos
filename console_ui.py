@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 
 try:
@@ -35,7 +36,7 @@ def banner(mode: str, provider: str, model: str) -> None:
         Text.assemble(("Talos ", f"bold {C_MODEL}"), ("· 最小自学习编程 agent", "dim")),
         border_style=C_MODEL, padding=(0, 2)))
     console.print(f"[dim]模型[/] [bold {C_CODE}]{provider}[/] · {model}    "
-                  "[dim]命令[/] [bold]/mode[/]·[bold]/reflect[/]·[bold]/consolidate[/]·[bold]quit[/]")
+                  "[dim]命令[/] [bold]/mode[/]·[bold]/reflect[/]·[bold]/consolidate[/]·[bold]/history[/]·[bold]/compact[/]·[bold]quit[/]")
     console.print("[dim]权限档: plan(只读)·default(每次问)·acceptEdits(自动改文件)·bypass(全放行)   "
                   "自学习: 复杂任务后自动复盘并存 skills/[/]\n")
 
@@ -87,6 +88,29 @@ def error(e) -> None:
         msg = msg[:320] + " …"
     console.print(Panel(msg, border_style="red", title=f"⚠ {type(e).__name__}", title_align="left"))
     console.print("[dim]  常见原因: key 错 · 额度用尽(429)· 模型名不对(404)· 网络。可换 TALOS_MODEL / TALOS_PROVIDER 再试。[/]")
+
+def sessions_list(rows) -> None:
+    if not rows:
+        console.print("[dim]  还没有历史会话。[/]")
+        return
+    import time as _t
+    t = Table(title="历史会话 (.talos/sessions/)", title_style=f"bold {C_MODEL}",
+              title_justify="left", border_style="dim")
+    t.add_column("会话 id"); t.add_column("时间"); t.add_column("条", justify="right"); t.add_column("开头")
+    for sid, mtime, first, n in rows:
+        head = (first[:36] + "…") if len(first) > 36 else (first or "—")
+        t.add_row(sid, _t.strftime("%m-%d %H:%M", _t.localtime(mtime)), str(n), head)
+    console.print(t)
+
+def show_session(messages) -> None:
+    if not messages:
+        console.print("[dim]  (空会话或不存在)[/]")
+        return
+    for m in messages:
+        role = m.get("role", "?")
+        color = {"user": C_YOU, "assistant": C_MODEL, "tool": C_CODE, "system": "dim"}.get(role, "white")
+        body = m.get("content") or ("[tool_calls]" if m.get("tool_calls") else "")
+        console.print(f"[bold {color}]{role}[/]: {body}", highlight=False)
 
 def mode_set(mode: str) -> None:
     console.print(f"  [green]→ 已切到 {mode}[/]\n")
