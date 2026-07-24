@@ -14,6 +14,7 @@ import sys
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.markup import escape
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -49,7 +50,7 @@ def thinking():
 
 def show_tool(name: str, args: dict, result: str, is_error: bool) -> None:
     mark = "[red]✗[/]" if is_error else f"[{C_CODE}]⚙[/]"
-    console.print(f"  {mark} [{C_CODE}]{name}[/][dim]({_short(args)})[/]")
+    console.print(f"  {mark} [{C_CODE}]{name}[/][dim]({escape(_short(args))})[/]")
     if result:
         console.print(Text(_short(result, 240), style=("red" if is_error else "dim")), highlight=False)
 
@@ -70,7 +71,7 @@ def preview(name: str, args: dict) -> None:
         console.print(f"    [dim]{_short(args)}[/]")
 
 def ask() -> str:
-    return console.input("  [yellow]允许? [y]一次  [a]本会话都允许该工具  [N]拒绝(默认) ›[/] ").strip()
+    return console.input(r"  [yellow]允许? \[y]一次  \[a]本会话都允许该工具  \[N]拒绝(默认) ›[/] ").strip()
 
 def denied(name: str, reason: str) -> None:
     console.print(f"  [red]⛔ {name} 被拒绝 — {reason}[/]")
@@ -86,7 +87,7 @@ def error(e) -> None:
     msg = str(e)
     if len(msg) > 320:
         msg = msg[:320] + " …"
-    console.print(Panel(msg, border_style="red", title=f"⚠ {type(e).__name__}", title_align="left"))
+    console.print(Panel(Text(msg), border_style="red", title=f"⚠ {type(e).__name__}", title_align="left"))
     console.print("[dim]  常见原因: key 错 · 额度用尽(429)· 模型名不对(404)· 网络。可换 TALOS_MODEL / TALOS_PROVIDER 再试。[/]")
 
 def sessions_list(rows) -> None:
@@ -110,7 +111,10 @@ def show_session(messages) -> None:
         role = m.get("role", "?")
         color = {"user": C_YOU, "assistant": C_MODEL, "tool": C_CODE, "system": "dim"}.get(role, "white")
         body = m.get("content") or ("[tool_calls]" if m.get("tool_calls") else "")
-        console.print(f"[bold {color}]{role}[/]: {body}", highlight=False)
+        line = Text()
+        line.append(f"{role}: ", style=f"bold {color}")
+        line.append(str(body))                      # literal — safe from rich markup like [y]
+        console.print(line)
 
 def mode_set(mode: str) -> None:
     console.print(f"  [green]→ 已切到 {mode}[/]\n")
