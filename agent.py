@@ -362,8 +362,18 @@ def _chat(client, **kwargs):
 def agent_turn(client, model: str, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
-    learned = retrieve()                               # inject memory + skill descriptions
-    system = SYSTEM + ("\n\n" + learned if learned else "")
+    learned = retrieve()                               # always-on: memory + skill descriptions
+    query = next((m["content"] for m in reversed(messages)
+                  if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+    recalled = ""
+    if query:
+        try:
+            import recall                              # 联想回忆:按当前任务捞相关记忆(spreading activation)
+            recalled = recall.recall(query)
+        except Exception:
+            recalled = ""
+    system = (SYSTEM + ("\n\n" + learned if learned else "")
+              + ("\n\n" + recalled if recalled else ""))
     calls = steps = 0
     while True:
         steps += 1
@@ -533,6 +543,18 @@ def repl(resume=None) -> None:
                 sess.save(messages)
             except Exception as e:
                 ui.error(e)
+            continue
+        if task.startswith("/recall"):                 # 看联想回忆的激活分数
+            try:
+                import recall
+                rows = recall.explain(task[7:].strip())
+            except Exception as e:
+                ui.error(e); continue
+            if rows:
+                for s, kind, text in rows:
+                    ui.note(f"{s:.2f} · [{kind}] {text}")
+            else:
+                ui.note("没联想到相关记忆(关键词没匹配上,或长期记忆还太少)")
             continue
         if task.startswith("/view"):
             sid = S.resolve(task[5:])
