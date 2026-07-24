@@ -65,6 +65,8 @@ REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a lea
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
+_RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
+                     # spawn_subagent can reach the loop without threading them through run_tool.
 
 def make_client():
     """Build an OpenAI-compatible client for the selected provider. Returns (client, model)."""
@@ -141,6 +143,24 @@ def load_dynamic_tools() -> list:
             pass
     return out
 
+# ── delegation: spawn a sub-agent (广度, not 深度) ─────────────────────────────
+# A sub-agent is a fresh agent_turn with its OWN isolated context — only its final
+# answer returns, so the parent's context stays clean. Reuses agent_turn, like
+# reflect/consolidate. Same tools + permission state as the parent.
+
+def spawn_subagent(task: str) -> str:
+    depth = _RUNTIME.get("depth", 0)
+    if depth >= 2:
+        return "error: 子agent 嵌套太深了,这个子任务请自己直接做,别再派子agent"
+    if ui is not None:
+        ui.note("↳ 派出子agent: " + (task[:60] + "…" if len(task) > 60 else task))
+    _RUNTIME["depth"] = depth + 1
+    try:
+        return agent_turn(_RUNTIME["client"], _RUNTIME["model"],
+                          [{"role": "user", "content": task}], _RUNTIME["state"])
+    finally:
+        _RUNTIME["depth"] = depth
+
 # Registry: name -> (fn, input-properties, required-keys, description, PERM-CLASS).
 # perm-class is one of: "read" (never gated) | "edit" (write/edit files) | "bash".
 TOOLS = {
@@ -172,6 +192,13 @@ TOOLS = {
         "file that defines TOOL = {'description': str, 'parameters': {<json-schema properties>}, "
         "'required': [<param names>]} and def run(args: dict) -> str. After creating it, call the "
         "new tool by its `name` on your next step.", "bash",
+    ),
+    "spawn_subagent": (
+        lambda a: spawn_subagent(a["task"]),
+        {"task": {"type": "string"}}, ["task"],
+        "Delegate a self-contained subtask to a fresh sub-agent that has its own isolated context and "
+        "the same tools; only its final result returns to you (keeps your own context clean). Give a "
+        "complete, standalone task, e.g. 'read agent.py and report how the permission gate works'.", "bash",
     ),
 }
 
@@ -271,6 +298,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
 
 def agent_turn(client, model: str, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
+    _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
     learned = retrieve()                               # inject memory + skill descriptions
     system = SYSTEM + ("\n\n" + learned if learned else "")
     calls = 0
