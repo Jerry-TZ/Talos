@@ -82,14 +82,29 @@ def make_client():
     return OpenAI(api_key=key, base_url=base_url), (os.environ.get("TALOS_MODEL") or default_model)
 
 # ── tools: just plain Python functions ────────────────────────────────────────
+# 工作目录限制:文件工具只能在 WORKSPACE 内活动(默认当前目录,TALOS_WORKSPACE 可改)。
+# ⚠️ 只锁得住文件工具;run_bash 里一条 cd 仍能出去 —— 彻底隔离要 Step 3 沙箱。
+
+WORKSPACE = os.path.realpath(os.environ.get("TALOS_WORKSPACE", "."))
+
+def _in_workspace(path: str) -> str:
+    full = os.path.realpath(path)
+    try:
+        inside = os.path.commonpath([full, WORKSPACE]) == WORKSPACE
+    except ValueError:                        # 不同盘符(Windows)= 肯定在外面
+        inside = False
+    if not inside:
+        raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})")
+    return full
 
 def read_file(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(_in_workspace(path), "r", encoding="utf-8") as f:
         return f.read()
 
 def write_file(path: str, content: str) -> str:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    full = _in_workspace(path)
+    os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
+    with open(full, "w", encoding="utf-8") as f:
         f.write(content)
     return f"wrote {len(content)} chars to {path}"
 
@@ -540,7 +555,9 @@ def repl(resume=None) -> None:
 
 def _selfcheck() -> None:
     import tempfile
-    p = os.path.join(tempfile.mkdtemp(), "t.txt")
+    global WORKSPACE
+    WORKSPACE = os.path.realpath(tempfile.mkdtemp())      # jail file ops into a temp dir for the test
+    p = os.path.join(WORKSPACE, "t.txt")
     # tools
     assert "wrote" in write_file(p, "hello world")
     assert read_file(p) == "hello world"
@@ -573,7 +590,13 @@ def _selfcheck() -> None:
     # OpenAI-compatible tool schema shape
     spec = tool_specs()[0]
     assert spec["type"] == "function" and "parameters" in spec["function"]
-    print("selfcheck ok ✅  (tools + permission tiers + skill parsing + tool schema verified)")
+    # workspace jail: paths outside WORKSPACE are rejected
+    outside = os.path.join(tempfile.mkdtemp(), "evil.txt")
+    try:
+        write_file(outside, "x"); assert False
+    except ValueError as e:
+        assert "越界" in str(e)
+    print("selfcheck ok ✅  (tools + tiers + skills + schema + workspace jail verified)")
 
 if __name__ == "__main__":
     try:
