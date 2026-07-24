@@ -25,6 +25,7 @@ mutates (write / edit / run_bash) is previewed and must be approved.
 
 from __future__ import annotations
 
+import glob
 import os
 import subprocess
 import sys
@@ -112,6 +113,46 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
     except Exception as e:                      # tool errors go back to the model, not crash
         return f"error: {e}", True
 
+# ── learned knowledge: memory (facts) + skills (procedures) ───────────────────
+# Learning = notes the agent writes for itself, read back later. Not training.
+
+SKILLS_DIR = "skills"
+MEMORY_FILE = "memory.md"
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Split a leading `---`-fenced block from the body. Minimal `key: value`."""
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            meta = {}
+            for line in text[3:end].strip().splitlines():
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    meta[k.strip()] = v.strip()
+            return meta, text[end + 4:].lstrip("\n")
+    return {}, text
+
+def retrieve() -> str:
+    """Build the 'what I've learned' block injected into the system prompt.
+    memory.md loads in FULL (small, always-on). Skills contribute only their
+    one-line description — progressive disclosure; the model reads a skill's
+    body on demand with read_file. So context cost = memory + N one-liners,
+    NOT N full skills. That's how it stays minimal while the library grows."""
+    parts = []
+    if os.path.exists(MEMORY_FILE):
+        mem = read_file(MEMORY_FILE).strip()
+        if mem:
+            parts.append("# 记住的事实 (memory.md)\n" + mem)
+    skills = sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md")))
+    if skills:
+        lines = []
+        for path in skills:
+            meta, _ = _parse_frontmatter(read_file(path))
+            name = meta.get("name") or os.path.splitext(os.path.basename(path))[0]
+            lines.append(f"- {name} — {meta.get('description', '')}  (需要时 read_file `{path}` 看步骤)")
+        parts.append("# 可用技能 (skills/) — 相关时才读正文\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
 # ── permission gate (modeled on Claude Code) ──────────────────────────────────
 
 MODES = ("plan", "default", "acceptEdits", "bypass")
@@ -171,10 +212,12 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
 
 def agent_turn(client, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
+    learned = retrieve()                               # inject memory + skill descriptions
+    system = SYSTEM + ("\n\n" + learned if learned else "")
     while True:
         reply = client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS,
-            system=SYSTEM, tools=tool_specs(), messages=messages,
+            system=system, tools=tool_specs(), messages=messages,
         )
         messages.append({"role": "assistant", "content": reply.content})
 
@@ -262,7 +305,12 @@ def _selfcheck() -> None:
     assert _policy("acceptEdits", "bash", "run_bash", set()) == "ask"    # edits auto, bash still asks
     assert _policy("default", "edit", "write_file", set()) == "ask"
     assert _policy("default", "bash", "run_bash", {"run_bash"}) == "allow"  # session-allowed tool
-    print("selfcheck ok ✅  (tools + permission tiers verified; run `python agent.py` with a key to talk)")
+    # learned-knowledge frontmatter parsing
+    m, b = _parse_frontmatter("---\nname: run-tests\ndescription: 何时用\n---\nstep 1\nstep 2")
+    assert m["name"] == "run-tests" and m["description"] == "何时用" and b.strip() == "step 1\nstep 2"
+    m, b = _parse_frontmatter("no frontmatter")
+    assert m == {} and b == "no frontmatter"
+    print("selfcheck ok ✅  (tools + permission tiers + skill parsing verified)")
 
 if __name__ == "__main__":
     try:

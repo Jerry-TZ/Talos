@@ -6,3 +6,7 @@ env/
 .env
 *.log
 .DS_Store
+
+# learned runtime state — un-ignore if you want to version the agent's knowledge
+memory.md
+skills/
