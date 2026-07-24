@@ -75,7 +75,7 @@ it still runs directly on your machine. Only allow commands you understand.
 | 1 ✅ | minimal loop + 4 tools + memory | Pi (简洁) |
 | 2 ✅ | **permission gate + terminal UI** | 你要的安全 |
 | 3 | **sandbox** — run tools inside Docker (no host mounts, limited net) | 你要的安全 |
-| 4 | **self-learning** — a `reflect` step writes `SKILL.md` + `memory.md`, loaded on demand | Hermes (成长) |
+| 4 ✅ | **self-learning** — `reflect` writes `skills/*.md` + `memory.md`, loaded on demand (→ SELF_LEARNING.md) | Hermes (成长) |
 | 5 | (optional) channels/web UI — only when you want phone/sharing | Hermes (全能) |
 
 ## Swapping the model

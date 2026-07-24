@@ -1,5 +1,5 @@
 """
-Talos — a minimal, self-extending coding agent.  [STEP 2: permission gate]
+Talos — a minimal, self-extending coding agent.  [STEP 4: self-learning]
 
 The core loop is unchanged from Step 1:
 
@@ -17,6 +17,11 @@ mutates (write / edit / run_bash) is previewed and must be approved.
     acceptEdits  自动放行 写/改文件,但命令(bash)仍要问
     bypass       全部放行(危险,"yolo")
 
+Step 4 adds **self-learning**: after a substantive task the agent reflects and
+writes reusable *skills* (skills/*.md) or durable *facts* (memory.md) for itself,
+then loads them next time. Learning = notes-to-self, not model training; every
+save goes through the same permission gate. See SELF_LEARNING.md.
+
 ⚠️  SAFETY: the gate is a CHECK, not a sandbox. Once you approve a run_bash, it
     still runs on your real machine. This matches Claude Code on native Windows
     (no OS sandbox there either — the permission prompt IS the protection).
@@ -32,6 +37,7 @@ import sys
 
 MODEL = "claude-opus-4-8"     # cheap tinkering: swap to "claude-haiku-4-5"
 MAX_TOKENS = 16000
+REFLECT_AFTER = 5             # after a task with >= this many tool calls, auto-run a learning pass
 
 SYSTEM = (
     "You are Talos, a minimal coding agent working inside the user's project "
@@ -214,6 +220,7 @@ def agent_turn(client, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
     learned = retrieve()                               # inject memory + skill descriptions
     system = SYSTEM + ("\n\n" + learned if learned else "")
+    calls = 0
     while True:
         reply = client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS,
@@ -222,11 +229,13 @@ def agent_turn(client, messages: list, state: dict) -> str:
         messages.append({"role": "assistant", "content": reply.content})
 
         if reply.stop_reason != "tool_use":     # no tool wanted -> final answer
+            state["last_calls"] = calls
             return "".join(b.text for b in reply.content if b.type == "text")
 
         results = []
         for block in reply.content:
             if block.type == "tool_use":
+                calls += 1
                 cls = TOOLS[block.name][4]
                 allowed, reason = check_permission(state, cls, block.name, block.input)
                 if not allowed:
@@ -242,6 +251,30 @@ def agent_turn(client, messages: list, state: dict) -> str:
                 })
         messages.append({"role": "user", "content": results})   # results are a USER turn
 
+# ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
+# Both are just another agent_turn with a special prompt — so saving reuses the
+# same gated write_file/edit_file. That's why Step 4 is mostly prompts, not code.
+
+REFLECT_PROMPT = (
+    "复盘刚才的对话。如果有**可复用的做法**值得留下,用 write_file 存成 "
+    "skills/<kebab-name>.md:开头用 --- 包住 frontmatter(name、description=何时用),"
+    "再写步骤。如果有关于用户/项目的**持久事实或教训**,用 edit_file 往 memory.md 追加"
+    "一行(没有该文件就 write_file 新建)。只存下次真能帮上忙的,一次性的别存。没有值得"
+    "存的就直说、别写文件。"
+)
+CONSOLIDATE_PROMPT = (
+    "用 run_bash `ls skills` 列出所有技能,再 read_file 逐个看。合并重复、删掉太窄或"
+    "没用的(用 run_bash 删文件),让每条 description 更好匹配。保持这套技能小而精。"
+)
+
+def reflect(client, messages: list, state: dict) -> str:
+    """One extra learning turn — saves skills/facts, reusing the gated tools.
+    Runs on a COPY of messages so the reflection prompt never pollutes memory."""
+    return agent_turn(client, messages + [{"role": "user", "content": REFLECT_PROMPT}], state)
+
+def consolidate(client, state: dict) -> str:
+    return agent_turn(client, [{"role": "user", "content": CONSOLIDATE_PROMPT}], state)
+
 def _short(x, n: int = 70) -> str:
     s = str(x).replace("\n", " ")
     return s if len(s) <= n else s[:n] + "…"
@@ -252,8 +285,9 @@ def repl() -> None:
     messages: list = []                 # ← this list IS the memory; it grows every turn
     state = {"mode": "default", "allow": set()}   # ← permission state for the session
 
-    print("Talos (Step 2). 输入任务,`quit` 退出,`/mode` 查看/切换权限档。\n")
-    print(paint("  权限档: plan(只读) · default(每次问) · acceptEdits(自动放行改文件) · bypass(全放行)\n", DIM))
+    print("Talos (Step 4). 输入任务,`quit` 退出。命令: `/mode` 权限档 · `/reflect` 立即复盘 · `/consolidate` 整理技能。\n")
+    print(paint("  权限档: plan(只读) · default(每次问) · acceptEdits(自动放行改文件) · bypass(全放行)", DIM))
+    print(paint("  自学习: 复杂任务后自动复盘,把学到的存进 skills/ 和 memory.md(写盘也走权限门)\n", DIM))
     while True:
         try:
             task = input(paint(f"你 ({state['mode']}) › ", BOLD)).strip()
@@ -272,9 +306,19 @@ def repl() -> None:
             else:
                 print(paint(f"  当前: {state['mode']}。可选: {' · '.join(MODES)}\n", DIM))
             continue
+        if task == "/reflect":
+            reflect(client, messages, state)
+            continue
+        if task == "/consolidate":
+            print(paint("  🧹 整理技能中…", DIM))
+            consolidate(client, state)
+            continue
         messages.append({"role": "user", "content": task})
         answer = agent_turn(client, messages, state)
         print(f"\n🤖 {answer}\n")
+        if state.get("last_calls", 0) >= REFLECT_AFTER:
+            print(paint(f"  🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…", DIM))
+            reflect(client, messages, state)
 
 # ── offline self-check (no API key needed):  python agent.py --selfcheck ───────
 
