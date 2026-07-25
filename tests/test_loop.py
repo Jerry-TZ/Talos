@@ -69,6 +69,18 @@ def test_maybe_compact(ws, monkeypatch):
     small = [{"role": "user", "content": "hi"}]
     assert A.maybe_compact(client, "m", small) is small          # 太短 -> 原样返回
 
+def test_seal_keeps_work_after_a_failed_turn():
+    """一轮中途挂了(比如 429),进度必须留着让用户「继续」,只补上缺的工具结果。"""
+    import agent as A
+    msgs = [{"role": "user", "content": "造个爬虫"},
+            {"role": "assistant", "tool_calls": [{"id": "a"}, {"id": "b"}]},
+            {"role": "tool", "tool_call_id": "a", "content": "第一步的结果"}]
+    A._seal(msgs)
+    assert len(msgs) == 4 and msgs[0]["content"] == "造个爬虫"   # 任务和已有结果都没丢
+    assert msgs[3]["tool_call_id"] == "b" and "中断" in msgs[3]["content"]
+    A._seal(msgs)
+    assert len(msgs) == 4                                        # 已经补齐了就别再补
+
 def test_prune_old_tool_results():
     import agent as A
     msgs = [{"role": "tool", "content": "Z" * 1000}] + [{"role": "user", "content": "x"}] * 10

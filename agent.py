@@ -523,6 +523,22 @@ CONSOLIDATE_PROMPT = (
     "没用的(用 run_bash 删文件),让每条 description 更好匹配。保持这套技能小而精。"
 )
 
+def _seal(messages: list) -> None:
+    """Make history valid again after a turn died mid-flight, WITHOUT discarding the work.
+
+    An assistant message carrying tool_calls must be followed by a result for every call,
+    or the next request 400s. Rolling the whole turn back satisfies that but throws away
+    everything the turn accomplished — and then "继续" has nothing to continue from."""
+    last = next((i for i in range(len(messages) - 1, -1, -1)
+                 if messages[i].get("role") == "assistant" and messages[i].get("tool_calls")), None)
+    if last is None:
+        return
+    done = {m.get("tool_call_id") for m in messages[last + 1:] if m.get("role") == "tool"}
+    for c in messages[last]["tool_calls"]:
+        if c["id"] not in done:
+            messages.append({"role": "tool", "tool_call_id": c["id"],
+                             "content": "(这一步被中断了 — 没有结果)"})
+
 def reflect(client, model: str, messages: list, state: dict) -> str:
     """One extra learning turn — saves skills/facts, reusing the gated tools.
     Runs on a COPY of messages so the reflection prompt never pollutes memory."""
@@ -689,8 +705,9 @@ def repl(resume=None) -> None:
         try:
             result = agent_turn(client, model, messages, state)
         except Exception as e:
-            del messages[mark:]                    # roll back the failed turn; keep history valid
+            _seal(messages)                        # keep the work; just make the history valid again
             ui.error(e)
+            ui.note("这一轮的进度都还在 —— 说「继续」可以接着做。")
             continue
         ui.answer(result)
         _tk = state.get("last_tok") or {}
