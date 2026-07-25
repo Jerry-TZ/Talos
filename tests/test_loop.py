@@ -35,6 +35,19 @@ def test_tool_loop_and_token_tracking(ws, monkeypatch):
     assert out == "done" and state["last_calls"] == 1
     assert state["tok"]["in"] == 200 and state["last_tok"]["out"] == 40   # 两次调用的 usage 累计
 
+def test_subagent_tokens_roll_up_to_caller(ws, monkeypatch):
+    """子agent 共用 state,它烧的 token 必须算进外层这一轮,不能丢。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    usage = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20, prompt_tokens_details=None)
+    client = _Client([_msg(tool_calls=[_tc("spawn_subagent", '{"task":"go read it"}')], usage=usage),
+                      _msg(content="sub done", usage=usage),        # 子agent 自己这一步
+                      _msg(content="done", usage=usage)])
+    state = {"mode": "bypass", "allow": set()}
+    assert A.agent_turn(client, "m", [{"role": "user", "content": "hi"}], state) == "done"
+    assert state["last_tok"]["in"] == 300 and state["last_tok"]["steps"] == 3   # 含子agent 那一次
+    assert state["last_calls"] == 1
+
 def test_max_steps_cap(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())

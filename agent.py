@@ -391,22 +391,22 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
             recalled = ""
     system = (SYSTEM + ("\n\n" + learned if learned else "")
               + ("\n\n" + recalled if recalled else ""))
-    state.setdefault("tok", {"in": 0, "out": 0, "cached": 0})
-    turn = {"in": 0, "out": 0, "cached": 0}
-    calls = steps = 0
+    state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
+    base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
+    steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
         steps += 1
         if steps > MAX_STEPS:                          # safety cap — don't spin forever
-            state["last_calls"] = calls
-            turn["steps"] = steps                      # round-trips: explains why `in` looks huge
-            state["last_tok"] = turn
+            state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
+            state["last_calls"] = state["last_tok"]["calls"]
             return f"(已到 {MAX_STEPS} 步上限,停下了 — 任务可能太大或卡在空转;拆小些、或 /compact 后再试。)"
         with ui.thinking():
             resp = _chat(client, model=model,
                          messages=[{"role": "system", "content": system}] + messages,
                          tools=tool_specs())
+        state["tok"]["steps"] += 1
         for _k, _v in zip(("in", "out", "cached"), _usage(resp)):
-            turn[_k] += _v; state["tok"][_k] += _v
+            state["tok"][_k] += _v
         msg = resp.choices[0].message
         view = state.get("view", "normal")
         if view in ("verbose", "transcript"):
@@ -427,13 +427,12 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
         messages.append(entry)
 
         if not tool_calls:                              # no tool wanted -> final answer
-            state["last_calls"] = calls
-            turn["steps"] = steps                      # round-trips: explains why `in` looks huge
-            state["last_tok"] = turn
+            state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
+            state["last_calls"] = state["last_tok"]["calls"]
             return msg.content or ""
 
         for c in tool_calls:
-            calls += 1
+            state["tok"]["calls"] += 1
             name = c.function.name
             try:
                 args = json.loads(c.function.arguments or "{}")
@@ -578,7 +577,8 @@ def repl(resume=None) -> None:
             continue
         if task == "/tokens":
             t = state.get("tok", {"in": 0, "out": 0, "cached": 0})
-            ui.note(f"本会话累计:输入 {t['in']} + 输出 {t['out']} = {t['in'] + t['out']} tok"
+            ui.note(f"本会话累计:{t.get('steps', 0)} 次调用 · 输入 {t['in']} + 输出 {t['out']}"
+                    f" = {t['in'] + t['out']} tok"
                     + (f",缓存命中 {t['cached']}" if t.get("cached") else ""))
             continue
         if task.startswith("/recall"):                 # 看联想回忆的激活分数
