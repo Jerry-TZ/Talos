@@ -83,7 +83,7 @@ def _env_block() -> str:
 
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
-MAX_STEPS = 25       # loop safety cap: stop after this many model round-trips (guards against 空转)
+MAX_STEPS = int(os.environ.get("TALOS_MAX_STEPS", "25"))   # loop safety cap (guards against 空转)
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 _RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
@@ -297,6 +297,8 @@ def tool_specs() -> list[dict]:
     ]
 
 def run_tool(name: str, args: dict) -> tuple[str, bool]:
+    if name not in TOOLS:                       # a bare KeyError told nobody anything
+        return f"error: 没有名叫 {name} 的工具。现有工具:{', '.join(sorted(TOOLS))}", True
     try:
         out = TOOLS[name][0](args)
         if inspect.iscoroutine(out):            # a self-written tool may use an async lib (playwright, httpx)
@@ -443,7 +445,12 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
             state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
             state["last_calls"] = state["last_tok"]["calls"]
             state["capped"] = True                     # a flailing turn must not teach itself its own workarounds
-            return f"(已到 {MAX_STEPS} 步上限,停下了 — 任务可能太大或卡在空转;拆小些、或 /compact 后再试。)"
+            return (f"(已到 {MAX_STEPS} 步上限,停下了。历史都还在 —— 直接说「继续」就接着做,"
+                    f"或者拆小些重来;想放宽上限设 TALOS_MAX_STEPS。)")
+        if steps == MAX_STEPS - 4:                     # let it land the plane instead of being cut mid-flight
+            messages.append({"role": "user", "content":
+                             f"[系统] 还剩 4 步就到上限了。如果快好了就收尾;如果这条路走不通,"
+                             f"别再试变体了 —— 直接说清卡在哪、你试过什么。"})
         with ui.thinking():
             resp = _chat(client, model=model,
                          messages=[{"role": "system", "content": system}] + messages,
