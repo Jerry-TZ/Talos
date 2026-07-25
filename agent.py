@@ -105,8 +105,16 @@ READ_MAX_LINES = 250   # cap lines returned to the model (token saver); page wit
 BASH_MAX_CHARS = 4000  # cap run_bash output sent to the model
 
 def _read_full(path: str) -> str:
-    with open(_in_workspace(path), "r", encoding="utf-8") as f:
-        return f.read()
+    """Read a text file, tolerating what Windows tools actually produce.
+
+    PowerShell's `>` writes UTF-16LE by default, and plenty of editors add a
+    UTF-8 BOM — decode those properly rather than crashing (or worse, handing
+    edit_file mojibake it would then write back over the original)."""
+    with open(_in_workspace(path), "rb") as f:
+        b = f.read()
+    if b[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return b.decode("utf-16", errors="replace")
+    return b.decode("utf-8-sig", errors="replace")
 
 def read_file(path: str, offset: int = 0, limit=None) -> str:
     lines = _read_full(path).splitlines(keepends=True)

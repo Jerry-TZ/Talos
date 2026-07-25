@@ -63,12 +63,14 @@ def _first_user(path: str) -> str:
 
 def _load_nodes() -> list:
     nodes = []
-    if os.path.exists(MEMORY_FILE):
-        with open(MEMORY_FILE, encoding="utf-8") as f:
+    try:                                          # best-effort layer: a garbled memory.md
+        with open(MEMORY_FILE, encoding="utf-8") as f:   # means no recall, never a crash
             for ln in f:
                 s = ln.strip().lstrip("-*# ").strip()
                 if len(s) >= 4:
                     nodes.append({"kind": "事实", "text": s})
+    except (OSError, UnicodeDecodeError):
+        pass
     for p in sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md"))):
         try:
             with open(p, encoding="utf-8") as f:

@@ -60,6 +60,16 @@ def test_create_tool_and_persist(ws):
     assert A.TOOLS["dbl"][0]({"n": "21"}) == "42"
     assert "dbl" in A.load_dynamic_tools()               # 重启后还能加载
 
+def test_read_survives_windows_encodings(ws):
+    """PowerShell 的 `>` 默认写 UTF-16LE,编辑器爱加 BOM —— 都不能让 agent 崩。"""
+    import agent as A
+    for name, raw in [("u16.md", "- 中文 line\n".encode("utf-16")),
+                      ("bom.md", "﻿- 中文 line\n".encode("utf-8"))]:
+        p = os.path.join(ws, name)
+        with open(p, "wb") as f:
+            f.write(raw)
+        assert A._read_full(p).strip() == "- 中文 line"      # BOM 剥掉,内容不糊
+
 def test_create_tool_failure_leaves_nothing_behind(ws):
     import agent as A
     with pytest.raises(ValueError, match="模块最外层"):        # 报错要能教会模型怎么改
