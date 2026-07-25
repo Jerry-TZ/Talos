@@ -241,7 +241,8 @@ TOOLS = {
         {"task": {"type": "string"}}, ["task"],
         "Delegate a self-contained subtask to a fresh sub-agent that has its own isolated context and "
         "the same tools; only its final result returns to you (keeps your own context clean). Give a "
-        "complete, standalone task, e.g. 'read agent.py and report how the permission gate works'.", "bash",
+        "complete, standalone task, e.g. 'read agent.py and report how the permission gate works'.",
+        "read",   # not itself a side effect: the subagent shares `state`, so each of ITS tool calls is gated
     ),
 }
 
