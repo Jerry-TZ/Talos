@@ -227,7 +227,10 @@ TOOLS = {
         "Create a NEW tool for yourself when no built-in tool fits the job. `code` is a full Python "
         "file that defines TOOL = {'description': str, 'parameters': {<json-schema properties>}, "
         "'required': [<param names>]} and def run(args: dict) -> str. After creating it, call the "
-        "new tool by its `name` on your next step.", "bash",
+        "new tool by its `name` on your next step. IMPORTANT: parameters must be paths or short "
+        "identifiers — NEVER a parameter that carries file contents or a large blob. Have `run` open "
+        "the file itself. Passing content through a tool argument means you retype the whole file as "
+        "output tokens, which is the single most expensive mistake you can make.", "bash",
     ),
     "spawn_subagent": (
         lambda a: spawn_subagent(a["task"]),
