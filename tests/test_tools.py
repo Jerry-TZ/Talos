@@ -77,6 +77,20 @@ def test_create_tool_failure_leaves_nothing_behind(ws):
     assert not os.path.exists(os.path.join(A.TOOLS_DIR, "broken.py"))
     assert "broken" not in A.load_dynamic_tools()               # 不会每次启动都加载失败
 
+def test_async_tool_is_awaited(ws):
+    """自造工具用 playwright 之类的 async 库时,不能把 coroutine 原样丢回模型。"""
+    import agent as A
+    A.create_tool("a_tool", "TOOL={'description':'x','parameters':{},'required':[]}\n"
+                            "async def run(a):\n    return 'async ok'\n")
+    assert A.run_tool("a_tool", {}) == ("async ok", False)
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe 特有")
+def test_multiline_bash_refused_loudly(ws):
+    """cmd 只跑第一行、exit 0、无输出 —— 静默成功最坑,必须报错。"""
+    import agent as A
+    out, err = A.run_tool("run_bash", {"command": 'python -c "\nprint(1)\n"'})
+    assert err and "第一行" in out
+
 def test_tool_schema_is_openai_shape():
     import agent as A
     spec = A.tool_specs()[0]

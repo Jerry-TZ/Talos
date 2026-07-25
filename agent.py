@@ -20,10 +20,13 @@ the TALOS_PROVIDER env var (default "claude"); each reads its own *_API_KEY.
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import importlib.util
+import inspect
 import json
 import os
+import platform
 import sys
 import time
 
@@ -66,6 +69,18 @@ SYSTEM = (
     "size. Never read a file just to feed it to a tool that takes a path — pass the "
     "path. Read only the part you must understand yourself, using offset/limit."
 )
+
+def _env_block() -> str:
+    """Tell the model what machine it is on — it guessed bash on Windows and burned steps."""
+    sh = "cmd.exe (NOT bash — no ls/pwd/grep/source/&&-across-lines)" if os.name == "nt" else "sh"
+    return ("\n\n<environment>\n"
+            f"OS: {platform.system()} {platform.release()}\n"
+            f"Shell used by run_bash: {sh}\n"
+            f"Working directory (already correct — never cd into the project): {WORKSPACE}\n"
+            f"Python: {sys.executable}\n"
+            "run_bash commands must be ONE line. For multi-line code, write_file a .py file "
+            "and run that file instead.\n</environment>")
+
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
 MAX_STEPS = 25       # loop safety cap: stop after this many model round-trips (guards against 空转)
@@ -147,6 +162,11 @@ def run_bash(command: str) -> str:
     # ponytail: runs on the HOST, unsandboxed. The permission gate is the guard
     # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
     import subprocess
+    if os.name == "nt" and "\n" in command:
+        # cmd.exe runs only the first line and exits 0 with no output — silent, and the
+        # model reads that as success. Refuse loudly instead.
+        raise ValueError("Windows 的 cmd 只会执行多行命令的第一行,剩下的被丢掉(而且不报错)。"
+                         "请把命令写成一行;多行代码先 write_file 存成 .py,再 `python 那个文件`。")
     env = dict(os.environ, PYTHONIOENCODING="utf-8")     # else a GBK console kills any child that prints 中文
     p = subprocess.run(command, shell=True, capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=120, env=env)
@@ -278,7 +298,10 @@ def tool_specs() -> list[dict]:
 
 def run_tool(name: str, args: dict) -> tuple[str, bool]:
     try:
-        return str(TOOLS[name][0](args)), False
+        out = TOOLS[name][0](args)
+        if inspect.iscoroutine(out):            # a self-written tool may use an async lib (playwright, httpx)
+            out = asyncio.run(out)              # — run it rather than handing back a coroutine repr
+        return str(out), False
     except Exception as e:                      # tool errors go back to the model, not crash
         return f"error: {e}", True
 
@@ -408,7 +431,8 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
             recalled = recall.recall(query)
         except Exception:
             recalled = ""
-    system = (SYSTEM + ("\n\n" + learned if learned else "")
+    system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
+              + ("\n\n" + learned if learned else "")
               + ("\n\n" + recalled if recalled else ""))
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
