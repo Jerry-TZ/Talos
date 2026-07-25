@@ -60,7 +60,11 @@ SYSTEM = (
     "commands. Prefer small, verifiable steps. Some actions need the user's "
     "approval and may be denied — if denied, read the reason and either adjust "
     "your approach or ask the user. When the task is done, reply with a one- or "
-    "two-sentence summary of what you did."
+    "two-sentence summary of what you did.\n\n"
+    "Read as little as possible: everything you read is re-sent to the model on "
+    "every later step of the task, so an early full-file read costs many times its "
+    "size. Never read a file just to feed it to a tool that takes a path — pass the "
+    "path. Read only the part you must understand yourself, using offset/limit."
 )
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
@@ -393,6 +397,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
         steps += 1
         if steps > MAX_STEPS:                          # safety cap — don't spin forever
             state["last_calls"] = calls
+            turn["steps"] = steps                      # round-trips: explains why `in` looks huge
             state["last_tok"] = turn
             return f"(已到 {MAX_STEPS} 步上限,停下了 — 任务可能太大或卡在空转;拆小些、或 /compact 后再试。)"
         with ui.thinking():
@@ -422,6 +427,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
 
         if not tool_calls:                              # no tool wanted -> final answer
             state["last_calls"] = calls
+            turn["steps"] = steps                      # round-trips: explains why `in` looks huge
             state["last_tok"] = turn
             return msg.content or ""
 
@@ -633,7 +639,7 @@ def repl(resume=None) -> None:
         ui.answer(result)
         _tk = state.get("last_tok") or {}
         if _tk.get("in") or _tk.get("out"):
-            ui.note(f"🎫 本轮 {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
+            ui.note(f"🎫 本轮 {_tk.get('steps', 1)} 次调用 · {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
                     + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
         _corr = _is_correction(task)
         if _corr or state.get("last_calls", 0) >= REFLECT_AFTER:
