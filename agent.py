@@ -157,9 +157,14 @@ def _load_tool(path: str) -> str:
     spec = importlib.util.spec_from_file_location("talos_tool_" + name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)                       # runs the file -> defines TOOL + run
-    meta = mod.TOOL
-    if not callable(getattr(mod, "run", None)):
-        raise ValueError("工具文件必须定义 run(args) 函数")
+    meta = getattr(mod, "TOOL", None)
+    if not isinstance(meta, dict) or not callable(getattr(mod, "run", None)):
+        raise ValueError(                              # actionable: a bare AttributeError taught the model nothing
+            "工具文件缺少必需的两样东西。必须在**模块最外层**(不缩进)定义:\n"
+            "TOOL = {'description': '一句话说明何时用', 'parameters': {'参数名': {'type': 'string'}}, "
+            "'required': ['参数名']}\n"
+            "def run(args: dict) -> str: ...\n"
+            "请补上后重新调用 create_tool。")
     TOOLS[name] = (mod.run, meta.get("parameters", {}), meta.get("required", []),
                    meta["description"], "bash")
     return name
@@ -167,7 +172,11 @@ def _load_tool(path: str) -> str:
 def create_tool(name: str, code: str) -> str:
     path = os.path.join(TOOLS_DIR, name + ".py")
     write_file(path, code)
-    _load_tool(path)                                   # load NOW so it's callable this turn
+    try:
+        _load_tool(path)                               # load NOW so it's callable this turn
+    except Exception:
+        os.remove(path)                                # don't leave a broken tool to fail on every startup
+        raise
     return f"工具 {name} 已创建并加载,现在可以直接调用它"
 
 def load_dynamic_tools() -> list:
@@ -461,7 +470,11 @@ REFLECT_PROMPT = (
     "skills/<kebab-name>.md:开头用 --- 包住 frontmatter(name、description=何时用),"
     "再写步骤。如果有关于用户/项目的**持久事实或教训**,用 edit_file 往 memory.md 追加"
     "一行(没有该文件就 write_file 新建)。只存下次真能帮上忙的,一次性的别存。没有值得"
-    "存的就直说、别写文件。"
+    "存的就直说、别写文件。\n"
+    "写 memory.md 前先自查,以下一律不许写:(1) 你自己刚才的做法 —— 你用 `python -c` 测试"
+    "不等于用户习惯这么做;(2) 从一两次任务归纳出的'用户喜欢…';(3) 用户的错别字、手误、"
+    "临时输入。只写用户**明确说出口**的偏好、约束、纠正。拿不准就别写 —— 错的记忆会被注入"
+    "到以后每一轮,比没有记忆更糟。"
 )
 CONSOLIDATE_PROMPT = (
     "用 run_bash `ls skills` 列出所有技能,再 read_file 逐个看。合并重复、删掉太窄或"

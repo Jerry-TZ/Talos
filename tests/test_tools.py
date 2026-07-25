@@ -60,6 +60,13 @@ def test_create_tool_and_persist(ws):
     assert A.TOOLS["dbl"][0]({"n": "21"}) == "42"
     assert "dbl" in A.load_dynamic_tools()               # 重启后还能加载
 
+def test_create_tool_failure_leaves_nothing_behind(ws):
+    import agent as A
+    with pytest.raises(ValueError, match="模块最外层"):        # 报错要能教会模型怎么改
+        A.create_tool("broken", "def run(a):\n    return '1'\n")   # 缺 TOOL
+    assert not os.path.exists(os.path.join(A.TOOLS_DIR, "broken.py"))
+    assert "broken" not in A.load_dynamic_tools()               # 不会每次启动都加载失败
+
 def test_tool_schema_is_openai_shape():
     import agent as A
     spec = A.tool_specs()[0]
