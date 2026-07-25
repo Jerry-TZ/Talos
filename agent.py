@@ -147,7 +147,9 @@ def run_bash(command: str) -> str:
     # ponytail: runs on the HOST, unsandboxed. The permission gate is the guard
     # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
     import subprocess
-    p = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=120)
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")     # else a GBK console kills any child that prints 中文
+    p = subprocess.run(command, shell=True, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=120, env=env)
     out = (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
     if len(out) > BASH_MAX_CHARS:
         out = out[:BASH_MAX_CHARS] + f"\n…(输出共 {len(out)} 字符,已截断到 {BASH_MAX_CHARS};用更精确的命令/grep 缩小范围)"
@@ -416,6 +418,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
         if steps > MAX_STEPS:                          # safety cap — don't spin forever
             state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
             state["last_calls"] = state["last_tok"]["calls"]
+            state["capped"] = True                     # a flailing turn must not teach itself its own workarounds
             return f"(已到 {MAX_STEPS} 步上限,停下了 — 任务可能太大或卡在空转;拆小些、或 /compact 后再试。)"
         with ui.thinking():
             resp = _chat(client, model=model,
@@ -664,7 +667,9 @@ def repl(resume=None) -> None:
             ui.note(f"🎫 本轮 {_tk.get('steps', 1)} 次调用 · {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
                     + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
         _corr = _is_correction(task)
-        if _corr or state.get("last_calls", 0) >= REFLECT_AFTER:
+        if state.pop("capped", False):                 # hit the step cap: it was flailing, so whatever it
+            ui.note("⏭ 这轮撞了步数上限,跳过复盘(别把瞎试出来的做法学成技能)")   # settled on is not a lesson
+        elif _corr or state.get("last_calls", 0) >= REFLECT_AFTER:
             ui.note("🧠 你纠正了它 — 复盘把这条教训记下…" if _corr
                     else f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
             try:
