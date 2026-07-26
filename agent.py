@@ -175,7 +175,9 @@ def run_bash(command: str) -> str:
         raise ValueError("Windows 的 cmd 只会执行多行命令的第一行,剩下的被丢掉(而且不报错)。"
                          "请把命令写成一行;多行代码先 write_file 存成 .py,再 `python 那个文件`。")
     env = dict(os.environ, PYTHONIOENCODING="utf-8")     # else a GBK console kills any child that prints 中文
-    p = subprocess.run(command, shell=True, capture_output=True, text=True,
+    # cwd=WORKSPACE keeps relative paths consistent with the file tools' jail. It is NOT a
+    # boundary: the command can still cd out or use absolute paths. Only a sandbox fixes that.
+    p = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
                        encoding="utf-8", errors="replace", timeout=120, env=env)
     out = (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
     if len(out) > BASH_MAX_CHARS:
