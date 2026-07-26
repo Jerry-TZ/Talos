@@ -587,6 +587,24 @@ def _is_correction(text: str) -> bool:
     t = (text or "").lower()
     return any(m in t for m in _CORRECTION_MARKERS)
 
+def once(task: str, mode: str = "bypass") -> str:
+    """Run one task and exit — the non-interactive twin of repl(), for scripting and benchmarks.
+
+    Defaults to bypass because nobody is at the keyboard to answer a permission prompt."""
+    global ui
+    import console_ui as ui
+    client, model = make_client()
+    load_dynamic_tools()
+    state = {"mode": mode, "allow": set(), "view": "normal"}
+    messages: list = [{"role": "user", "content": task}]
+    result = agent_turn(client, model, messages, state)
+    ui.answer(result)
+    t = state.get("last_tok") or {}
+    if t.get("in") or t.get("out"):
+        ui.note(f"🎫 {t.get('steps', 1)} 次调用 · {t['in']}+{t['out']}={t['in'] + t['out']} tok"
+                + (f" · 缓存命中 {t['cached']}" if t.get("cached") else ""))
+    return result
+
 def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
@@ -801,6 +819,12 @@ if __name__ == "__main__":
         i = argv.index("--delete")
         sid = S.resolve(argv[i + 1]) if len(argv) > i + 1 else None
         print(f"deleted {sid}" if (sid and S.delete(sid)) else "not found")
+    elif "-p" in argv or "--print" in argv:
+        i = argv.index("-p" if "-p" in argv else "--print")
+        if len(argv) <= i + 1:
+            print('用法: agent.py -p "任务"')
+            sys.exit(2)
+        once(argv[i + 1])
     elif "--continue" in argv:
         repl(resume=True)
     elif "--resume" in argv:
