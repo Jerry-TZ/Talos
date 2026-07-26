@@ -67,7 +67,14 @@ SYSTEM = (
     "Read as little as possible: everything you read is re-sent to the model on "
     "every later step of the task, so an early full-file read costs many times its "
     "size. Never read a file just to feed it to a tool that takes a path — pass the "
-    "path. Read only the part you must understand yourself, using offset/limit."
+    "path. Read only the part you must understand yourself, using offset/limit.\n\n"
+    "Before you start, look at the skill list below. If any description is even close to "
+    "the task, read_file its body FIRST — the descriptions are one-liners; the facts that "
+    "save you a dozen steps are in the body.\n\n"
+    "Never claim you are done on the grounds that nothing errored. Actually call what you "
+    "built and check the VALUES: an empty string, N/A, 0, or an empty list in a field the "
+    "user asked for is a failure, not a pass. Go back and fix it. If you cannot get real "
+    "values, say which fields are still wrong — do not report success."
 )
 
 def _env_block() -> str:
