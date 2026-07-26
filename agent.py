@@ -604,7 +604,11 @@ def once(task: str, mode: str = "bypass") -> str:
     load_dynamic_tools()
     state = {"mode": mode, "allow": set(), "view": "normal"}
     messages: list = [{"role": "user", "content": task}]
-    result = agent_turn(client, model, messages, state)
+    try:
+        result = agent_turn(client, model, messages, state)
+    except Exception as e:                        # unattended: report and exit non-zero, don't traceback
+        ui.error(e)
+        sys.exit(1)
     ui.answer(result)
     t = state.get("last_tok") or {}
     if t.get("in") or t.get("out"):
