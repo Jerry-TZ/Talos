@@ -38,6 +38,17 @@ def test_recall_spreading_activation(ws):
     assert not any("图文" in t for t in texts)   # 不相关
     assert R.explain("今天天气怎么样") == []      # 完全无关 -> 空
 
+def test_recall_injects_skill_body(ws):
+    """命中的技能要给正文 —— 关键字段名在正文里,只给一行描述等于没给。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "api.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: api\ndescription: 调 API 时怎么找字段\n---\n"
+                "UP主在 owner.name，播放量在 stat.view\n")
+    out = R.recall("造工具调 bilibili API 拿 UP主 和播放量")
+    assert "owner.name" in out and "stat.view" in out      # 正文进来了,不只是描述
+    assert R.recall("今天天气") == ""                       # 不相关就别注入
+
 def test_recall_usage_forgetting(ws):
     import recall as R
     with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:

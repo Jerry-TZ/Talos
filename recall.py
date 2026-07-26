@@ -26,6 +26,8 @@ DECAY = 0.6      # 每跳衰减
 HOPS = 2         # 扩散跳数
 THRESH = 0.05    # 低于此激活不算"想起来"
 EDGE_MIN = 2     # 至少共享这么多关键词才连边(保持稀疏,防止全连成一团)
+SKILL_BODIES = 2      # 最多注入几条技能正文(再多就把上下文撑爆了)
+SKILL_BODY_MAX = 1200 # 每条正文截断长度
 _STOP = set("的 了 和 是 在 我 你 它 也 就 都 一个 the a an and or to of is it".split())
 
 def _keywords(text: str) -> set:
@@ -74,7 +76,9 @@ def _load_nodes() -> list:
     for p in sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md"))):
         try:
             with open(p, encoding="utf-8") as f:
-                nodes.append({"kind": "技能", "text": _frontmatter_desc(f.read())})
+                raw = f.read()
+            # 正文也参与匹配:关键事实(字段名、坑)都在正文里,只按描述匹配会捞不到
+            nodes.append({"kind": "技能", "text": _frontmatter_desc(raw), "body": raw, "path": p})
         except Exception:
             pass
     for p in sorted(glob.glob(os.path.join(SESS_DIR, "*.jsonl"))):
@@ -82,7 +86,7 @@ def _load_nodes() -> list:
         if f:
             nodes.append({"kind": "往事", "text": f[:80]})
     for n in nodes:
-        n["kw"] = _keywords(n["text"])
+        n["kw"] = _keywords(n.get("body") or n["text"])
     return [n for n in nodes if n["kw"]]
 
 def _edges(nodes: list) -> dict:
@@ -133,7 +137,17 @@ def recall(query: str, k: int = 5) -> str:
     _record_usage(nodes, {_key(nodes[i]) for _a, i in top})
     if not top:
         return ""
-    return "# 回忆(联想到的相关记忆)\n" + "\n".join(f"- [{nodes[i]['kind']}] {nodes[i]['text']}" for _a, i in top)
+    out, bodies = [], 0
+    for _a, i in top:
+        n = nodes[i]
+        # 技能命中就直接给正文 —— 光给一行描述,模型多半懒得再 read_file 去看,
+        # 而该省你十步的字段名、坑,全在正文里。限量,别把上下文撑爆。
+        if n["kind"] == "技能" and bodies < SKILL_BODIES:
+            bodies += 1
+            out.append(f"- [技能 {n['path']}]\n{n['body'][:SKILL_BODY_MAX]}")
+        else:
+            out.append(f"- [{n['kind']}] {n['text']}")
+    return "# 回忆(联想到的相关记忆)\n" + "\n".join(out)
 
 # ── usage tracking:让"用没用到"决定记忆去留 ─────────────────────────────────────
 HITS_FILE = os.path.join(".talos", "recall_hits.json")
