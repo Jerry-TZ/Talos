@@ -118,6 +118,18 @@ def test_async_tool_is_awaited(ws):
     assert A.run_tool("a_tool", {}) == ("async ok", False)
 
 @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 特有")
+def test_bashisms_refused_with_the_cmd_equivalent(ws):
+    import agent as A
+    for c in ["notes=$(ls *.md | wc -l)", "ls -la", "cat x.py", "grep -n foo x", "pwd",
+              "dir | grep foo", "source .venv/bin/activate"]:
+        out, err = A.run_tool("run_bash", {"command": c})
+        assert err and "cmd.exe" in out, c
+    for c in ["dir notes", "python head.py", "del probe.py", "findstr /n foo x",
+              "type nul > a.txt", "mkdir notes"]:            # 别误伤正常命令
+        _out, err = A.run_tool("run_bash", {"command": c})
+        assert not err, c
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe 特有")
 def test_multiline_bash_refused_loudly(ws):
     """cmd 只跑第一行、exit 0、无输出 —— 静默成功最坑,必须报错。"""
     import agent as A

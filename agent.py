@@ -211,10 +211,27 @@ def edit_file(path: str, old: str, new: str) -> str:
     write_file(path, text.replace(old, new, 1))
     return f"edited {path}"
 
+# cmd.exe silently does something else with these, or errors uselessly. Name the equivalent.
+_BASHISM = re.compile(
+    r"\$\("                                                  # command substitution, anywhere
+    r"|(?:^|[|&;]\s*)(ls|pwd|cat|grep|wc|head|tail|awk|sed|uniq|touch|which|export|source)\b",
+    re.IGNORECASE)                                           # …the rest only in command position
+_BASH_HINTS = {
+    "wc": "数行数用 `find /c /v \"\"`。", "ls": "列目录用 `dir`。", "pwd": "当前目录用 `chdir`。",
+    "cat": "看文件用 read_file 工具。", "grep": "搜内容用 `findstr`。", "export": "设变量用 `set`。",
+    "which": "找程序用 `where`。", "touch": "建空文件用 `type nul > 文件`。",
+}
+
 def run_bash(command: str) -> str:
     # ponytail: runs on the HOST, unsandboxed. The permission gate is the guard
     # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
     import subprocess
+    if os.name == "nt":
+        bashism = _BASHISM.search(command)
+        if bashism:
+            hint = _BASH_HINTS.get(bashism.group(1) or bashism.group(0), "")
+            raise ValueError(f"这是 cmd.exe,不是 bash —— `{bashism.group(0)}` 用不了。{hint}"
+                             "复杂逻辑就 write_file 写个 .py 再 `python 那个文件`,别跟 cmd 较劲。")
     if os.name == "nt" and "\n" in command:
         # cmd.exe runs only the first line and exits 0 with no output — silent, and the
         # model reads that as success. Refuse loudly instead.
