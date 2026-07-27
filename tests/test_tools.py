@@ -70,6 +70,15 @@ def test_read_survives_windows_encodings(ws):
             f.write(raw)
         assert A._read_full(p).strip() == "- 中文 line"      # BOM 剥掉,内容不糊
 
+def test_binary_file_is_refused_not_mangled(ws):
+    """读二进制会返回乱码,模型会把乱码当内容 —— 必须报错并告诉它用什么库。"""
+    import agent as A
+    p = os.path.join(ws, "a.docx")
+    with open(p, "wb") as f:
+        f.write(b"PK\x03\x04\x00\x00binary\x00stuff")
+    with pytest.raises(ValueError, match="二进制"):
+        A._read_full(p)
+
 def test_create_tool_failure_leaves_nothing_behind(ws):
     import agent as A
     with pytest.raises(ValueError, match="模块最外层"):        # 报错要能教会模型怎么改

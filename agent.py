@@ -134,8 +134,15 @@ def _read_full(path: str) -> str:
     edit_file mojibake it would then write back over the original)."""
     with open(_in_workspace(path), "rb") as f:
         b = f.read()
-    if b[:2] in (b"\xff\xfe", b"\xfe\xff"):
+    if b[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 first: it is full of NUL bytes
         return b.decode("utf-16", errors="replace")
+    if b"\x00" in b[:8192]:
+        # Decoding this would hand back mojibake the model reads as content — it once
+        # "verified" a .docx that way and never noticed it had read nothing.
+        raise ValueError(
+            f"{path} 是二进制文件,read_file 读不了。用对应的库在 run_bash 里读,例如 "
+            "docx: `python -c \"import docx; print(docx.Document('f.docx').tables[0].rows[0].cells[0].text)\"`;"
+            "xlsx 用 openpyxl、图片用 PIL。想改它也不能用 edit_file —— 用库写。")
     return b.decode("utf-8-sig", errors="replace")
 
 def read_file(path: str, offset: int = 0, limit=None) -> str:
