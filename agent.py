@@ -27,6 +27,7 @@ import inspect
 import json
 import os
 import platform
+import re
 import sys
 import time
 
@@ -76,8 +77,11 @@ SYSTEM = (
     "a pass — including in fields you chose to print yourself, not just the ones that were "
     "asked for. Go back and fix it. If you cannot get real values, say which fields are still "
     "wrong — do not report success.\n\n"
-    "Before you finish, delete the throwaway files this task created (debug scripts, probes, "
-    "one-off intermediates) with run_bash `del`. The working directory belongs to the user."
+    "Before you finish, delete the scratch files YOU wrote for your own convenience — debug "
+    "scripts, probes, one-off intermediates. Name each file explicitly: `del probe.py`. "
+    "NEVER use a wildcard, /S, rmdir, or rm -r for this. Anything the user asked you to "
+    "produce is the deliverable and must not be touched, whether or not you created it. "
+    "If you are not certain a file is your own scratch, leave it."
 )
 
 def _env_block() -> str:
@@ -407,18 +411,28 @@ def retrieve() -> str:
 
 MODES = ("plan", "default", "acceptEdits", "bypass")
 
-def _policy(mode: str, cls: str, name: str, allow: set) -> str:
+# Bulk deletes: recursive or wildcard. One of these wiped a task's entire output because
+# run_bash had been blanket-allowed earlier in the session — so these ignore that grant.
+_DESTRUCTIVE = re.compile(
+    r"(^|[|&;]\s*)(del|erase|rd|rmdir)\b[^|&;]*(/s\b|[*?])"      # cmd.exe
+    r"|(^|[|&;]\s*)rm\b[^|&;]*(-\w*[rR]|[*?])"                   # posix
+    r"|\bRemove-Item\b[^|&;]*(-Recurse|[*?])",                   # powershell
+    re.IGNORECASE)
+
+def _policy(mode: str, cls: str, name: str, allow: set, args: dict | None = None) -> str:
     """Pure decision — 'allow' | 'deny' | 'ask'. No I/O, so it's unit-testable."""
     if cls == "read":                               return "allow"   # reads never gated
-    if mode == "bypass":                            return "allow"   # yolo
     if mode == "plan":                              return "deny"    # read-only
+    bulk_delete = name == "run_bash" and _DESTRUCTIVE.search((args or {}).get("command", ""))
+    if mode == "bypass":                            return "allow"   # yolo
     if mode == "acceptEdits" and cls == "edit":     return "allow"   # auto-accept file edits
+    if bulk_delete:                                 return "ask"     # always confirm, grant or not
     if name in allow:                               return "allow"   # user chose "allow this tool"
     return "ask"
 
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
-    decision = _policy(state["mode"], cls, name, state["allow"])
+    decision = _policy(state["mode"], cls, name, state["allow"], args)
     if decision == "allow":
         return True, ""
     if decision == "deny":
