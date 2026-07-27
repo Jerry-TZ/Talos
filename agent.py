@@ -190,15 +190,22 @@ def read_file(path: str, offset: int = 0, limit=None) -> str:
 def write_file(path: str, content: str) -> str:
     full = _in_workspace(path)
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
-    with open(full, "w", encoding="utf-8") as f:
-        f.write(content)
-    return f"wrote {len(content)} chars to {path}"
+    with open(full, "w", encoding="utf-8", newline="") as f:
+        f.write(content)                                # newline="": no \n -> \r\n translation, so
+    return f"wrote {len(content)} chars to {path}"      # what the model wrote is what edit_file reads back
 
 def edit_file(path: str, old: str, new: str) -> str:
     text = _read_full(path)                             # FULL read — a truncated read would corrupt the edit
+    if old not in text and "\r\n" in text:
+        # Models emit \n; a file written on Windows by anything else holds \r\n. Retry in the
+        # file's own line endings rather than reporting "not found" on text that is right there.
+        crlf_old, crlf_new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
+        if crlf_old in text:
+            old, new = crlf_old, crlf_new
     n = text.count(old)
     if n == 0:
-        raise ValueError("`old` string not found in file")
+        raise ValueError("`old` string not found in file — 先 read_file 看真实内容,"
+                         "old 必须和文件里的字符完全一致(包括缩进和空行)")
     if n > 1:
         raise ValueError(f"`old` string is not unique ({n} matches) — add more surrounding context")
     write_file(path, text.replace(old, new, 1))

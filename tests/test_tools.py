@@ -12,6 +12,21 @@ def test_read_write_edit(ws):
     assert A.edit_file(p, "world", "talos").startswith("edited")
     assert A._read_full(p) == "hello talos"
 
+def test_edit_matches_across_line_endings(ws):
+    """模型永远输出 \\n;文件里可能是 \\r\\n。不该因此说"找不到"。"""
+    import agent as A
+    p = os.path.join(ws, "crlf.md")
+    with open(p, "wb") as f:
+        f.write("# 标题\r\n- 总字数: 0\r\n".encode("utf-8"))
+    A.edit_file(p, "- 总字数: 0", "- 总字数: 265")
+    assert "265" in A._read_full(p) and "\r\n" in A._read_full(p)   # 原有换行风格保住
+
+def test_write_file_keeps_lf(ws):
+    import agent as A
+    p = os.path.join(ws, "lf.md")
+    A.write_file(p, "a\nb\n")
+    assert open(p, "rb").read() == b"a\nb\n"      # 不被 Windows 翻译成 \r\n
+
 def test_edit_requires_unique(ws):
     import agent as A
     p = os.path.join(ws, "t.txt")
