@@ -81,6 +81,27 @@ def test_seal_keeps_work_after_a_failed_turn():
     A._seal(msgs)
     assert len(msgs) == 4                                        # 已经补齐了就别再补
 
+def test_seal_fixes_every_unsatisfied_call_not_just_the_last():
+    """漏掉任何一个,下一次请求就 400,而且永远好不了 —— 会话直接废掉。"""
+    import agent as A
+    msgs = [{"role": "user", "content": "a"},
+            {"role": "assistant", "tool_calls": [{"id": "x1"}, {"id": "x2"}]},
+            {"role": "tool", "tool_call_id": "x1", "content": "第一个的结果"},
+            {"role": "user", "content": "b"},
+            {"role": "assistant", "tool_calls": [{"id": "y1"}]}]
+    A._seal(msgs)
+    # 每个 assistant 的 tool_calls 后面都必须紧跟齐全的结果
+    for i, m in enumerate(msgs):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            got = []
+            for later in msgs[i + 1:]:
+                if later.get("role") != "tool":
+                    break
+                got.append(later["tool_call_id"])
+            assert [c["id"] for c in m["tool_calls"]] == got, f"第 {i} 条没补齐"
+    A._seal(msgs)
+    assert len([m for m in msgs if m.get("role") == "tool"]) == 3      # 幂等,不重复补
+
 def test_prune_old_tool_results():
     import agent as A
     msgs = [{"role": "tool", "content": "Z" * 1000}] + [{"role": "user", "content": "x"}] * 10

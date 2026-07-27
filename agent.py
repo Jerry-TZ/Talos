@@ -218,6 +218,12 @@ def _sh(cmd: str, timeout: int = 180):
                           env=dict(os.environ, PYTHONIOENCODING="utf-8",
                                    PYTHONDONTWRITEBYTECODE="1", **_VENV_ENV))
 
+def _git(args: list, timeout: int = 60):
+    import subprocess
+    return subprocess.run(["git", *args], capture_output=True, text=True, cwd=WORKSPACE,
+                          encoding="utf-8", errors="replace", timeout=timeout,
+                          env=dict(os.environ, PYTHONIOENCODING="utf-8", **_VENV_ENV))
+
 def _autotest(full: str) -> str:
     if not full.endswith(".py") or not _under(full, WORKSPACE):
         return ""
@@ -244,15 +250,16 @@ def _autocommit(full: str) -> str:
     if not AUTOCOMMIT:
         return ""
     try:
-        if _sh("git rev-parse --git-dir").returncode != 0:
+        if _git(["rev-parse", "--git-dir"]).returncode != 0:
             return ""                                   # not a repo — silently skip
         rel = os.path.relpath(full, WORKSPACE)
-        if _sh(f'git diff --quiet -- "{rel}"').returncode == 0 \
-           and _sh(f'git diff --cached --quiet -- "{rel}"').returncode == 0:
+        # Pass argv as a list, not a shell string: a filename holding %VAR%, & or a quote is
+        # the model's to choose, and interpolating it into a cmd.exe line is asking for it.
+        if _git(["diff", "--quiet", "--", rel]).returncode == 0 \
+           and _git(["diff", "--cached", "--quiet", "--", rel]).returncode == 0:
             return ""                                   # this file has no change to commit
-        _sh(f'git add -- "{rel}"')
-        msg = f"talos: edit {rel}"
-        r = _sh(f'git commit -q -m "{msg}" -- "{rel}"')
+        _git(["add", "--", rel])
+        r = _git(["commit", "-q", "-m", f"talos: edit {rel}", "--", rel])
         return f"\n[自动提交] {rel} ✅" if r.returncode == 0 else f"\n[自动提交] 失败:{(r.stdout + r.stderr).strip()[:120]}"
     except Exception as e:                              # noqa: BLE001
         return f"\n[自动提交] 跳过:{str(e)[:80]}"
@@ -398,7 +405,17 @@ def _approve_tool(path: str) -> None:               # gated creation => allowed 
     d[os.path.basename(path)] = _sha(path)
     _save_tool_hashes(d)
 
+_BUILTIN_TOOLS = ("read_file", "write_file", "edit_file", "run_bash", "create_tool", "spawn_subagent")
+
 def create_tool(name: str, code: str) -> str:
+    # A name is a filename and a registry key. Unvalidated, "a/b" lands in a subdirectory that
+    # startup's glob never sees (works once, gone after restart), and "read_file" quietly
+    # replaces a built-in with model code that every later read goes through.
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", name or ""):
+        raise ValueError(f"工具名 {name!r} 不合法:只能用字母/数字/下划线,不能有路径分隔符或点,"
+                         "首字符不能是数字。用 snake_case,例如 csv_stats。")
+    if name in _BUILTIN_TOOLS:
+        raise ValueError(f"{name} 是内置工具,不能覆盖。换个名字,例如 {name}_v2。")
     path = os.path.join(TOOLS_DIR, name + ".py")
     write_file(path, code)
     try:
@@ -418,6 +435,9 @@ def load_dynamic_tools() -> list:
     loaded, quarantined = [], []
     for path in files:
         name, h = os.path.basename(path), _sha(path)
+        if os.path.splitext(name)[0] in _BUILTIN_TOOLS:
+            quarantined.append(name + "(与内置工具同名)")
+            continue
         if tofu or approved.get(name) == h:
             try:
                 loaded.append(_load_tool(path))
@@ -873,14 +893,22 @@ def _seal(messages: list) -> None:
     An assistant message carrying tool_calls must be followed by a result for every call,
     or the next request 400s. Rolling the whole turn back satisfies that but throws away
     everything the turn accomplished — and then "继续" has nothing to continue from."""
-    last = next((i for i in range(len(messages) - 1, -1, -1)
-                 if messages[i].get("role") == "assistant" and messages[i].get("tool_calls")), None)
-    if last is None:
-        return
-    done = {m.get("tool_call_id") for m in messages[last + 1:] if m.get("role") == "tool"}
-    for c in messages[last]["tool_calls"]:
-        if c["id"] not in done:
-            messages.append({"role": "tool", "tool_call_id": c["id"],
+    # Every unsatisfied assistant message, not just the last: one left behind anywhere in the
+    # history makes the next request 400, and it never heals — the session is bricked.
+    # Results must sit right after their own call, so walk backwards and insert in place.
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        done = set()
+        for later in messages[i + 1:]:
+            if later.get("role") != "tool":
+                break                                  # results are contiguous after the call
+            done.add(later.get("tool_call_id"))
+        missing = [c["id"] for c in m["tool_calls"] if c["id"] not in done]
+        for offset, cid in enumerate(missing):
+            messages.insert(i + 1 + len(done) + offset,
+                            {"role": "tool", "tool_call_id": cid,
                              "content": "(这一步被中断了 — 没有结果)"})
 
 def reflect(client, model: str, messages: list, state: dict) -> str:

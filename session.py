@@ -78,7 +78,8 @@ class Session:
         return out
 
 def _path_for(sid: str) -> str | None:
-    hits = glob.glob(os.path.join(SESS_DIR, sid + "*.jsonl"))
+    # escape: a sid of "*" would otherwise match every session and pick an arbitrary one.
+    hits = sorted(glob.glob(os.path.join(SESS_DIR, glob.escape(sid) + "*.jsonl")))
     return hits[0] if hits else None
 
 def open_session(sid: str) -> "Session | None":

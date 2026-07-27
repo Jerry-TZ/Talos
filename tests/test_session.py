@@ -38,6 +38,14 @@ def test_load_survives_poisoned_jsonl(ws):
     msgs = S.open_session("20990101-000000").load()
     assert len(msgs) == 2 and msgs[0]["content"] == "ok" and msgs[1]["content"] == "fine"
 
+def test_session_id_glob_metachars(ws):
+    """sid 里的 * 不能当通配符命中别的会话。"""
+    import session as S
+    s = S.Session.new()
+    s.save([{"role": "user", "content": "real"}])
+    assert S._path_for("*") is None and S._path_for("?") is None
+    assert S._path_for(s.sid) is not None
+
 def test_old_format_migration(ws):
     import session as S
     os.makedirs(S.SESS_DIR, exist_ok=True)
