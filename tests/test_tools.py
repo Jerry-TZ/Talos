@@ -42,6 +42,30 @@ def test_autotest_reports_a_break_on_the_edit_that_caused_it(ws, monkeypatch):
     assert "✅" in A.run_tool("edit_file", {"path": os.path.join(ws, "m.py"),
                                             "old": "3", "new": "4"})[0]
 
+def test_autocommit_only_on_pass(ws, monkeypatch):
+    import subprocess
+
+    import agent as A
+    if subprocess.run("git --version", shell=True, capture_output=True).returncode != 0:
+        import pytest
+        pytest.skip("no git")
+    for c in ["git init -q", 'git config user.email t@t.co', 'git config user.name t']:
+        subprocess.run(c, shell=True, cwd=ws)
+    A.write_file(os.path.join(ws, "m.py"), "x = 1\n")
+    subprocess.run("git add -A && git commit -qm init", shell=True, cwd=ws)
+    monkeypatch.setattr(A, "AUTOCOMMIT", True)
+
+    monkeypatch.setattr(A, "AUTOTEST", 'python -c "import sys; sys.exit(1)"')   # fail
+    A.run_tool("edit_file", {"path": os.path.join(ws, "m.py"), "old": "1", "new": "2"})
+    log = subprocess.run("git log --oneline", shell=True, cwd=ws, capture_output=True, text=True).stdout
+    assert log.count("\n") == 1                          # 只有 init,坏改动没提交
+
+    monkeypatch.setattr(A, "AUTOTEST", 'python -c "pass"')                      # pass
+    out = A.run_tool("edit_file", {"path": os.path.join(ws, "m.py"), "old": "2", "new": "3"})[0]
+    assert "[自动提交]" in out and "✅" in out
+    log = subprocess.run("git log --oneline", shell=True, cwd=ws, capture_output=True, text=True).stdout
+    assert log.count("\n") == 2
+
 def test_write_file_keeps_lf(ws):
     import agent as A
     p = os.path.join(ws, "lf.md")

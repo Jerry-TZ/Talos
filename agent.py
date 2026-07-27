@@ -199,22 +199,56 @@ def read_file(path: str, offset: int = 0, limit=None) -> str:
 # caused it instead of three steps later. Deliberately NOT a plugin hook: only the user's own
 # env can set it, and only this one command ever runs — installed skills cannot register here.
 AUTOTEST = os.environ.get("TALOS_AUTOTEST", "").strip()
+AUTOCOMMIT = os.environ.get("TALOS_AUTOCOMMIT", "").strip() in ("1", "true", "yes", "on")
+
+def _sh(cmd: str, timeout: int = 180):
+    import subprocess
+    # DONTWRITEBYTECODE: two edits in the same second leave calc.py's mtime unchanged, so
+    # Python reuses a stale .pyc and the suite passes against code that is no longer there —
+    # a false green that autocommit would then commit. No .pyc, no stale import.
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
+                          encoding="utf-8", errors="replace", timeout=timeout,
+                          env=dict(os.environ, PYTHONIOENCODING="utf-8",
+                                   PYTHONDONTWRITEBYTECODE="1", **_VENV_ENV))
 
 def _autotest(full: str) -> str:
-    if not AUTOTEST or not full.endswith(".py") or not _under(full, WORKSPACE):
+    if not full.endswith(".py") or not _under(full, WORKSPACE):
         return ""
-    import subprocess
+    passed, note = True, ""                             # no test command -> treated as "passing"
+    if AUTOTEST:
+        try:
+            p = _sh(AUTOTEST)
+        except Exception:                               # noqa: BLE001 - timeout or spawn failure
+            return f"\n[自动测试] `{AUTOTEST}` 没能跑完(超时或启动失败),已跳过,未提交"
+        out = (p.stdout + p.stderr).strip()
+        passed = p.returncode == 0
+        if passed:
+            note = f"\n[自动测试] {AUTOTEST} ✅ {out.splitlines()[-1] if out else 'ok'}"
+        else:
+            return (f"\n[自动测试] {AUTOTEST} ❌ 退出码 {p.returncode} —— 这是你刚才那次修改造成的,"
+                    f"先修好再往下做(未提交):\n" + out[-1200:])
+    return note + (_autocommit(full) if passed else "")
+
+def _autocommit(full: str) -> str:
+    """Commit the just-edited file, but only when it passed and the repo is safe to touch.
+
+    Only stages the one file — never `git add -A` — so nothing the agent left lying around
+    gets swept in, and a dirty unrelated tree is left exactly as it was."""
+    if not AUTOCOMMIT:
+        return ""
     try:
-        p = subprocess.run(AUTOTEST, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
-                           encoding="utf-8", errors="replace", timeout=180,
-                           env=dict(os.environ, PYTHONIOENCODING="utf-8", **_VENV_ENV))
-    except subprocess.TimeoutExpired:
-        return f"\n[自动测试] `{AUTOTEST}` 超过 180 秒没跑完,已放弃"
-    out = (p.stdout + p.stderr).strip()
-    if p.returncode == 0:
-        return f"\n[自动测试] {AUTOTEST} ✅ {out.splitlines()[-1] if out else 'ok'}"
-    return (f"\n[自动测试] {AUTOTEST} ❌ 退出码 {p.returncode} —— 这是你刚才那次修改造成的,先修好再往下做:\n"
-            + out[-1200:])
+        if _sh("git rev-parse --git-dir").returncode != 0:
+            return ""                                   # not a repo — silently skip
+        rel = os.path.relpath(full, WORKSPACE)
+        if _sh(f'git diff --quiet -- "{rel}"').returncode == 0 \
+           and _sh(f'git diff --cached --quiet -- "{rel}"').returncode == 0:
+            return ""                                   # this file has no change to commit
+        _sh(f'git add -- "{rel}"')
+        msg = f"talos: edit {rel}"
+        r = _sh(f'git commit -q -m "{msg}" -- "{rel}"')
+        return f"\n[自动提交] {rel} ✅" if r.returncode == 0 else f"\n[自动提交] 失败:{(r.stdout + r.stderr).strip()[:120]}"
+    except Exception as e:                              # noqa: BLE001
+        return f"\n[自动提交] 跳过:{str(e)[:80]}"
 
 def write_file(path: str, content: str) -> str:
     full = _in_workspace(path)

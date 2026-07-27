@@ -13,6 +13,10 @@ REM Run after every .py edit, so a break is reported by the step that caused it.
 REM Empty = off. Only this line can set it; an installed skill cannot.
 set "TALOS_AUTOTEST="
 
+REM Auto-commit each edited file after it passes (needs a git repo). Empty/0 = off.
+REM Commits ONE file per edit, never `git add -A`.
+set "TALOS_AUTOCOMMIT="
+
 chcp 65001 >nul
 if not exist ".venv\Scripts\python.exe" (
     echo .venv not found. Run:  python -m venv .venv
