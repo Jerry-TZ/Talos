@@ -29,6 +29,19 @@ def test_script_write_nudges_toward_create_tool(ws):
     os.makedirs(A.TOOLS_DIR, exist_ok=True)
     assert "create_tool" not in A.write_file(os.path.join(A.TOOLS_DIR, "t.py"), "x")  # 工具本身不提醒
 
+def test_autotest_reports_a_break_on_the_edit_that_caused_it(ws, monkeypatch):
+    import agent as A
+    monkeypatch.setattr(A, "AUTOTEST", "")                       # 默认关闭
+    A.write_file(os.path.join(ws, "m.py"), "x = 1\n")
+    assert "自动测试" not in A.run_tool("write_file", {"path": os.path.join(ws, "m.py"),
+                                                       "content": "x = 2\n"})[0]
+    monkeypatch.setattr(A, "AUTOTEST", "python -c \"import sys; sys.exit(1)\"")
+    out, err = A.run_tool("edit_file", {"path": os.path.join(ws, "m.py"), "old": "2", "new": "3"})
+    assert not err and "❌" in out and "退出码 1" in out         # 编辑成功,但测试失败被贴出来
+    monkeypatch.setattr(A, "AUTOTEST", "python -c \"pass\"")
+    assert "✅" in A.run_tool("edit_file", {"path": os.path.join(ws, "m.py"),
+                                            "old": "3", "new": "4"})[0]
+
 def test_write_file_keeps_lf(ws):
     import agent as A
     p = os.path.join(ws, "lf.md")

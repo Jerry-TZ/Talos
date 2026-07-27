@@ -195,6 +195,27 @@ def read_file(path: str, offset: int = 0, limit=None) -> str:
         out += f"\n…(显示第 {start + 1}-{end} 行 / 共 {total} 行;用 offset/limit 翻页,或 grep 定位)"
     return out
 
+# Run the project's own checks right after a code edit, so a break is caught by the step that
+# caused it instead of three steps later. Deliberately NOT a plugin hook: only the user's own
+# env can set it, and only this one command ever runs — installed skills cannot register here.
+AUTOTEST = os.environ.get("TALOS_AUTOTEST", "").strip()
+
+def _autotest(full: str) -> str:
+    if not AUTOTEST or not full.endswith(".py") or not _under(full, WORKSPACE):
+        return ""
+    import subprocess
+    try:
+        p = subprocess.run(AUTOTEST, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
+                           encoding="utf-8", errors="replace", timeout=180,
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8", **_VENV_ENV))
+    except subprocess.TimeoutExpired:
+        return f"\n[自动测试] `{AUTOTEST}` 超过 180 秒没跑完,已放弃"
+    out = (p.stdout + p.stderr).strip()
+    if p.returncode == 0:
+        return f"\n[自动测试] {AUTOTEST} ✅ {out.splitlines()[-1] if out else 'ok'}"
+    return (f"\n[自动测试] {AUTOTEST} ❌ 退出码 {p.returncode} —— 这是你刚才那次修改造成的,先修好再往下做:\n"
+            + out[-1200:])
+
 def write_file(path: str, content: str) -> str:
     full = _in_workspace(path)
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
@@ -423,7 +444,10 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         out = TOOLS[name][0](args)
         if inspect.iscoroutine(out):            # a self-written tool may use an async lib (playwright, httpx)
             out = asyncio.run(out)              # — run it rather than handing back a coroutine repr
-        return str(out), False
+        out = str(out)
+        if name in ("write_file", "edit_file") and args.get("path"):
+            out += _autotest(os.path.realpath(args["path"]))   # once per edit, not once per nested call
+        return out, False
     except Exception as e:                      # tool errors go back to the model, not crash
         return f"error: {e}", True
 
