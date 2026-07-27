@@ -152,6 +152,16 @@ def test_bad_calls_get_actionable_errors(ws):
     out, err = A.run_tool("run_bash\n<arg_value>pwd</arg_value>", {})   # 参数塞进了工具名
     assert err and "不能写进名字" in out
 
+def test_tool_schema_unwraps_a_full_json_schema(ws):
+    """模型常把整个 JSON Schema 塞进 parameters —— 再包一层就成了畸形,严格的服务端直接 400。"""
+    import agent as A
+    A.create_tool("nested", "TOOL={'description':'d','parameters':"
+                            "{'type':'object','properties':{'n':{'type':'integer'}},'required':['n']}}\n"
+                            "def run(a): return str(a['n'])\n")
+    spec = next(s for s in A.tool_specs() if s["function"]["name"] == "nested")
+    p = spec["function"]["parameters"]
+    assert p["properties"] == {"n": {"type": "integer"}} and p["required"] == ["n"]
+
 def test_tool_schema_is_openai_shape():
     import agent as A
     spec = A.tool_specs()[0]

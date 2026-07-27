@@ -277,8 +277,14 @@ def _load_tool(path: str) -> str:
             "'required': ['参数名']}\n"
             "def run(args: dict) -> str: ...\n"
             "请补上后重新调用 create_tool。")
-    TOOLS[name] = (mod.run, meta.get("parameters", {}), meta.get("required", []),
-                   meta["description"], "bash")
+    props, required = meta.get("parameters", {}) or {}, meta.get("required", [])
+    if isinstance(props, dict) and isinstance(props.get("properties"), dict):
+        # The model often writes `parameters` as a whole JSON Schema rather than the property
+        # map. Wrapping that again produced {"properties": {"properties": ...}}, which loose
+        # providers silently guessed their way past and strict ones reject outright.
+        required = required or props.get("required", [])
+        props = props["properties"]
+    TOOLS[name] = (mod.run, props, required, meta["description"], "bash")
     return name
 
 def create_tool(name: str, code: str) -> str:
