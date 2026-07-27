@@ -125,6 +125,16 @@ def test_async_tool_is_awaited(ws):
                             "async def run(a):\n    return 'async ok'\n")
     assert A.run_tool("a_tool", {}) == ("async ok", False)
 
+def test_bash_uses_the_venv_not_the_system_python(ws):
+    """`pip install` 必须落在 venv 里 —— 否则 agent 会把宿主机 Python 装脏。"""
+    import sys
+
+    import agent as A
+    assert A._VENV_ENV["PATH"].startswith(os.path.dirname(os.path.abspath(sys.executable)))
+    assert A._VENV_ENV["PIP_REQUIRE_VIRTUALENV"] == "1"        # 兜底:不在 venv 里 pip 直接拒绝
+    out, err = A.run_tool("run_bash", {"command": 'python -c "import sys; print(sys.prefix)"'})
+    assert not err and os.path.realpath(out.strip()) == os.path.realpath(sys.prefix)
+
 @pytest.mark.skipif(os.name != "nt", reason="cmd.exe 特有")
 def test_bashisms_refused_with_the_cmd_equivalent(ws):
     import agent as A

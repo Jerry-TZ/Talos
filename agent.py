@@ -232,6 +232,21 @@ _BASH_HINTS = {
     "which": "找程序用 `where`。", "touch": "建空文件用 `type nul > 文件`。",
 }
 
+def _venv_env() -> dict:
+    """Make `python` and `pip` inside run_bash mean the interpreter Talos is running under.
+
+    Without this they resolve off the system PATH, so `pip install x` — which the agent
+    reaches for on its own — lands in the machine-wide Python. PIP_REQUIRE_VIRTUALENV is the
+    backstop: if we are somehow not in a venv, pip refuses rather than polluting the system."""
+    bin_dir = os.path.dirname(os.path.abspath(sys.executable))
+    env = {"PATH": bin_dir + os.pathsep + os.environ.get("PATH", ""),
+           "PIP_REQUIRE_VIRTUALENV": "1"}
+    if sys.prefix != sys.base_prefix:                    # actually inside a venv
+        env["VIRTUAL_ENV"] = sys.prefix
+    return env
+
+_VENV_ENV = _venv_env()
+
 def run_bash(command: str) -> str:
     # ponytail: runs on the HOST, unsandboxed. The permission gate is the guard
     # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
@@ -247,7 +262,8 @@ def run_bash(command: str) -> str:
         # model reads that as success. Refuse loudly instead.
         raise ValueError("Windows 的 cmd 只会执行多行命令的第一行,剩下的被丢掉(而且不报错)。"
                          "请把命令写成一行;多行代码先 write_file 存成 .py,再 `python 那个文件`。")
-    env = dict(os.environ, PYTHONIOENCODING="utf-8")     # else a GBK console kills any child that prints 中文
+    env = dict(os.environ, PYTHONIOENCODING="utf-8",     # else a GBK console kills any child that prints 中文
+               **_VENV_ENV)
     # cwd=WORKSPACE keeps relative paths consistent with the file tools' jail. It is NOT a
     # boundary: the command can still cd out or use absolute paths. Only a sandbox fixes that.
     p = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
