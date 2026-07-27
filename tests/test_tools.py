@@ -21,6 +21,14 @@ def test_edit_matches_across_line_endings(ws):
     A.edit_file(p, "- 总字数: 0", "- 总字数: 265")
     assert "265" in A._read_full(p) and "\r\n" in A._read_full(p)   # 原有换行风格保住
 
+def test_script_write_nudges_toward_create_tool(ws):
+    """在写脚本的当下提醒 —— SYSTEM 里说了两轮它都没听。"""
+    import agent as A
+    assert "create_tool" in A.write_file(os.path.join(ws, "analyze.py"), "print(1)")
+    assert "create_tool" not in A.write_file(os.path.join(ws, "notes.md"), "hi")   # 只针对脚本
+    os.makedirs(A.TOOLS_DIR, exist_ok=True)
+    assert "create_tool" not in A.write_file(os.path.join(A.TOOLS_DIR, "t.py"), "x")  # 工具本身不提醒
+
 def test_write_file_keeps_lf(ws):
     import agent as A
     p = os.path.join(ws, "lf.md")

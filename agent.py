@@ -197,7 +197,12 @@ def write_file(path: str, content: str) -> str:
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
     with open(full, "w", encoding="utf-8", newline="") as f:
         f.write(content)                                # newline="": no \n -> \r\n translation, so
-    return f"wrote {len(content)} chars to {path}"      # what the model wrote is what edit_file reads back
+    msg = f"wrote {len(content)} chars to {path}"       # what the model wrote is what edit_file reads back
+    if full.endswith(".py") and not _under(full, TOOLS_DIR):
+        # Said in SYSTEM twice and ignored twice; said here, at the moment of writing, it lands.
+        msg += ("\n提示:这是个一次性脚本,跑完就没了。如果这类活以后还会再来,改用 create_tool "
+                "造成工具 —— 下次一句话就能调用,不用重写。纯探路(看看某个 API 返回什么)才用脚本。")
+    return msg
 
 def edit_file(path: str, old: str, new: str) -> str:
     text = _read_full(path)                             # FULL read — a truncated read would corrupt the edit
