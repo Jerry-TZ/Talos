@@ -482,7 +482,9 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     try:
         ans = ui.ask()
     except (KeyboardInterrupt, EOFError):
-        return False, "用户中断"
+        # Ctrl-C here means "stop the whole thing", not "decline this one call and carry on
+        # with a plan I have already given up on". Let it unwind to repl.
+        raise KeyboardInterrupt
     low = ans.lower()
     if low == "a":
         state["allow"].add(name)
@@ -722,6 +724,9 @@ def once(task: str, mode: str = "bypass") -> str:
     messages: list = [{"role": "user", "content": task}]
     try:
         result = agent_turn(client, model, messages, state)
+    except KeyboardInterrupt:
+        ui.note("⛔ 已中断")
+        sys.exit(130)
     except Exception as e:                        # unattended: report and exit non-zero, don't traceback
         ui.error(e)
         sys.exit(1)
@@ -851,6 +856,11 @@ def repl(resume=None) -> None:
         messages.append({"role": "user", "content": task})
         try:
             result = agent_turn(client, model, messages, state)
+        except KeyboardInterrupt:                  # Ctrl-C: stop this turn, keep the REPL and the work
+            _seal(messages)
+            sess.save(messages)
+            ui.note("⛔ 已停下。做过的都留着 —— 直接说新的要求就行,或者「继续」接着做。")
+            continue
         except Exception as e:
             _seal(messages)                        # keep the work; just make the history valid again
             ui.error(e)
@@ -869,6 +879,8 @@ def repl(resume=None) -> None:
                     else f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
             try:
                 reflect(client, model, messages, state)
+            except KeyboardInterrupt:                  # skipping the learning pass costs nothing
+                ui.note("⛔ 跳过复盘")
             except Exception as e:
                 ui.error(e)
         try:

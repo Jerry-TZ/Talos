@@ -24,6 +24,19 @@ def test_bulk_delete_always_asks(ws):
     # plan 仍然直接拒;bypass 仍然是无人值守模式,不改语义
     assert A._policy("plan", "bash", "run_bash", allowed, {"command": "rm -rf x"}) == "deny"
 
+def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
+    """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
+    import types
+
+    import pytest
+
+    import agent as A
+    def boom():
+        raise KeyboardInterrupt
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(preview=lambda *a: None, ask=boom))
+    with pytest.raises(KeyboardInterrupt):
+        A.check_permission({"mode": "default", "allow": set()}, "bash", "run_bash", {"command": "x"})
+
 def test_correction_detection():
     import agent as A
     assert A._is_correction("不对,应该用 glm")
