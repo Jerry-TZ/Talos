@@ -13,6 +13,17 @@ skills/
 tools/
 .talos/
 
+# the agent's scratch: debug scripts it writes mid-task, and generated output.
+# Anchored to the repo root so tests/test_*.py stays tracked.
+/debug_*.py
+/check_*.py
+/verify_*.py
+/fix_*.py
+/test_*.py
+/*.docx
+/*.xlsx
+/crawl_out/
+
 # IDE
 .idea/
 .vscode/
