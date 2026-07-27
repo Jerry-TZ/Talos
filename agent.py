@@ -132,7 +132,10 @@ def _read_full(path: str) -> str:
     PowerShell's `>` writes UTF-16LE by default, and plenty of editors add a
     UTF-8 BOM — decode those properly rather than crashing (or worse, handing
     edit_file mojibake it would then write back over the original)."""
-    with open(_in_workspace(path), "rb") as f:
+    full = _in_workspace(path)
+    if os.path.isdir(full):                       # Windows raises a bare "Permission denied" here
+        raise ValueError(f"{path} 是目录,不是文件。列目录用 run_bash `dir {path}`。")
+    with open(full, "rb") as f:
         b = f.read()
     if b[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 first: it is full of NUL bytes
         return b.decode("utf-16", errors="replace")
