@@ -470,6 +470,25 @@ def _policy(mode: str, cls: str, name: str, allow: set, args: dict | None = None
     if name in allow:                               return "allow"   # user chose "allow this tool"
     return "ask"
 
+_YES = {"y", "yes", "ok", "好", "行", "可以", "同意", "是", "1"}
+_ALL = {"a", "all", "always", "都行", "全部", "2"}
+_NO = {"", "n", "no", "不", "否", "不行", "不要", "0"}
+
+def _verdict(ans: str):
+    """'yes' | 'all' | 'no' | 'say' (deny + pass the text on) | None when it looks like a slip."""
+    low = ans.strip().lower().rstrip(".。!！")
+    if low in _YES:
+        return "yes"
+    if low in _ALL:
+        return "all"
+    if low in _NO:
+        return "no"
+    # Real guidance has a space or CJK in it ("用标准库", "use stdlib"); a short ASCII blob
+    # with neither ("yy", "ya", "a\\") is a slip at the y/a/n prompt.
+    if " " in low or any("一" <= c <= "鿿" for c in low) or len(low) >= 8:
+        return "say"
+    return None
+
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
     decision = _policy(state["mode"], cls, name, state["allow"], args)
@@ -485,13 +504,22 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # Ctrl-C here means "stop the whole thing", not "decline this one call and carry on
         # with a plan I have already given up on". Let it unwind to repl.
         raise KeyboardInterrupt
-    low = ans.lower()
-    if low == "a":
+    verdict = _verdict(ans)
+    if verdict is None:
+        # Neither an answer nor obviously guidance: probably a typo. Silently reading it as
+        # "no" has burned real approvals, so confirm rather than guess.
+        try:
+            verdict = _verdict(ui.ask_again(ans))
+        except (KeyboardInterrupt, EOFError):
+            raise KeyboardInterrupt
+        if verdict is None:                        # still unclear -> treat the text as guidance
+            verdict = "say"
+    if verdict == "all":
         state["allow"].add(name)
         return True, ""
-    if low == "y":
+    if verdict == "yes":
         return True, ""
-    if low in ("", "n"):
+    if verdict == "no":
         return False, "用户拒绝了这次调用"
     return False, f"用户拒绝,并说:{ans}"          # like Claude Code's "No, and tell it what to do"
 

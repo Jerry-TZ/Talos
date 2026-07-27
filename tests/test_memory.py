@@ -24,6 +24,30 @@ def test_bulk_delete_always_asks(ws):
     # plan 仍然直接拒;bypass 仍然是无人值守模式,不改语义
     assert A._policy("plan", "bash", "run_bash", allowed, {"command": "rm -rf x"}) == "deny"
 
+def test_permission_answer_parsing():
+    import agent as A
+    for s in ["y", "Y", " yes ", "ok", "好", "是", "可以", "1"]:
+        assert A._verdict(s) == "yes", s
+    for s in ["a", "A", "all", "always", "都行"]:
+        assert A._verdict(s) == "all", s
+    for s in ["", "n", "N", "no", "不", "不要"]:
+        assert A._verdict(s) == "no", s
+    for s in ["不要用 pandas,用标准库", "先读一下 README 再改"]:
+        assert A._verdict(s) == "say", s           # 够长 = 真的在给指示
+    for s in ["yy", "a\\", "ya", "?", "yes!!x"]:
+        assert A._verdict(s) is None, s            # 手滑 -> 别当成拒绝,回去再问一次
+
+def test_typo_reasks_instead_of_denying(ws, monkeypatch):
+    """打错一个字母不该被当成拒绝 —— 那会白白浪费一次批准。"""
+    import types
+    import agent as A
+    asked = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "yy",
+        ask_again=lambda typed: asked.append(typed) or "y"))
+    ok, _ = A.check_permission({"mode": "default", "allow": set()}, "bash", "run_bash", {"command": "x"})
+    assert ok and asked == ["yy"]
+
 def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
     """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
     import types

@@ -83,6 +83,11 @@ def preview(name: str, args: dict) -> None:
 def ask() -> str:
     return console.input(r"  [yellow]允许? \[y]一次  \[a]本会话都允许该工具  \[N]拒绝(默认) ›[/] ").strip()
 
+def ask_again(typed: str) -> str:
+    console.print(f"  [yellow]没看懂 {escape(repr(typed))} —— 打错了?[/]")
+    return console.input(r"  [yellow]\[y]允许一次  \[a]本会话都允许  \[n]拒绝  "
+                         r"或者直接说你想让它怎么做 ›[/] ").strip()
+
 def ask_yes(prompt: str) -> bool:
     return console.input(f"  [yellow]{escape(prompt)} \\[y/N] ›[/] ").strip().lower() == "y"
 
