@@ -467,16 +467,29 @@ _SKILL_RED_FLAGS = [
 def skill_risks(text: str) -> list:
     return [why for pat, why in _SKILL_RED_FLAGS if re.search(pat, text, re.I)]
 
+_SCAN_EXT = (".md", ".py", ".js", ".sh", ".ps1", ".bat", ".cmd", ".json", ".yml", ".yaml")
+
 def scan_skills() -> dict:
-    """{path: [reasons]} for skills that should not be auto-injected until a human looks."""
+    """{path: [reasons]} for anything under skills/ that a human should read first.
+
+    Walks subdirectories and non-markdown files: a downloaded skill is a package, and the
+    payload lives in the script it ships, not in the prose that describes it."""
     flagged = {}
-    for path in sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md"))):
-        try:
-            why = skill_risks(_read_full(path))
-        except Exception:
-            continue
-        if why:
-            flagged[path] = why
+    for root, _dirs, files in os.walk(SKILLS_DIR):
+        for fn in sorted(files):
+            path = os.path.join(root, fn)
+            if not fn.lower().endswith(_SCAN_EXT):
+                flagged.setdefault(path, []).append("非文本文件(自己看)")
+                continue
+            try:
+                why = skill_risks(_read_full(path))
+            except Exception:
+                continue
+            if not fn.lower().endswith(".md"):
+                why = why or []
+                why.append("可执行脚本(技能包的载荷通常在这里)")
+            if why:
+                flagged[path] = why
     return flagged
 
 def retrieve() -> str:
@@ -513,14 +526,26 @@ _DESTRUCTIVE = re.compile(
     r"|\bRemove-Item\b[^|&;]*(-Recurse|[*?])",                   # powershell
     re.IGNORECASE)
 
+# Sending data out. The Grok-CLI incident was exactly this: a tool quietly shipping the
+# user's code somewhere. Blanket-allowing run_bash must not blanket-allow egress.
+_EXFIL = re.compile(
+    r"\bgit\s+(push|remote\s+add)\b"
+    r"|\bcurl\b[^\n]*(-T|--upload-file|-F\b|--data|-d\b)"
+    r"|\bwget\b[^\n]*--post"
+    r"|\bscp\b|\brsync\b[^\n]*::|@[\w.-]+:"
+    r"|Invoke-RestMethod[^\n]*-Method\s+Post|Invoke-WebRequest[^\n]*-Method\s+Post"
+    r"|requests\.post|urllib[^\n]*urlopen\([^)]*data\s*=",
+    re.IGNORECASE)
+
 def _policy(mode: str, cls: str, name: str, allow: set, args: dict | None = None) -> str:
     """Pure decision — 'allow' | 'deny' | 'ask'. No I/O, so it's unit-testable."""
     if cls == "read":                               return "allow"   # reads never gated
     if mode == "plan":                              return "deny"    # read-only
-    bulk_delete = name == "run_bash" and _DESTRUCTIVE.search((args or {}).get("command", ""))
+    cmd = (args or {}).get("command", "") if name == "run_bash" else ""
+    risky = _DESTRUCTIVE.search(cmd) or _EXFIL.search(cmd)
     if mode == "bypass":                            return "allow"   # yolo
     if mode == "acceptEdits" and cls == "edit":     return "allow"   # auto-accept file edits
-    if bulk_delete:                                 return "ask"     # always confirm, grant or not
+    if risky:                                       return "ask"     # always confirm, grant or not
     if name in allow:                               return "allow"   # user chose "allow this tool"
     return "ask"
 
