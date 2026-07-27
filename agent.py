@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -162,6 +163,7 @@ def _in_workspace(path: str) -> str:
 
 READ_MAX_LINES = 250   # cap lines returned to the model (token saver); page with offset/limit
 BASH_MAX_CHARS = 4000  # cap run_bash output sent to the model
+READ_MAX_BYTES = 25 * 1024 * 1024   # refuse to slurp a multi-GB file into RAM (read_file is ungated)
 
 def _read_full(path: str) -> str:
     """Read a text file, tolerating what Windows tools actually produce.
@@ -172,8 +174,13 @@ def _read_full(path: str) -> str:
     full = _in_workspace(path)
     if os.path.isdir(full):                       # Windows raises a bare "Permission denied" here
         raise ValueError(f"{path} 是目录,不是文件。列目录用 run_bash `dir {path}`。")
+    size = os.path.getsize(full)
+    if size > READ_MAX_BYTES:                      # read_file is a "read" perm-class = never gated,
+        raise ValueError(                          # so an ungated caller could OOM the process
+            f"{path} 有 {size // 1024 // 1024} MB,超过 {READ_MAX_BYTES // 1024 // 1024} MB 上限,"
+            "read_file 拒绝整读。用 run_bash 里的工具按需截取(如 `more`、`findstr`)。")
     with open(full, "rb") as f:
-        b = f.read()
+        b = f.read(READ_MAX_BYTES + 1)
     if b[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 first: it is full of NUL bytes
         return b.decode("utf-16", errors="replace")
     if b"\x00" in b[:8192]:
@@ -361,25 +368,70 @@ def _load_tool(path: str) -> str:
     TOOLS[name] = (mod.run, props, required, meta["description"], "bash")
     return name
 
+# A tool's code runs at import (module top-level) and again on every call, in-process and
+# unsandboxed. create_tool is gated, so creating one is a deliberate approval. But loading at
+# startup is NOT gated — so a .py that reached tools/ any other way (clone, leftover, an
+# out-of-band write) would auto-execute with no prompt. Pin approved tools by content hash:
+# only what create_tool actually approved auto-loads; anything new or modified is quarantined.
+def _tool_hashes_path() -> str:
+    return os.path.join(os.path.dirname(TOOLS_DIR), ".talos", "tool_hashes.json")
+
+def _sha(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+def _load_tool_hashes():
+    try:
+        with open(_tool_hashes_path(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None                                    # None = never recorded = first run
+
+def _save_tool_hashes(d: dict) -> None:
+    p = _tool_hashes_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+
+def _approve_tool(path: str) -> None:               # gated creation => allowed to auto-load later
+    d = _load_tool_hashes() or {}
+    d[os.path.basename(path)] = _sha(path)
+    _save_tool_hashes(d)
+
 def create_tool(name: str, code: str) -> str:
     path = os.path.join(TOOLS_DIR, name + ".py")
     write_file(path, code)
     try:
         _load_tool(path)                               # load NOW so it's callable this turn
+        _approve_tool(path)
     except Exception:
         os.remove(path)                                # don't leave a broken tool to fail on every startup
         raise
     return f"工具 {name} 已创建并加载,现在可以直接调用它"
 
 def load_dynamic_tools() -> list:
-    """Load all previously-created tools on startup (skip broken ones)."""
-    out = []
-    for path in sorted(glob.glob(os.path.join(TOOLS_DIR, "*.py"))):
-        try:
-            out.append(_load_tool(path))
-        except Exception:
-            pass
-    return out
+    """Load only hash-approved tools. Quarantine (never exec) any unknown or modified file."""
+    files = sorted(glob.glob(os.path.join(TOOLS_DIR, "*.py")))
+    approved = _load_tool_hashes()
+    tofu = approved is None                            # first run: trust current disk, record it
+    approved = approved or {}
+    loaded, quarantined = [], []
+    for path in files:
+        name, h = os.path.basename(path), _sha(path)
+        if tofu or approved.get(name) == h:
+            try:
+                loaded.append(_load_tool(path))
+                approved[name] = h
+            except Exception:
+                pass
+        else:
+            quarantined.append(name)
+    _save_tool_hashes({k: v for k, v in approved.items()
+                       if os.path.exists(os.path.join(TOOLS_DIR, k))})
+    if quarantined and ui is not None:
+        ui.note(f"⚠️ 已隔离 {len(quarantined)} 个未经批准的工具(不会执行): {', '.join(quarantined)}。"
+                "这些文件不是通过 create_tool 造的,或造好后被改过。确认可信就删掉再让它重造。")
+    return loaded
 
 # ── delegation: spawn a sub-agent (广度, not 深度) ─────────────────────────────
 # A sub-agent is a fresh agent_turn with its OWN isolated context — only its final

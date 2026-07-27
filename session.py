@@ -60,10 +60,22 @@ class Session:
                 f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
     def load(self) -> list:
+        # A single corrupt line must not brick a resume — skip it, don't crash the whole session.
+        # Only dict messages survive; a poisoned file can't smuggle in a bare string or list.
         if not os.path.exists(self.path):
             return []
-        with open(self.path, "r", encoding="utf-8") as f:
-            return [json.loads(ln) for ln in f if ln.strip()]
+        out = []
+        with open(self.path, "r", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                if not ln.strip():
+                    continue
+                try:
+                    m = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(m, dict) and isinstance(m.get("role"), str):
+                    out.append(m)
+        return out
 
 def _path_for(sid: str) -> str | None:
     hits = glob.glob(os.path.join(SESS_DIR, sid + "*.jsonl"))

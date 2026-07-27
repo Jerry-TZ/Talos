@@ -209,6 +209,36 @@ def test_tool_schema_unwraps_a_full_json_schema(ws):
     p = spec["function"]["parameters"]
     assert p["properties"] == {"n": {"type": "integer"}} and p["required"] == ["n"]
 
+def test_unapproved_tool_is_quarantined_not_executed(ws):
+    """A5:落盘工具启动时无提示 exec。只有 create_tool 批准过的才自动加载。"""
+    import agent as A
+    A.create_tool("legit", "TOOL={'description':'d','parameters':{},'required':[]}\n"
+                           "def run(a): return 'ok'\n")
+    # 模拟带外投放:直接往 tools/ 写一个没经 create_tool 的文件
+    with open(os.path.join(A.TOOLS_DIR, "planted.py"), "w", encoding="utf-8") as f:
+        f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
+    loaded = A.load_dynamic_tools()
+    assert "legit" in loaded and "planted" not in loaded      # 批准的加载,投放的隔离
+
+def test_modified_approved_tool_is_re_quarantined(ws):
+    """批准后又被改过 = 内容变了 = 重新隔离。"""
+    import agent as A
+    A.create_tool("t", "TOOL={'description':'d','parameters':{},'required':[]}\n"
+                       "def run(a): return '1'\n")
+    with open(os.path.join(A.TOOLS_DIR, "t.py"), "a", encoding="utf-8") as f:
+        f.write("\n# tampered\n")
+    assert "t" not in A.load_dynamic_tools()
+
+def test_read_file_refuses_oversized(ws, monkeypatch):
+    """#7:read_file 不设防会被超大文件 OOM(它是 read 类,不过权限门)。"""
+    import agent as A
+    monkeypatch.setattr(A, "READ_MAX_BYTES", 100)
+    p = os.path.join(ws, "big.bin")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("a" * 500)
+    with pytest.raises(ValueError, match="上限"):
+        A.read_file(p)
+
 def test_tool_schema_is_openai_shape():
     import agent as A
     spec = A.tool_specs()[0]

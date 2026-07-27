@@ -25,6 +25,19 @@ def test_delete(ws):
     assert S.delete(s.sid) is True
     assert S.open_session(s.sid) is None
 
+def test_load_survives_poisoned_jsonl(ws):
+    """#8:一行畸形 JSON 不能让 /resume 整个崩掉。"""
+    import session as S
+    os.makedirs(S.SESS_DIR, exist_ok=True)
+    p = os.path.join(S.SESS_DIR, "20990101-000000__x.jsonl")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write('{"role":"user","content":"ok"}\n')
+        f.write('{ not json at all \n')                       # 投毒行
+        f.write('"just a bare string"\n')                     # 不是 dict
+        f.write('{"role":"assistant","content":"fine"}\n')
+    msgs = S.open_session("20990101-000000").load()
+    assert len(msgs) == 2 and msgs[0]["content"] == "ok" and msgs[1]["content"] == "fine"
+
 def test_old_format_migration(ws):
     import session as S
     os.makedirs(S.SESS_DIR, exist_ok=True)
