@@ -72,9 +72,12 @@ SYSTEM = (
     "the task, read_file its body FIRST — the descriptions are one-liners; the facts that "
     "save you a dozen steps are in the body.\n\n"
     "Never claim you are done on the grounds that nothing errored. Actually call what you "
-    "built and check the VALUES: an empty string, N/A, 0, or an empty list in a field the "
-    "user asked for is a failure, not a pass. Go back and fix it. If you cannot get real "
-    "values, say which fields are still wrong — do not report success."
+    "built and check the VALUES: an empty string, N/A, 0, or an empty list is a failure, not "
+    "a pass — including in fields you chose to print yourself, not just the ones that were "
+    "asked for. Go back and fix it. If you cannot get real values, say which fields are still "
+    "wrong — do not report success.\n\n"
+    "Before you finish, delete the throwaway files this task created (debug scripts, probes, "
+    "one-off intermediates) with run_bash `del`. The working directory belongs to the user."
 )
 
 def _env_block() -> str:
@@ -93,7 +96,7 @@ def _env_block() -> str:
 
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
-MAX_STEPS = int(os.environ.get("TALOS_MAX_STEPS", "25"))   # loop safety cap (guards against 空转)
+MAX_STEPS = int(os.environ.get("TALOS_MAX_STEPS", "100"))  # loop safety cap (guards against 空转)
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 _RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
