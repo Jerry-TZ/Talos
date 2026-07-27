@@ -120,6 +120,12 @@ def make_client():
 #   the .py source itself — never writable once WORKSPACE is not HOME.
 HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.path.realpath(os.environ.get("TALOS_WORKSPACE", "."))
+if os.path.isdir(WORKSPACE):
+    # Actually stand in the workspace. Otherwise a relative path means two different places:
+    # the jail resolves it against the process cwd (outside -> 越界) while the model, quite
+    # reasonably, means "in the workspace". Self-written tools calling open() hit the same
+    # split. HOME paths are absolute, so the agent's brain is unaffected.
+    os.chdir(WORKSPACE)
 
 def _under(full: str, root: str) -> bool:
     try:

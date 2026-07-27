@@ -43,6 +43,15 @@ def test_run_bash_truncation(ws, monkeypatch):
     out = A.run_bash("echo hello world foo bar baz qux")
     assert "已截断" in out
 
+def test_relative_paths_resolve_inside_workspace(ws, monkeypatch):
+    """模型写 'notes/x.md' 指的是工作区里,不是进程碰巧站着的地方。"""
+    import agent as A
+    monkeypatch.chdir(ws)
+    os.makedirs(os.path.join(ws, "notes"), exist_ok=True)
+    A.write_file("notes/x.md", "hi")                      # 相对路径,不该越界
+    assert os.path.exists(os.path.join(ws, "notes", "x.md"))
+    assert A.read_file("notes/x.md") == "hi"
+
 def test_workspace_jail(ws):
     import agent as A
     outside = os.path.join(tempfile.mkdtemp(), "evil.txt")
