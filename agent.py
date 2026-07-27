@@ -826,6 +826,27 @@ def repl(resume=None) -> None:
             except Exception as e:
                 ui.error(e)
             continue
+        if task.startswith("/workspace"):              # 换工作目录,不用退出去设环境变量
+            arg = task[10:].strip().strip('"')
+            if not arg:
+                ui.note(f"当前工作目录:{WORKSPACE}(只有这里面的文件能读写)")
+                continue
+            new = os.path.realpath(arg)
+            if not os.path.isdir(new):
+                ui.note(f"没有这个目录:{new}")
+                continue
+            globals()["WORKSPACE"] = new
+            os.chdir(new)                              # 相对路径跟着一起搬,和启动时一致
+            ui.note(f"工作目录 → {new}")
+            continue
+        if task.startswith("/model"):                  # 换模型,不用退出去设环境变量
+            arg = task[6:].strip()
+            if not arg:
+                ui.note(f"当前模型:{model}")
+                continue
+            model = arg
+            ui.note(f"模型 → {model}(下一轮生效;换错了会报 404/400,再换回来即可)")
+            continue
         if task == "/tokens":
             t = state.get("tok", {"in": 0, "out": 0, "cached": 0})
             ui.note(f"本会话累计:{t.get('steps', 0)} 次调用 · 输入 {t['in']} + 输出 {t['out']}"
