@@ -340,9 +340,22 @@ def tool_specs() -> list[dict]:
         for name, (_fn, props, required, desc, _cls) in TOOLS.items()
     ]
 
+def _schema_hint(name: str) -> str:
+    _fn, props, required, _desc, _cls = TOOLS[name]
+    return (f"{name} 的参数应该是一个 JSON 对象:"
+            + json.dumps({k: f"<{v.get('type', 'string')}>" for k, v in props.items()}, ensure_ascii=False)
+            + (f",其中 {', '.join(required)} 必填。" if required else "。"))
+
 def run_tool(name: str, args: dict) -> tuple[str, bool]:
+    name = (name or "").strip()
     if name not in TOOLS:                       # a bare KeyError told nobody anything
-        return f"error: 没有名叫 {name} 的工具。现有工具:{', '.join(sorted(TOOLS))}", True
+        # Some models leak their own call syntax into the name field. Say so plainly rather
+        # than echoing the garbage back, or the next attempt is just a different guess.
+        return (f"error: 没有名叫 {name!r} 的工具。工具名必须是纯名字,参数要放在 arguments 的 "
+                f"JSON 里,不能写进名字。现有工具:{', '.join(sorted(TOOLS))}"), True
+    missing = [k for k in TOOLS[name][2] if k not in (args or {})]
+    if missing:
+        return f"error: 调用 {name} 少了必填参数 {missing}。{_schema_hint(name)}", True
     try:
         out = TOOLS[name][0](args)
         if inspect.iscoroutine(out):            # a self-written tool may use an async lib (playwright, httpx)

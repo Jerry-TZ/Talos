@@ -109,6 +109,14 @@ def test_multiline_bash_refused_loudly(ws):
     out, err = A.run_tool("run_bash", {"command": 'python -c "\nprint(1)\n"'})
     assert err and "第一行" in out
 
+def test_bad_calls_get_actionable_errors(ws):
+    """模型偶尔会吐畸形调用 —— 报错要说清正确形状,否则它只能换个姿势再猜。"""
+    import agent as A
+    out, err = A.run_tool("run_bash", {})                    # 少必填参数
+    assert err and "command" in out and "必填" in out
+    out, err = A.run_tool("run_bash\n<arg_value>pwd</arg_value>", {})   # 参数塞进了工具名
+    assert err and "不能写进名字" in out
+
 def test_tool_schema_is_openai_shape():
     import agent as A
     spec = A.tool_specs()[0]
