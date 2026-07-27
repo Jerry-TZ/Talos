@@ -84,7 +84,10 @@ def _env_block() -> str:
             f"OS: {platform.system()} {platform.release()}\n"
             f"Shell used by run_bash: {sh}\n"
             f"Working directory (already correct — never cd into the project): {WORKSPACE}\n"
-            f"Python: {sys.executable}\n"
+            + (f"File tools are limited to that directory. Your own skills/tools/memory live in "
+               f"{HOME} and stay writable; the agent's source code there does NOT.\n"
+               if HOME != WORKSPACE else "")
+            + f"Python: {sys.executable}\n"
             "run_bash commands must be ONE line. For multi-line code, write_file a .py file "
             "and run that file instead.\n</environment>")
 
@@ -111,17 +114,30 @@ def make_client():
 # 工作目录限制:文件工具只能在 WORKSPACE 内活动(默认当前目录,TALOS_WORKSPACE 可改)。
 # ⚠️ 只锁得住文件工具;run_bash 里一条 cd 仍能出去 —— 彻底隔离要 Step 3 沙箱。
 
+# Three different things, kept apart (Claude Code separates ~/.claude from the cwd the same way):
+#   HOME      — the agent's brain: skills, self-written tools, memory, sessions.
+#   WORKSPACE — the only place file tools may touch. Point it elsewhere and the source is safe.
+#   the .py source itself — never writable once WORKSPACE is not HOME.
+HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.path.realpath(os.environ.get("TALOS_WORKSPACE", "."))
 
-def _in_workspace(path: str) -> str:
-    full = os.path.realpath(path)
+def _under(full: str, root: str) -> bool:
     try:
-        inside = os.path.commonpath([full, WORKSPACE]) == WORKSPACE
+        return os.path.commonpath([full, root]) == root
     except ValueError:                        # 不同盘符(Windows)= 肯定在外面
-        inside = False
-    if not inside:
-        raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})")
-    return full
+        return False
+
+def _in_workspace(path: str) -> str:
+    """Allow the workspace, plus the agent's own brain (skills/tools/memory).
+
+    Note what is NOT allowed when WORKSPACE is pointed elsewhere: HOME itself, i.e.
+    agent.py and friends. Reflection still writes skills; the agent still cannot
+    rewrite the loop it is running inside."""
+    full = os.path.realpath(path)
+    if (_under(full, WORKSPACE) or _under(full, SKILLS_DIR) or _under(full, TOOLS_DIR)
+            or full == os.path.realpath(MEMORY_FILE)):
+        return full
+    raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})")
 
 READ_MAX_LINES = 250   # cap lines returned to the model (token saver); page with offset/limit
 BASH_MAX_CHARS = 4000  # cap run_bash output sent to the model
@@ -198,7 +214,7 @@ def run_bash(command: str) -> str:
 # ⚠️ create_tool exec()s model-written code IN THIS PROCESS — scarier than
 # run_bash's subprocess. It's gated (perm-class "bash"); real isolation = Step 3.
 
-TOOLS_DIR = "tools"      # agent-written tools live here; auto-loaded on startup, so they persist
+TOOLS_DIR = os.path.join(HOME, "tools")   # agent-written tools; auto-loaded on startup, so they persist
 
 def _load_tool(path: str) -> str:
     """Import a tool file and register it. File must define TOOL(dict) + run(args)->str."""
@@ -329,8 +345,8 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
 # ── learned knowledge: memory (facts) + skills (procedures) ───────────────────
 # Learning = notes the agent writes for itself, read back later. Not training.
 
-SKILLS_DIR = "skills"
-MEMORY_FILE = "memory.md"
+SKILLS_DIR = os.path.join(HOME, "skills")
+MEMORY_FILE = os.path.join(HOME, "memory.md")
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Split a leading `---`-fenced block from the body. Minimal `key: value`."""
@@ -528,8 +544,9 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
 
 REFLECT_PROMPT = (
     "复盘刚才的对话。如果有**可复用的做法**值得留下,用 write_file 存成 "
-    "skills/<kebab-name>.md:开头用 --- 包住 frontmatter(name、description=何时用),"
-    "再写步骤。如果有关于用户/项目的**持久事实或教训**,用 edit_file 往 memory.md 追加"
+    f"{os.path.join(SKILLS_DIR, '<kebab-name>.md')}(**用这个完整路径**,别用相对路径):"
+    "开头用 --- 包住 frontmatter(name、description=何时用),"
+    f"再写步骤。如果有关于用户/项目的**持久事实或教训**,用 edit_file 往 {MEMORY_FILE} 追加"
     "一行(没有该文件就 write_file 新建)。只存下次真能帮上忙的,一次性的别存。没有值得"
     "存的就直说、别写文件。\n"
     "同名技能**已经存在时,先 read_file 读它,再用 edit_file 改**,绝不许 write_file 盖掉 —— "

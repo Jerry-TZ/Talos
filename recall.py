@@ -18,9 +18,10 @@ import json
 import os
 import re
 
-MEMORY_FILE = "memory.md"
-SKILLS_DIR = "skills"
-SESS_DIR = os.path.join(".talos", "sessions")
+HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
+MEMORY_FILE = os.path.join(HOME, "memory.md")
+SKILLS_DIR = os.path.join(HOME, "skills")
+SESS_DIR = os.path.join(HOME, ".talos", "sessions")
 
 DECAY = 0.6      # 每跳衰减
 HOPS = 2         # 扩散跳数
@@ -150,7 +151,7 @@ def recall(query: str, k: int = 5) -> str:
     return "# 回忆(联想到的相关记忆)\n" + "\n".join(out)
 
 # ── usage tracking:让"用没用到"决定记忆去留 ─────────────────────────────────────
-HITS_FILE = os.path.join(".talos", "recall_hits.json")
+HITS_FILE = os.path.join(HOME, ".talos", "recall_hits.json")
 
 def _key(node: dict) -> str:
     return node["kind"] + ":" + node["text"][:80]

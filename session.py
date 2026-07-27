@@ -14,7 +14,8 @@ import os
 import re
 import time
 
-SESS_DIR = os.path.join(".talos", "sessions")
+HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
+SESS_DIR = os.path.join(HOME, ".talos", "sessions")   # sessions follow the agent, not the cwd
 
 def _slug(text: str, n: int = 24) -> str:
     """把第一句 prompt 压成文件名安全的短标题(保留中英数字)。"""
