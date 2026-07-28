@@ -1,2 +1,5 @@
-openai
-rich
+# Pinned to the major versions Talos is actually tested against (openai 2.x, rich 15.x).
+# The OpenAI SDK has broken across majors before; a harness that silently stops starting is
+# worse than one that refuses to install.
+openai>=2.0,<3
+rich>=13.7,<16
