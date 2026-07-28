@@ -79,6 +79,14 @@ def preview(name: str, args: dict) -> None:
         console.print(f"    [dim]改 {args.get('path', '?')}[/]")
         console.print(Text.assemble(("    - ", "red"), (_short(args.get("old", ""), 120), "red")))
         console.print(Text.assemble(("    + ", "green"), (_short(args.get("new", ""), 120), "green")))
+    elif name == "create_tool":
+        # This code is exec'd in-process the moment you approve it, so it is the one preview
+        # that must never be clipped — it used to fall through to the 70-char summary below.
+        code = str(args.get("code", ""))
+        console.print(f"    [dim]造工具 {escape(str(args.get('name', '?')))} ({len(code)} chars) — "
+                      f"批准后会在 Talos 进程内立即执行[/]")
+        console.print(Syntax(code, "python", theme="ansi_dark",
+                             background_color="default", word_wrap=True))
     else:
         console.print(f"    [dim]{_short(args)}[/]")
 

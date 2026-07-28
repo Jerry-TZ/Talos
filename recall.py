@@ -64,7 +64,11 @@ def _first_user(path: str) -> str:
         pass
     return ""
 
-def _load_nodes() -> list:
+def _load_nodes(blocked=None) -> list:
+    """`blocked`: skill paths scan_skills() flagged. Quarantine has to hold on every path
+    that reaches the system prompt — retrieve() filtered them, this index did not, so a
+    flagged skill's body still got injected whenever the query happened to match it."""
+    blocked = {os.path.normcase(os.path.realpath(p)) for p in (blocked or ())}
     nodes = []
     try:                                          # best-effort layer: a garbled memory.md
         with open(MEMORY_FILE, encoding="utf-8") as f:   # means no recall, never a crash
@@ -75,6 +79,8 @@ def _load_nodes() -> list:
     except (OSError, UnicodeDecodeError):
         pass
     for p in sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md"))):
+        if os.path.normcase(os.path.realpath(p)) in blocked:
+            continue                                  # 被 scan_skills 标红的,这条路也不许进
         try:
             with open(p, encoding="utf-8") as f:
                 raw = f.read()
@@ -120,20 +126,20 @@ def _activate(nodes: list, edges: dict, query: str) -> dict:
         act = nxt
     return act
 
-def _rank(query: str):
-    nodes = _load_nodes()
+def _rank(query: str, blocked=None):
+    nodes = _load_nodes(blocked)
     act = _activate(nodes, _edges(nodes), query)
     ranked = [(round(a, 2), i) for i, a in sorted(act.items(), key=lambda x: -x[1]) if a > THRESH]
     return nodes, ranked
 
-def explain(query: str, k: int = 8) -> list:
+def explain(query: str, k: int = 8, blocked=None) -> list:
     """[(score, kind, text), ...] top-k —— 给 /recall 调试用(无副作用)。"""
-    nodes, ranked = _rank(query)
+    nodes, ranked = _rank(query, blocked)
     return [(a, nodes[i]["kind"], nodes[i]["text"]) for a, i in ranked][:k]
 
-def recall(query: str, k: int = 5) -> str:
+def recall(query: str, k: int = 5, blocked=None) -> str:
     """注入上下文的"联想记忆"文本块;顺便记录命中(供 usage-based 遗忘)。"""
-    nodes, ranked = _rank(query)
+    nodes, ranked = _rank(query, blocked)
     top = ranked[:k]
     _record_usage(nodes, {_key(nodes[i]) for _a, i in top})
     if not top:

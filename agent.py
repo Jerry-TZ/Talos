@@ -387,12 +387,16 @@ def _sha(path: str) -> str:
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
 
-def _load_tool_hashes():
+def _load_tool_hashes() -> dict:
+    # Fail closed. A missing or corrupt manifest used to mean "trust whatever is on disk",
+    # which handed the bypass to anyone who could delete one file. A non-dict payload was
+    # worse: it crashed startup on `.get`. Unreadable manifest => nothing auto-loads.
     try:
         with open(_tool_hashes_path(), encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
     except Exception:
-        return None                                    # None = never recorded = first run
+        return {}
 
 def _save_tool_hashes(d: dict) -> None:
     p = _tool_hashes_path()
@@ -426,31 +430,41 @@ def create_tool(name: str, code: str) -> str:
         raise
     return f"工具 {name} 已创建并加载,现在可以直接调用它"
 
+def approve_all_tools() -> list:
+    """`--approve-tools`: record every tool currently on disk as approved.
+
+    The manifest fails closed, so tools predating it — or a machine where it was lost —
+    would otherwise be stranded with no way back. Deliberately a separate, explicit command:
+    re-approving is the user's decision, not something startup does quietly on their behalf."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(TOOLS_DIR, "*.py"))):
+        if os.path.splitext(os.path.basename(path))[0] in _BUILTIN_TOOLS:
+            continue
+        _approve_tool(path)
+        out.append(os.path.basename(path))
+    return out
+
 def load_dynamic_tools() -> list:
     """Load only hash-approved tools. Quarantine (never exec) any unknown or modified file."""
     files = sorted(glob.glob(os.path.join(TOOLS_DIR, "*.py")))
     approved = _load_tool_hashes()
-    tofu = approved is None                            # first run: trust current disk, record it
-    approved = approved or {}
     loaded, quarantined = [], []
     for path in files:
         name, h = os.path.basename(path), _sha(path)
         if os.path.splitext(name)[0] in _BUILTIN_TOOLS:
             quarantined.append(name + "(与内置工具同名)")
             continue
-        if tofu or approved.get(name) == h:
+        if approved.get(name) == h:
             try:
                 loaded.append(_load_tool(path))
-                approved[name] = h
             except Exception:
                 pass
         else:
             quarantined.append(name)
-    _save_tool_hashes({k: v for k, v in approved.items()
-                       if os.path.exists(os.path.join(TOOLS_DIR, k))})
     if quarantined and ui is not None:
-        ui.note(f"⚠️ 已隔离 {len(quarantined)} 个未经批准的工具(不会执行): {', '.join(quarantined)}。"
-                "这些文件不是通过 create_tool 造的,或造好后被改过。确认可信就删掉再让它重造。")
+        ui.note(f"⚠️ 已隔离 {len(quarantined)} 个未批准的工具(不会执行): {', '.join(quarantined)}。"
+                "它们不是通过 create_tool 造的,或造好后被改过。"
+                "自己看过确认可信,就跑 `python agent.py --approve-tools` 批准。")
     return loaded
 
 # ── delegation: spawn a sub-agent (广度, not 深度) ─────────────────────────────
@@ -773,6 +787,7 @@ def _chat(client, **kwargs):
 def agent_turn(client, model: str, messages: list, state: dict) -> str:
     """Drive one user request to completion, looping over tool calls."""
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
+    flagged = scan_skills()                            # one quarantine set, shared by BOTH paths
     learned = retrieve()                               # always-on: memory + skill descriptions
     query = next((m["content"] for m in reversed(messages)
                   if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
@@ -780,7 +795,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
     if query:
         try:
             import recall                              # 联想回忆:按当前任务捞相关记忆(spreading activation)
-            recalled = recall.recall(query)
+            recalled = recall.recall(query, blocked=set(flagged))
         except Exception:
             recalled = ""
     system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
@@ -1076,7 +1091,7 @@ def repl(resume=None) -> None:
         if task.startswith("/recall"):                 # 看联想回忆的激活分数
             try:
                 import recall
-                rows = recall.explain(task[7:].strip())
+                rows = recall.explain(task[7:].strip(), blocked=set(scan_skills()))
             except Exception as e:
                 ui.error(e); continue
             if rows:
@@ -1214,6 +1229,10 @@ if __name__ == "__main__":
     argv = sys.argv[1:]
     if "--selfcheck" in argv:
         _selfcheck()
+    elif "--approve-tools" in argv:
+        names = approve_all_tools()
+        print("已批准(下次启动会自动加载):\n  " + "\n  ".join(names) if names else "tools/ 里没有工具")
+        print("\n⚠️ 这些文件的代码会在启动时执行。批准前请自己看过。")
     elif "--list" in argv:
         import console_ui as ui, session as S
         ui.sessions_list(S.list_sessions())

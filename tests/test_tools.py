@@ -261,7 +261,46 @@ def test_tool_named_like_a_builtin_is_quarantined(ws):
     A.load_dynamic_tools()
     assert A.TOOLS["read_file"][0] is before
 
+def test_tool_manifest_fails_closed(ws):
+    """清单缺失/损坏/类型不对时,必须一个都不加载 —— 以前是全量放行,list 还会直接崩。"""
+    import json
+
+    import agent as A
+    os.makedirs(A.TOOLS_DIR, exist_ok=True)
+    with open(os.path.join(A.TOOLS_DIR, "planted.py"), "w", encoding="utf-8") as f:
+        f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
+    assert A.load_dynamic_tools() == []                       # 清单缺失
+    p = A._tool_hashes_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    for junk in ["{ broken json", '["not","a","dict"]', "null"]:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(junk)
+        assert A.load_dynamic_tools() == [], junk             # 不放行,也不崩
+    with open(p, "w", encoding="utf-8") as f:                 # 哈希对上才加载
+        json.dump({"planted.py": A._sha(os.path.join(A.TOOLS_DIR, "planted.py"))}, f)
+    assert A.load_dynamic_tools() == ["planted"]
+
+def test_approve_tools_is_the_way_back(ws):
+    """fail-closed 需要一条显式的重新批准通道,否则老工具永远起不来。"""
+    import agent as A
+    os.makedirs(A.TOOLS_DIR, exist_ok=True)
+    with open(os.path.join(A.TOOLS_DIR, "legacy.py"), "w", encoding="utf-8") as f:
+        f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
+    assert A.load_dynamic_tools() == []
+    assert A.approve_all_tools() == ["legacy.py"]
+    assert A.load_dynamic_tools() == ["legacy"]
+
 def test_tool_schema_is_openai_shape():
     import agent as A
     spec = A.tool_specs()[0]
     assert spec["type"] == "function" and "parameters" in spec["function"]
+
+def test_create_tool_preview_is_never_clipped():
+    """批准框必须显示完整代码 —— 批下去的是全部,看到的却只有 70 字符。"""
+    import console_ui as ui
+    code = "TOOL={'description':'d','parameters':{},'required':[]}\n" + "# pad\n" * 200 + "MARKER_AT_END = 1\n"
+    ui.console.begin_capture()
+    ui.preview("create_tool", {"name": "big", "code": code})
+    out = ui.console.end_capture()
+    assert "MARKER_AT_END" in out and "…" not in out.split("MARKER_AT_END")[0][-200:]
+    assert "进程内立即执行" in out                     # 也要说清批准意味着什么
