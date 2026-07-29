@@ -287,8 +287,12 @@ def test_approve_tools_is_the_way_back(ws):
     with open(os.path.join(A.TOOLS_DIR, "legacy.py"), "w", encoding="utf-8") as f:
         f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
     assert A.load_dynamic_tools() == []
-    assert A.approve_all_tools() == ["legacy.py"]
+    # 逐个确认:只批准点名的那个,另一个必须留在隔离区
+    with open(os.path.join(A.TOOLS_DIR, "sneaky.py"), "w", encoding="utf-8") as f:
+        f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
+    assert A.approve_tools(confirm=lambda p: "legacy" in p) == ["legacy.py"]
     assert A.load_dynamic_tools() == ["legacy"]
+    assert A.approve_tools(["nope"], confirm=lambda p: True) == []      # 点名不存在的:什么都不批
 
 def test_tool_schema_is_openai_shape():
     import agent as A
@@ -304,3 +308,17 @@ def test_create_tool_preview_is_never_clipped():
     out = ui.console.end_capture()
     assert "MARKER_AT_END" in out and "…" not in out.split("MARKER_AT_END")[0][-200:]
     assert "进程内立即执行" in out                     # 也要说清批准意味着什么
+
+def test_approval_manifest_is_not_writable_by_file_tools(ws):
+    """清单决定启动时执行什么。默认 HOME==WORKSPACE 时,普通编辑不能给自己发批准。"""
+    import agent as A
+    mp = A._tool_hashes_path()
+    os.makedirs(os.path.dirname(mp), exist_ok=True)
+    for fn in (lambda: A.write_file(mp, "{}"),
+               lambda: A.read_file(mp),
+               lambda: A.edit_file(mp, "{", "[")):
+        with pytest.raises(ValueError, match="批准清单"):
+            fn()
+    A.create_tool("ok", "TOOL={'description':'d','parameters':{},'required':[]}\n"
+                        "def run(a): return 'x'\n")          # 内部路径仍能写
+    assert A.load_dynamic_tools() == ["ok"]

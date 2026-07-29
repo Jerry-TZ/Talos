@@ -188,6 +188,13 @@ def _in_workspace(path: str) -> str:
     agent.py and friends. Reflection still writes skills; the agent still cannot
     rewrite the loop it is running inside."""
     full = os.path.realpath(path)
+    if full == os.path.realpath(_tool_hashes_path()):
+        # This file decides which code runs at startup. With the default layout it sits inside
+        # WORKSPACE, so an ordinary approved edit could write a tool AND its digest — granting
+        # itself the very approval create_tool exists to require. Only create_tool and the
+        # explicit recovery command may touch it, and neither goes through here.
+        raise ValueError("拒绝访问工具批准清单:它决定启动时执行哪些代码,"
+                         "只能由 create_tool 或 `--approve-tools` 更新。")
     if _is_secret_path(full):
         raise ValueError(f"拒绝访问 {path}:这是凭据文件。Talos 不读也不写这类文件 —— "
                          "读到的内容会进模型上下文和明文会话日志。key 用环境变量传给程序即可。")
@@ -465,18 +472,31 @@ def create_tool(name: str, code: str) -> str:
         raise
     return f"工具 {name} 已创建并加载,现在可以直接调用它"
 
-def approve_all_tools() -> list:
-    """`--approve-tools`: record every tool currently on disk as approved.
+def approve_tools(names=(), confirm=None) -> list:
+    """`--approve-tools [name ...]`: the way back from a fail-closed manifest.
 
-    The manifest fails closed, so tools predating it — or a machine where it was lost —
-    would otherwise be stranded with no way back. Deliberately a separate, explicit command:
-    re-approving is the user's decision, not something startup does quietly on their behalf."""
-    out = []
+    Shows each file's full source and asks per file, because "recover my old tools" and
+    "authorize every .py sitting in this directory" are not the same request — one forgotten
+    file mixed in with legitimate ones would otherwise get startup execution for free.
+    Nothing is imported here; approval only records a digest."""
+    wanted, out = set(names or ()), []
     for path in sorted(glob.glob(os.path.join(TOOLS_DIR, "*.py"))):
-        if os.path.splitext(os.path.basename(path))[0] in _BUILTIN_TOOLS:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        if stem in _BUILTIN_TOOLS or (wanted and stem not in wanted):
             continue
-        _approve_tool(path)
-        out.append(os.path.basename(path))
+        try:
+            code = _read_full(path)
+        except Exception as e:
+            print(f"\n--- {path} 读不了,跳过 ({type(e).__name__}) ---")
+            continue
+        print(f"\n{'=' * 70}\n{path}  ({len(code)} chars)\n{'=' * 70}\n{code}")
+        # ASCII marker, not an emoji: this can be called before stdout is switched to UTF-8,
+        # and a GBK console would raise on the way out — turning a warning into a crash.
+        print(f"{'=' * 70}\n[!] 批准后,以上代码会在每次启动时于 Talos 进程内执行。")
+        ok = confirm(path) if confirm else input("批准这一个? [y/N] ").strip().lower() == "y"
+        if ok:
+            _approve_tool(path)                    # digest recorded only after you said yes
+            out.append(os.path.basename(path))
     return out
 
 def load_dynamic_tools() -> list:
@@ -857,7 +877,8 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
     if query:
         try:
             import recall                              # 联想回忆:按当前任务捞相关记忆(spreading activation)
-            recalled = recall.recall(query, blocked=set(flagged))
+            recalled = recall.recall(query, blocked=set(flagged),
+                                     keep_fact=lambda ln: not skill_risks(ln))
         except Exception:
             recalled = ""
     system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
@@ -1153,7 +1174,8 @@ def repl(resume=None) -> None:
         if task.startswith("/recall"):                 # 看联想回忆的激活分数
             try:
                 import recall
-                rows = recall.explain(task[7:].strip(), blocked=set(scan_skills()))
+                rows = recall.explain(task[7:].strip(), blocked=set(scan_skills()),
+                                      keep_fact=lambda ln: not skill_risks(ln))
             except Exception as e:
                 ui.error(e); continue
             if rows:
@@ -1292,9 +1314,10 @@ if __name__ == "__main__":
     if "--selfcheck" in argv:
         _selfcheck()
     elif "--approve-tools" in argv:
-        names = approve_all_tools()
-        print("已批准(下次启动会自动加载):\n  " + "\n  ".join(names) if names else "tools/ 里没有工具")
-        print("\n⚠️ 这些文件的代码会在启动时执行。批准前请自己看过。")
+        i = argv.index("--approve-tools")
+        approved = approve_tools([a for a in argv[i + 1:] if not a.startswith("-")])
+        print("\n已批准(下次启动会自动加载):\n  " + "\n  ".join(approved) if approved
+              else "\n没有批准任何工具。")
     elif "--list" in argv:
         import console_ui as ui, session as S
         ui.sessions_list(S.list_sessions())
