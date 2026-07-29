@@ -301,7 +301,7 @@ def test_tool_schema_is_openai_shape():
 
 def test_create_tool_preview_is_never_clipped():
     """批准框必须显示完整代码 —— 批下去的是全部,看到的却只有 70 字符。"""
-    import console_ui as ui
+    ui = pytest.importorskip("console_ui", reason="需要 rich(界面层的可选依赖)")
     code = "TOOL={'description':'d','parameters':{},'required':[]}\n" + "# pad\n" * 200 + "MARKER_AT_END = 1\n"
     ui.console.begin_capture()
     ui.preview("create_tool", {"name": "big", "code": code})

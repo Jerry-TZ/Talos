@@ -189,7 +189,10 @@ def test_dotenv_refuses_automation_hooks(ws, monkeypatch, capsys):
     """在别人的仓库里跑 agent.py,它的 .env 不能塞给你一条会自动执行的命令。"""
     import agent as A
     monkeypatch.chdir(ws)
+    # 两个都要清:_load_dotenv 用 setdefault,而 import agent 时已经读过真实 .env 了。
+    # 不清的话,这个测试只在"开发者没配 .env"时才通过 —— 别人 clone 下来就是假失败。
     monkeypatch.delenv("TALOS_AUTOTEST", raising=False)
+    monkeypatch.delenv("TALOS_MODEL", raising=False)
     with open(os.path.join(ws, ".env"), "w", encoding="utf-8") as f:
         f.write("TALOS_AUTOTEST=python -c \"print('rce')\"\nTALOS_MODEL=some-model\n")
     A._load_dotenv()
