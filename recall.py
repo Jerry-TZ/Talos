@@ -53,6 +53,17 @@ def _frontmatter_desc(txt: str) -> str:
                     desc = line[12:].strip()
     return (name + " — " + desc).strip(" —") or txt[:60]
 
+# 来源标记:复盘写的行会被打上 `<!-- reflect YYYY-MM-DD -->`(由代码补,不指望模型自觉)。
+# 没有标记 = 你手写的 = 更可信,dead() 永远不会提议删它。
+TAG = re.compile(r"\s*<!--\s*(\w+)\s+(\d{4}-\d{2}-\d{2})\s*-->\s*$")
+
+def strip_tag(line: str) -> tuple:
+    """'事实 <!-- reflect 2026-07-29 -->' -> ('事实', 'reflect', '2026-07-29')"""
+    m = TAG.search(line)
+    if not m:
+        return line.strip(), "user", ""            # 没标记的一律当人写的
+    return line[:m.start()].strip(), m.group(1), m.group(2)
+
 def _first_user(path: str) -> str:
     try:
         with open(path, encoding="utf-8") as f:
@@ -76,8 +87,9 @@ def _load_nodes(blocked=None, keep_fact=None) -> list:
         with open(MEMORY_FILE, encoding="utf-8") as f:   # means no recall, never a crash
             for ln in f:
                 s = ln.strip().lstrip("-*# ").strip()
+                s, src, born = strip_tag(s)           # 行尾 <!-- reflect 2026-07-29 --> 不参与匹配
                 if len(s) >= 4 and (keep_fact is None or keep_fact(s)):
-                    nodes.append({"kind": "事实", "text": s})
+                    nodes.append({"kind": "事实", "text": s, "src": src, "born": born})
     except (OSError, UnicodeDecodeError):
         pass
     for p in sorted(glob.glob(os.path.join(SKILLS_DIR, "*.md"))):
@@ -174,13 +186,25 @@ def _load_hits() -> dict:
     except Exception:
         return {}
 
+def _today() -> int:
+    import time
+    return int(time.time() // 86400)               # 天数,足够粗且省地方
+
+def _entry(h: dict, k: str) -> list:
+    """[seen, hits, last_hit_day]。老文件是 [seen, hits],补一位就能继续用。"""
+    e = list(h.get(k, [0, 0]))
+    while len(e) < 3:
+        e.append(0)
+    return e
+
 def _record_usage(nodes: list, recalled: set) -> None:
     h = _load_hits()
     for n in nodes:
         if n["kind"] in ("事实", "技能"):          # 只统计知识;往事(会话)是原始记录,不参与遗忘
             k = _key(n)
-            seen, hits = h.get(k, [0, 0])
-            h[k] = [seen + 1, hits + (1 if k in recalled else 0)]
+            seen, hits, last = _entry(h, k)
+            hit = k in recalled
+            h[k] = [seen + 1, hits + (1 if hit else 0), _today() if hit else last]
     try:
         os.makedirs(os.path.dirname(HITS_FILE), exist_ok=True)
         with open(HITS_FILE, "w", encoding="utf-8") as f:
@@ -188,26 +212,36 @@ def _record_usage(nodes: list, recalled: set) -> None:
     except Exception:
         pass
 
-def dead(min_seen: int = 8) -> list:
-    """[(kind, text), ...] —— 出现过 >= min_seen 次、却从没被想起的知识 = 死重。"""
-    h = _load_hits()
-    out = []
+STALE_DAYS = 90    # 曾经有用、但这么久没被想起 —— 大概率已经过时
+
+def dead(min_seen: int = 8, stale_days: int = STALE_DAYS) -> list:
+    """[(kind, text, 原因), ...] —— 建议遗忘的知识。
+
+    两种:从没被想起过(存了个寂寞),和曾经有用但很久没再想起(过时了)。
+    **只提议删 Talos 自己写的**:你手写的事实没有来源标记,它无权替你判断。"""
+    h, out, today = _load_hits(), [], _today()
     for n in _load_nodes():
-        if n["kind"] in ("事实", "技能"):
-            seen, hits = h.get(_key(n), [0, 0])
-            if seen >= min_seen and hits == 0:
-                out.append((n["kind"], n["text"]))
+        if n["kind"] not in ("事实", "技能") or n.get("src", "user") == "user":
+            continue                               # 手写的:不碰
+        seen, hits, last = _entry(h, _key(n))
+        if seen < min_seen:
+            continue                               # 还没见够次数,判不了
+        if hits == 0:
+            out.append((n["kind"], n["text"], f"出现 {seen} 次从没被想起"))
+        elif last and today - last >= stale_days:
+            out.append((n["kind"], n["text"], f"上次想起是 {today - last} 天前"))
     return out
 
 def forget(items: list) -> None:
-    """删掉这些从没被想起的事实(从 memory.md 移除行)和技能(删文件)。"""
-    facts = {t for k, t in items if k == "事实"}
-    skills = {t for k, t in items if k == "技能"}
+    """删掉这些事实(从 memory.md 移除行)和技能(删文件)。items 可含原因,忽略之。"""
+    facts = {it[1] for it in items if it[0] == "事实"}
+    skills = {it[1] for it in items if it[0] == "技能"}
     if facts and os.path.exists(MEMORY_FILE):
         with open(MEMORY_FILE, encoding="utf-8") as f:
             lines = f.readlines()
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-            f.writelines(ln for ln in lines if ln.strip().lstrip("-*# ").strip() not in facts)
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:   # 比对时要先去掉来源标记
+            f.writelines(ln for ln in lines
+                         if strip_tag(ln.strip().lstrip("-*# ").strip())[0] not in facts)
     for p in glob.glob(os.path.join(SKILLS_DIR, "*.md")):
         try:
             with open(p, encoding="utf-8") as f:

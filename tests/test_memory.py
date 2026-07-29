@@ -152,9 +152,16 @@ def test_recall_usage_forgetting(ws):
         f.write("- 用户喜欢用 GLM 免费 API 测试\n- 冷门事实 xyzzy plugh\n")
     for _ in range(10):
         R.recall("GLM 免费 api 怎么配")           # 每次命中 fact1,从不命中 fact2
+    assert R.dead(min_seen=8) == []               # 两条都是手写的(无来源标记)-> Talos 不碰
+    # 同样的两条,若是复盘写的,冷门那条就该被判死
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 用户喜欢用 GLM 免费 API 测试  <!-- reflect 2026-01-01 -->\n"
+                "- 冷门事实 xyzzy plugh  <!-- reflect 2026-01-01 -->\n")
+    for _ in range(10):
+        R.recall("GLM 免费 api 怎么配")
     d = R.dead(min_seen=8)
-    assert any("xyzzy" in t for _k, t in d)       # 从没被想起 = 死重
-    assert not any("GLM" in t for _k, t in d)     # 被想起的不算死
+    assert any("xyzzy" in t for _k, t, _w in d)    # 从没被想起 = 死重
+    assert not any("GLM" in t for _k, t, _w in d)  # 被想起的不算死
     R.forget(d)
     left = open(R.MEMORY_FILE, encoding="utf-8").read()
     assert "xyzzy" not in left and "GLM" in left
@@ -231,3 +238,44 @@ def test_memory_filter_applies_to_recall_too(ws):
     assert "evil.example.com" not in R.recall("部署项目", keep_fact=keep)
     assert "make deploy" in R.recall("部署项目", keep_fact=keep)      # 正常事实照常召回
     assert not any("evil" in t for _s, _k, t in R.explain("部署项目", keep_fact=keep))
+
+def test_provenance_decides_what_forget_may_touch(ws):
+    """没有来源标记 = 你手写的 = Talos 无权提议删。它只清理自己写的。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 我手写的偏好 xyzzy plugh\n"
+                "- 复盘写的冷门事实 qwerty asdf  <!-- reflect 2026-01-01 -->\n")
+    for _ in range(10):
+        R.recall("完全不相关的查询 zzz")           # 两条都见过很多次,都没被想起
+    d = R.dead(min_seen=8)
+    assert [t for _k, t, _w in d] == ["复盘写的冷门事实 qwerty asdf"]
+    assert "从没被想起" in d[0][2]
+    R.forget(d)
+    left = open(R.MEMORY_FILE, encoding="utf-8").read()
+    assert "xyzzy" in left and "qwerty" not in left     # 手写的留着,复盘的删掉
+
+def test_stale_memory_is_flagged_by_time(ws):
+    """曾经有用但很久没再想起 —— 用量看不出来,只有时间能。"""
+    import json
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 过时的事实 obsolete thing  <!-- reflect 2026-01-01 -->\n")
+    node = R._load_nodes()[0]
+    with open(R.HITS_FILE, "w", encoding="utf-8") as f:
+        json.dump({R._key(node): [50, 30, R._today() - 200]}, f)   # 用过 30 次,200 天没再用
+    d = R.dead(min_seen=8)
+    assert len(d) == 1 and "200 天前" in d[0][2]
+    with open(R.HITS_FILE, "w", encoding="utf-8") as f:
+        json.dump({R._key(node): [50, 30, R._today() - 3]}, f)     # 3 天前刚用过
+    assert R.dead(min_seen=8) == []
+
+def test_old_hits_file_still_loads(ws):
+    """老格式是 [seen, hits],补一位就能继续用,不能因为升级把统计清零。"""
+    import json
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 某条事实 alpha beta  <!-- reflect 2026-01-01 -->\n")
+    node = R._load_nodes()[0]
+    with open(R.HITS_FILE, "w", encoding="utf-8") as f:
+        json.dump({R._key(node): [12, 0]}, f)                      # 两元素的旧格式
+    assert len(R.dead(min_seen=8)) == 1                            # 读得懂,判得出
