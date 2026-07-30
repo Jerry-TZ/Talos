@@ -3,8 +3,12 @@ REM ---- Talos launcher.  ASCII only: cmd.exe reads .bat in the system codepage,
 REM ---- so non-ASCII comments here get mangled and can break the lines themselves.
 cd /d "%~dp0"
 
-REM Workspace: the only directory Talos may read or write. Empty = this folder.
-set "TALOS_WORKSPACE="
+REM Workspace: the only directory Talos may read or write.  Point it anywhere
+REM (set "TALOS_WORKSPACE=D:\my_project").  Leaving it EMPTY means this folder,
+REM which lets the agent edit its own source -- fine while hacking on Talos,
+REM surprising otherwise.  Default is a subfolder, so the two stay separate.
+set "TALOS_WORKSPACE=%~dp0workspace"
+if not exist "%TALOS_WORKSPACE%" mkdir "%TALOS_WORKSPACE%"
 
 REM Model: glm-5.2 | glm-4.6 | glm-4.5-air | glm-4.7-flash
 set "TALOS_MODEL=glm-5.2"

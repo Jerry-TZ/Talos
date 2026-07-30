@@ -4,6 +4,10 @@
 
 **一个你能完整读完的编程 agent。** 1739 行 Python,68 个离线测试,一份不糊弄人的安全说明。
 
+<img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
+
+> 上图由 `console_ui.py` 真实渲染导出 —— 不是画的示意图。
+
 > 希腊神话里,**Talos** 是守卫克里特岛的青铜自动人偶 —— 一个会保护人的 automaton。
 
 ```
