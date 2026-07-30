@@ -35,10 +35,15 @@
 
 ## 快速开始
 
+**Windows**:clone 下来双击 `setup.bat`(建 venv、装依赖、跑一遍自检),然后编辑 `.env` 填 key,双击 `talos.bat`。
+
+手动装(Linux/macOS 或想自己控制):
+
 ```bash
-git clone <this repo> && cd talos
+git clone https://github.com/Jerry-TZ/Talos.git && cd Talos
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt      # Linux/macOS: .venv/bin/pip
+.venv/bin/pip install -r requirements.txt         # Windows: .venv\Scripts\pip
+cp .env.example .env
 ```
 
 把 key 写进 `.env`(参考 `.env.example`):
