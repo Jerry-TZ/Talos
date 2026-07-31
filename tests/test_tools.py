@@ -116,6 +116,19 @@ def test_relative_paths_resolve_inside_workspace(ws, monkeypatch):
     assert os.path.exists(os.path.join(ws, "notes", "x.md"))
     assert A.read_file("notes/x.md") == "hi"
 
+def test_the_workspaces_own_name_is_stripped_when_it_would_nest(ws, monkeypatch):
+    """任务里写 'workspace/data 下的三个 csv',模型就照抄这个前缀 —— 提示词拦不住原话。"""
+    import agent as A
+    monkeypatch.chdir(ws)
+    os.makedirs(os.path.join(ws, "data"), exist_ok=True)
+    A.write_file(os.path.basename(ws) + "/data/x.csv", "a,b")
+    assert A.read_file("data/x.csv") == "a,b"                       # 没有多套一层
+    assert not os.path.exists(os.path.join(ws, os.path.basename(ws)))
+    # 真有一层同名子目录时,不许改写它
+    os.makedirs(os.path.join(ws, os.path.basename(ws)), exist_ok=True)
+    A.write_file(os.path.basename(ws) + "/real.txt", "nested")
+    assert A.read_file(os.path.join(ws, os.path.basename(ws), "real.txt")) == "nested"
+
 def test_workspace_jail(ws):
     import agent as A
     outside = os.path.join(tempfile.mkdtemp(), "evil.txt")

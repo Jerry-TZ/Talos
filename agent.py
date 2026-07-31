@@ -103,6 +103,14 @@ SYSTEM = (
     "a pass — including in fields you chose to print yourself, not just the ones that were "
     "asked for. Go back and fix it. If you cannot get real values, say which fields are still "
     "wrong — do not report success.\n\n"
+    # A task said "write verify_x.py to check your conclusions". It wrote 4600 characters of
+    # print(), ran it twice, got the same output twice, and reported that the script had
+    # confirmed the report — which the script had also produced. `assert` is a shape; "an
+    # independent check" is a judgement call, and judgement calls have never held here.
+    "A script that verifies a conclusion MUST contain `assert`. One that only prints is the "
+    "same code that produced the conclusion, run a second time — it agrees with itself and "
+    "proves nothing. Assert the specific number or claim you are about to report. A check "
+    "that cannot fail is not a check.\n\n"
     "Before you finish, delete the scratch files YOU wrote for your own convenience — debug "
     "scripts, probes, one-off intermediates. Name each file explicitly: `del probe.py`. "
     "NEVER use a wildcard, /S, rmdir, or rm -r for this. Anything the user asked you to "
@@ -187,13 +195,33 @@ def _is_secret_path(full: str) -> bool:
     parts = {p.lower() for p in full.replace("/", os.sep).split(os.sep)}
     return bool(parts & _SECRET_DIRS)
 
+def _strip_workspace_prefix(path: str) -> str:
+    """`workspace/data/x.csv`, typed while already standing in workspace/.
+
+    The environment block tells the model not to write the workspace's own name. That rule
+    loses to the user's wording: a task phrased "workspace/data 下的三个 csv" gets the prefix
+    copied verbatim into the first tool call, and the read fails on workspace/workspace/data.
+    No prompt outranks the literal text of the request, so fix the shape here instead.
+
+    Compare DIRECTORIES, not the file: a write targets a file that does not exist yet, and
+    that is exactly the call that builds the nested copy. Strip only when the prefixed parent
+    is missing and the stripped one is real — so an actual nested workspace/ keeps receiving
+    new files, and a typo still gets its honest error."""
+    if os.path.isabs(path):
+        return path
+    head, _, rest = path.replace("\\", "/").partition("/")
+    if not rest or head != os.path.basename(WORKSPACE):
+        return path
+    here = lambda p: os.path.isdir(os.path.join(WORKSPACE, os.path.dirname(p) or "."))
+    return rest if not here(path) and here(rest) else path
+
 def _in_workspace(path: str) -> str:
     """Allow the workspace, plus the agent's own brain (skills/tools/memory).
 
     Note what is NOT allowed when WORKSPACE is pointed elsewhere: HOME itself, i.e.
     agent.py and friends. Reflection still writes skills; the agent still cannot
     rewrite the loop it is running inside."""
-    full = os.path.realpath(path)
+    full = os.path.realpath(_strip_workspace_prefix(path))
     if full == os.path.realpath(_tool_hashes_path()):
         # This file decides which code runs at startup. With the default layout it sits inside
         # WORKSPACE, so an ordinary approved edit could write a tool AND its digest — granting
