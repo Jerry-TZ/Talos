@@ -775,10 +775,16 @@ MODES = ("plan", "default", "acceptEdits", "bypass")
 
 # Bulk deletes: recursive or wildcard. One of these wiped a task's entire output because
 # run_bash had been blanket-allowed earlier in the session — so these ignore that grant.
+# Every delete asks, not just the recursive and wildcard ones. This used to require /s or a
+# glob, on the theory that naming one file is a small, obvious act. Then SYSTEM was taught to
+# clean up by naming each file — and the cleanup walked straight past the gate, because the
+# gate was watching for the wildcards that instruction had just removed. A run of `del a.py
+# b.py` took a deliverable with it and never printed a thing. Deletion is the one action with
+# no undo, so it is the wrong place to be clever about which ones are worth showing.
 _DESTRUCTIVE = re.compile(
-    r"(^|[|&;]\s*)(del|erase|rd|rmdir)\b[^|&;]*(/s\b|[*?])"      # cmd.exe
-    r"|(^|[|&;]\s*)rm\b[^|&;]*(-\w*[rR]|[*?])"                   # posix
-    r"|\bRemove-Item\b[^|&;]*(-Recurse|[*?])",                   # powershell
+    r"(^|[|&;]\s*)(del|erase|rd|rmdir)\b"                        # cmd.exe
+    r"|(^|[|&;]\s*)rm\b"                                         # posix
+    r"|\bRemove-Item\b",                                         # powershell
     re.IGNORECASE)
 
 # Sending data out. The Grok-CLI incident was exactly this: a tool quietly shipping the

@@ -27,14 +27,19 @@ def test_sending_data_out_always_asks(ws):
                 "pip install pandas", "python analyze.py"]:
         assert A._policy("default", "bash", "run_bash", allowed, {"command": cmd}) == "allow", cmd
 
-def test_bulk_delete_always_asks(ws):
-    """批量删除要一直问 —— 会话里放行过 run_bash 也不行。它删掉过一整个任务的成果。"""
+def test_every_delete_asks_even_one_named_file(ws):
+    """删除一直问 —— 会话里放行过 run_bash 也不行。它删掉过一整个任务的成果。
+
+    连 `del probe.py` 也要问,虽然点名删一个文件看着无害。SYSTEM 教它收尾时逐个点名、
+    不许用通配符;它照做了,于是清理动作正好绕开了这道只盯通配符的闸,一条 `del a.py b.py`
+    把交付物一起带走,全程没打印一个字。删除是唯一没有撤销的动作,不适合在这儿耍聪明。"""
     import agent as A
     allowed = {"run_bash"}
     for cmd in ["del /Q /S notes\\*", "rmdir /S /Q notes", "rm -rf notes",
-                "del *.md", "echo hi & rm -r out", "Remove-Item -Recurse notes"]:
+                "del *.md", "echo hi & rm -r out", "Remove-Item -Recurse notes",
+                "del probe.py", "rm probe.py", "del a.py b.py"]:
         assert A._policy("default", "bash", "run_bash", allowed, {"command": cmd}) == "ask", cmd
-    for cmd in ["del probe.py", "python x.py", "dir notes", "echo rm"]:
+    for cmd in ["python x.py", "dir notes", "echo rm", "npm rm left-pad"]:
         assert A._policy("default", "bash", "run_bash", allowed, {"command": cmd}) == "allow", cmd
     # plan 仍然直接拒;bypass 仍然是无人值守模式,不改语义
     assert A._policy("plan", "bash", "run_bash", allowed, {"command": "rm -rf x"}) == "deny"

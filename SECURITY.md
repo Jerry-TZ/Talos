@@ -15,7 +15,7 @@
 | 工作区越界 | 路径穿越写文件 | `realpath`+`commonpath`,实测 7 种绕法全拦 |
 | 系统 Python 被污染 | `pip install` 装进宿主机 | run_bash 锁进 venv + `PIP_REQUIRE_VIRTUALENV` |
 | 外发数据 | 悄悄 `git push` / `curl` 上传代码 | 出网命令永远弹确认,会话放行也不例外 |
-| 批量删除 | `del /s` 删光成果 | 递归/通配删除永远弹确认 |
+| 删除 | `del /s` 删光成果;后来点名删一个文件也照样删掉了交付物 | **任何** `del`/`rm`/`Remove-Item` 永远弹确认,不再只看通配符 |
 | **启动无提示 RCE** | tools/ 里的 .py 每次启动自动 exec | **哈希锁:只有 create_tool 批准过的才自动加载,来路不明或被改过的隔离。清单缺失/损坏一律 fail-closed(不放行、也不崩);恢复要显式跑 `--approve-tools`** |
 | **批准了看不见的代码** | `create_tool` 的审批框只显示 70 字符,批下去的却是完整代码 | 完整显示,不截断,并写明"批准后在进程内立即执行" |
 | **隔离被绕过** | 被标红的技能虽被 `retrieve()` 排除,`recall` 是独立索引,仍会注入正文 | 两条通往 system prompt 的路共用同一份隔离集合 |
