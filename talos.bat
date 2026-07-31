@@ -10,8 +10,11 @@ REM surprising otherwise.  Default is a subfolder, so the two stay separate.
 set "TALOS_WORKSPACE=%~dp0workspace"
 if not exist "%TALOS_WORKSPACE%" mkdir "%TALOS_WORKSPACE%"
 
-REM Model: glm-5.2 | glm-4.6 | glm-4.5-air | glm-4.7-flash
-set "TALOS_MODEL=glm-5.2"
+REM Model.  Leave EMPTY so .env decides -- a value here is a real env var and
+REM .env uses setdefault, so anything set below silently wins over .env and you
+REM get to wonder why editing .env changed nothing.  Set it here only to pin
+REM one launcher to one model.  glm-5.2 | glm-4.6 | glm-4.5-air | glm-4.7-flash
+set "TALOS_MODEL="
 
 REM Run after every .py edit, so a break is reported by the step that caused it.
 REM Empty = off. Only this line can set it; an installed skill cannot.
