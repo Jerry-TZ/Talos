@@ -493,6 +493,7 @@ def approve_tools(names=(), confirm=None) -> list:
         # ASCII marker, not an emoji: this can be called before stdout is switched to UTF-8,
         # and a GBK console would raise on the way out — turning a warning into a crash.
         print(f"{'=' * 70}\n[!] 批准后,以上代码会在每次启动时于 Talos 进程内执行。")
+        _drain_stdin()                                 # a stray 'y' left over from the last file
         ok = confirm(path) if confirm else input("批准这一个? [y/N] ").strip().lower() == "y"
         if ok:
             _approve_tool(path)                    # digest recorded only after you said yes
@@ -819,6 +820,25 @@ def _verdict(ans: str):
         return "say"
     return None
 
+def _drain_stdin() -> None:
+    """Throw away anything already typed before a permission prompt appears.
+
+    A model turn takes tens of seconds, and the terminal buffers every key struck while you
+    wait. Without this the prompt consumes them the instant it is drawn, so an impatient `a`
+    typed at the previous answer silently blanket-approves the tool for the whole session —
+    the one answer here you cannot take back. README calls the confirmation box the security
+    boundary; a box that can be answered before it exists is not one."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        else:
+            import termios
+            termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:                   # no tty, redirected stdin, exotic terminal —
+        pass                            # failing to drain must never block the prompt
+
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
     decision = _policy(state["mode"], cls, name, state["allow"], args)
@@ -827,6 +847,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     if decision == "deny":
         return False, f"{state['mode']} 模式禁止 {cls} 操作"
     # decision == "ask"
+    _drain_stdin()                      # before preview: the wait that filled the buffer is over
     ui.preview(name, args)
     try:
         ans = ui.ask()

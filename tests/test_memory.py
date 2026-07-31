@@ -96,6 +96,21 @@ def test_typo_reasks_instead_of_denying(ws, monkeypatch):
     ok, _ = A.check_permission({"mode": "default", "allow": set()}, "bash", "run_bash", {"command": "x"})
     assert ok and asked == ["yy"]
 
+def test_typeahead_is_dropped_before_the_permission_prompt(ws, monkeypatch):
+    """一轮要想几十秒,你等待时敲的键留在终端缓冲里,确认框一画出来就被 input() 吞掉。
+    手快敲下的 'a' = 整个会话该工具全放行,是这里唯一收不回来的答案。所以清缓冲必须
+    发生在 preview 之前 —— 填满缓冲的那段等待,到这一刻才结束。"""
+    import types
+    import agent as A
+    A._drain_stdin()                      # 没有 tty(pytest 把 stdin 重定向了)也不许炸
+    order = []
+    monkeypatch.setattr(A, "_drain_stdin", lambda: order.append("drain"))
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: order.append("preview"),
+        ask=lambda: order.append("ask") or "y"))
+    A.check_permission({"mode": "default", "allow": set()}, "bash", "run_bash", {"command": "x"})
+    assert order == ["drain", "preview", "ask"]
+
 def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
     """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
     import types
