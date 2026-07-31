@@ -112,11 +112,17 @@ SYSTEM = (
 
 def _env_block() -> str:
     """Tell the model what machine it is on — it guessed bash on Windows and burned steps."""
-    sh = "cmd.exe (NOT bash — no ls/pwd/grep/source/&&-across-lines)" if os.name == "nt" else "sh"
+    # `mkdir -p` is called out by name because it does not fail — it silently creates a
+    # directory called `-p` next to the one you wanted, and nothing tells you for hours.
+    sh = ("cmd.exe (NOT bash — no ls/pwd/grep/source/&&-across-lines; `mkdir -p x` leaves you "
+          "a stray directory named -p)") if os.name == "nt" else "sh"
     return ("\n\n<environment>\n"
             f"OS: {platform.system()} {platform.release()}\n"
             f"Shell used by run_bash: {sh}\n"
-            f"Working directory (already correct — never cd into the project): {WORKSPACE}\n"
+            f"Working directory (already correct — never cd anywhere): {WORKSPACE}\n"
+            "Relative paths are ALREADY rooted there, in run_bash and in the file tools alike. "
+            "Write 'logs/a.txt', never the workspace's own name — prefixing it builds a nested "
+            "copy inside itself and you will spend the next ten steps hunting your own files.\n"
             + (f"File tools are limited to that directory. Your own skills/tools/memory live in "
                f"{HOME} and stay writable; the agent's source code there does NOT.\n"
                if HOME != WORKSPACE else "")
