@@ -172,13 +172,19 @@ def recall(query: str, k: int = 5, blocked=None, keep_fact=None) -> str:
     top = ranked[:k]
     _record_usage(nodes, {_key(nodes[i]) for _a, i in top})
     # 这一轮到底有没有"想起来点什么":第一名甩开第二名才算,挤成一团就是噪声。
-    lead = len(ranked) < 2 or ranked[0][0] >= BODY_LEAD * ranked[1][0]
+    # **只在技能之间比。** 原来拿全体第一名和全体第二名比,而往事(上一个任务的原话)跟新
+    # 任务共享一大堆关键词,分数常常比任何技能都高 —— 它却没有正文可给,只是占着第一名的
+    # 位置,把真正该给正文的技能挡在门外。实测 5 个真任务句:全体口径 0/5 给正文,其中 3 个
+    # 的第一名是往事或事实;改成技能内比较后,2 个拿到正文,而且都是对的那一条。
+    sk = [(a, i) for a, i in top if nodes[i]["kind"] == "技能"]
+    lead = len(sk) < 2 or sk[0][0] >= BODY_LEAD * sk[1][0]
+    best = sk[0][1] if sk else None
     out, picked = [], []
-    for rank, (_a, i) in enumerate(top):
+    for _a, i in top:
         n = nodes[i]
         # 有落差时,冠军直接给正文 —— 光给一行描述,模型多半懒得再 read_file 去看,
         # 而该省你十步的字段名、坑,全在正文里。
-        body = n["kind"] == "技能" and rank == 0 and lead
+        body = i == best and lead
         picked.append({"key": _key(n), "score": _a, "body": body})
         if body:
             # 技能是文件里的参考步骤,不是用户在说话。标出边界:一个下载来的技能若在正文里

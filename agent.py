@@ -832,10 +832,14 @@ MODES = ("plan", "default", "acceptEdits", "bypass")
 # gate was watching for the wildcards that instruction had just removed. A run of `del a.py
 # b.py` took a deliverable with it and never printed a thing. Deletion is the one action with
 # no undo, so it is the wrong place to be clever about which ones are worth showing.
+# The verb is matched ANYWHERE, not just at the start or after a pipe. It used to be anchored,
+# and a refused `del skills\x.md` came straight back as `cmd /c del skills\x.md` — same delete,
+# one wrapper in front, no prompt, six files gone. Third time this gate has been walked around
+# (see FINDINGS): each time the anchor was the hole. False positives here cost one keypress.
 _DESTRUCTIVE = re.compile(
-    r"(^|[|&;]\s*)(del|erase|rd|rmdir)\b"                        # cmd.exe
-    r"|(^|[|&;]\s*)rm\b"                                         # posix
-    r"|\bRemove-Item\b",                                         # powershell
+    r"\b(del|erase|rd|rmdir)\b"                                  # cmd.exe
+    r"|\brm\b"                                                   # posix
+    r"|\bRemove-Item\b|\bri\b",                                  # powershell (ri = alias)
     re.IGNORECASE)
 
 # Sending data out. The Grok-CLI incident was exactly this: a tool quietly shipping the
@@ -922,6 +926,14 @@ def _named_in_request(state: dict, args: dict) -> list:
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
     decision = _policy(state["mode"], cls, name, state["allow"], args)
+    if decision == "allow" and name == "run_bash":
+        # A refusal sticks to the FILE, not to the spelling of the command. Widening the
+        # blacklist only ever buys one round: refused `del x.md`, it returned `cmd /c del
+        # x.md`, and a regex can never see `python -c "os.remove('x.md')"` or a .py file that
+        # does the same. Once you have said no about a name, anything mentioning that name
+        # asks again — whatever it is written in.
+        if any(f in args.get("command", "") for f in state.get("denied", ())):
+            decision = "ask"
     if decision == "allow":
         return True, ""
     if decision == "deny":
@@ -966,6 +978,8 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         return True, ""
     if verdict == "yes":
         return True, ""
+    if verdict in ("no", "say") and name == "run_bash":
+        state.setdefault("denied", set()).update(_FILENAME.findall(args.get("command", "")))
     if verdict == "no":
         if named:
             # The ⚠️ goes to the human; the model got back "用户拒绝了这次调用" and nothing

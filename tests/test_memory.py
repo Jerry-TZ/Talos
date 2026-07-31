@@ -37,9 +37,13 @@ def test_every_delete_asks_even_one_named_file(ws):
     allowed = {"run_bash"}
     for cmd in ["del /Q /S notes\\*", "rmdir /S /Q notes", "rm -rf notes",
                 "del *.md", "echo hi & rm -r out", "Remove-Item -Recurse notes",
-                "del probe.py", "rm probe.py", "del a.py b.py"]:
+                "del probe.py", "rm probe.py", "del a.py b.py",
+                # 动词在哪儿都算。锚在行首是这道闸被绕开的三次里每一次的洞:被拒的
+                # `del x.md` 原样套一层 `cmd /c` 就通过了。宁可多问 —— 误报一次一个按键,
+                # 漏报一次是没法撤销的删除。
+                'cmd /c del "x.md"', "powershell -c ri x.md", "echo rm", "npm rm left-pad"]:
         assert A._policy("default", "bash", "run_bash", allowed, {"command": cmd}) == "ask", cmd
-    for cmd in ["python x.py", "dir notes", "echo rm", "npm rm left-pad"]:
+    for cmd in ["python x.py", "dir notes", "type notes\\a.md", "curl -X DELETE u"]:
         assert A._policy("default", "bash", "run_bash", allowed, {"command": cmd}) == "allow", cmd
     # plan 仍然直接拒;bypass 仍然是无人值守模式,不改语义
     assert A._policy("plan", "bash", "run_bash", allowed, {"command": "rm -rf x"}) == "deny"
@@ -134,6 +138,27 @@ def test_the_prompt_flags_a_file_the_request_named(ws, monkeypatch):
     A.check_permission(st, "bash", "run_bash", {"command": "python verify_index.py"})
     assert not notes                          # 只针对删除,跑一下不算
 
+def test_a_refusal_sticks_to_the_file_not_the_command(ws, monkeypatch):
+    """拒了 `del x.md`,它回头发 `cmd /c del x.md` —— 同一个删除,前面加个壳,闸门没认出来,
+    六个文件零确认没了。加宽正则只能买一轮:`python -c "os.remove('x.md')"` 正则永远看不见。
+    所以拒绝粘在**文件名**上,不粘在命令的写法上。"""
+    import types
+    import agent as A
+    asked = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: asked.append(1) or "n", note=lambda *a: None))
+    st = {"mode": "default", "allow": {"run_bash"}, "asked": ""}   # 整个 run_bash 已经会话放行
+    assert not A.check_permission(st, "bash", "run_bash", {"command": "del gone.md"})[0]
+    assert len(asked) == 1
+    # 换壳重来:会话放行本该直接通过,但这个名字已经被拒过
+    assert not A.check_permission(st, "bash", "run_bash", {"command": 'cmd /c del "gone.md"'})[0]
+    assert len(asked) == 2
+    ok, _ = A.check_permission(st, "bash", "run_bash",
+                               {"command": "python -c \"import os; os.remove('gone.md')\""})
+    assert not ok and len(asked) == 3          # 正则看不见的写法也拦住了
+    assert A.check_permission(st, "bash", "run_bash", {"command": "python other.py"})[0]
+    assert len(asked) == 3                     # 没提过的文件照旧走会话放行
+
 def test_a_refused_delete_tells_the_model_why(ws, monkeypatch):
     """⚠️ 是给人看的,模型只收到「用户拒绝了这次调用」—— 于是它原封不动地又提了四次,
     最后连报告一起要删。拒绝里不带原因就教不会任何东西。"""
@@ -225,6 +250,19 @@ def test_recall_withholds_the_body_when_nothing_clearly_won(ws):
     assert "alpha" in out or "beta" in out or "gamma" in out    # 描述行还是要给
     assert "[技能正文" not in out                               # 但正文一条都不给
     assert all(not p["body"] for p in _trace_lines(R)[-1]["picked"])   # 轨迹如实记录
+
+def test_a_past_task_at_rank_one_does_not_block_the_skill_body(ws):
+    """上一个任务的原话跟新任务共享一大堆关键词,分数常压过任何技能 —— 而往事没有正文可给,
+    只是占着第一名把该给正文的技能挡在门外。实测 5 个真任务句 0/5 拿到正文,3 个第一名是
+    往事或事实。落差只在技能之间比。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "enc.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: enc\ndescription: 检测文件编码\n---\n三级判定:BOM 头 EF BB BF\n")
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:   # 一条分数更高的非技能节点
+        f.write("- 检测文件编码 检测文件编码 的时候 检测文件编码 要注意 BOM 编码 文件 检测\n")
+    out = R.recall("检测文件编码,BOM 怎么判")
+    assert "EF BB BF" in out                       # 技能正文照样进来了
 
 def test_recall_usage_forgetting(ws):
     import recall as R
