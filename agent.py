@@ -929,10 +929,9 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     # decision == "ask"
     _drain_stdin()                      # before preview: the wait that filled the buffer is over
     ui.preview(name, args)
-    if name == "run_bash" and ui is not None:
-        named = _named_in_request(state, args)
-        if named:
-            ui.note("⚠️  " + "、".join(named) + " —— 你在请求里点名要过它,删了就没了")
+    named = _named_in_request(state, args) if name == "run_bash" else []
+    if named and ui is not None:
+        ui.note("⚠️  " + "、".join(named) + " —— 你在请求里点名要过它,删了就没了")
     try:
         ans = ui.ask()
     except (KeyboardInterrupt, EOFError):
@@ -968,6 +967,13 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     if verdict == "yes":
         return True, ""
     if verdict == "no":
+        if named:
+            # The ⚠️ goes to the human; the model got back "用户拒绝了这次调用" and nothing
+            # else, so it proposed the identical `del verify_salary.py` four times in a row,
+            # then went for the report too. A denial that does not say what was wrong teaches
+            # nothing — hand the model the fact the warning already had.
+            return False, (f"用户拒绝删除 {'、'.join(named)}:这是请求里点名要的产出,不是你的"
+                           "临时文件。别再尝试删它,换个收尾动作。")
         return False, "用户拒绝了这次调用"
     return False, f"用户拒绝,并说:{ans}"          # like Claude Code's "No, and tell it what to do"
 

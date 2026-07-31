@@ -134,6 +134,19 @@ def test_the_prompt_flags_a_file_the_request_named(ws, monkeypatch):
     A.check_permission(st, "bash", "run_bash", {"command": "python verify_index.py"})
     assert not notes                          # 只针对删除,跑一下不算
 
+def test_a_refused_delete_tells_the_model_why(ws, monkeypatch):
+    """⚠️ 是给人看的,模型只收到「用户拒绝了这次调用」—— 于是它原封不动地又提了四次,
+    最后连报告一起要删。拒绝里不带原因就教不会任何东西。"""
+    import types
+    import agent as A
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "n", note=lambda *a: None))
+    st = {"mode": "default", "allow": set(), "asked": "再写 verify_salary.py 验证每一个数字"}
+    ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del verify_salary.py"})
+    assert not ok and "verify_salary.py" in why and "别再" in why
+    ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del probe.py"})
+    assert not ok and "probe.py" not in why   # 用户没点名的,照旧是普通拒绝
+
 def test_all_does_not_approve_a_delete(ws, monkeypatch):
     """⚠️ 那行字确实打出来了,用户还是按了 a,verify_status.py 没了。警告没改变答案,所以
     什么也没改变。删除本来就不吃会话放行,对删除回答「本会话都允许」是在答一个没人问的问题。"""
