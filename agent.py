@@ -527,6 +527,26 @@ def load_dynamic_tools() -> list:
 # answer returns, so the parent's context stays clean. Reuses agent_turn, like
 # reflect/consolidate. Same tools + permission state as the parent.
 
+def _trace_summary(entries: list) -> str:
+    """Counted by the main loop from what actually dispatched — a subagent cannot write
+    itself a nicer one. Names and counts only: no args, paths, commands, or output, so a
+    summary can never smuggle a key back into the caller's context."""
+    if not entries:
+        return "(没有调用任何工具)"
+    order, agg = [], {}
+    for e in entries:
+        if e["tool"] not in agg:
+            order.append(e["tool"])
+            agg[e["tool"]] = [0, 0, 0]                  # 次数 / 失败 / 被拒
+        a = agg[e["tool"]]
+        a[0] += 1
+        a[2 if e["denied"] else 1] += 1 if e["error"] else 0
+    out = []
+    for t in order:
+        n, err, den = agg[t]
+        out.append(f"{t} × {n}" + (f",失败 {err}" if err else "") + (f",被拒 {den}" if den else ""))
+    return " · ".join(out)
+
 def spawn_subagent(task: str) -> str:
     depth = _RUNTIME.get("depth", 0)
     if depth >= 2:
@@ -534,11 +554,15 @@ def spawn_subagent(task: str) -> str:
     if ui is not None:
         ui.note("↳ 派出子agent: " + (task[:60] + "…" if len(task) > 60 else task))
     _RUNTIME["depth"] = depth + 1
-    try:
-        return agent_turn(_RUNTIME["client"], _RUNTIME["model"],
-                          [{"role": "user", "content": task}], _RUNTIME["state"])
+    trace = _RUNTIME["state"].setdefault("trace", [])
+    start = len(trace)                    # our slice of the shared trace: the subagent runs on the
+    try:                                  # caller's `state`, so its calls land right here after `start`
+        answer = agent_turn(_RUNTIME["client"], _RUNTIME["model"],
+                            [{"role": "user", "content": task}], _RUNTIME["state"])
     finally:
         _RUNTIME["depth"] = depth
+    # Without this the caller sees only prose and cannot tell a real answer from a guessed one.
+    return f"{answer}\n\n[子agent 实际调用 — 主循环记录,非子agent自述] {_trace_summary(trace[start:])}"
 
 # Registry: name -> (fn, input-properties, required-keys, description, PERM-CLASS).
 # perm-class is one of: "read" (never gated) | "edit" (write/edit files) | "bash".
@@ -886,6 +910,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
               + ("\n\n" + learned if learned else "")
               + ("\n\n" + recalled if recalled else ""))
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
+    state.setdefault("trace", [])                 # every dispatched tool, in order (see _trace_summary)
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -950,6 +975,7 @@ def agent_turn(client, model: str, messages: list, state: dict) -> str:
                 out, is_error = run_tool(name, args)
                 if view != "quiet":
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
+            state["trace"].append({"tool": name, "error": is_error, "denied": not allowed})
             messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────

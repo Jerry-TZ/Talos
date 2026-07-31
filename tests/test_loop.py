@@ -48,6 +48,45 @@ def test_subagent_tokens_roll_up_to_caller(ws, monkeypatch):
     assert state["last_tok"]["in"] == 300 and state["last_tok"]["steps"] == 3   # 含子agent 那一次
     assert state["last_calls"] == 1
 
+def _tool_result(messages):
+    return next(m["content"] for m in messages if m.get("role") == "tool")
+
+def test_subagent_summary_counts_real_calls_and_leaks_nothing(ws, monkeypatch):
+    """摘要由主循环按真实分发计数,且只含工具名 —— 命令内容不能顺着它回到外层上下文。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    client = _Client([_msg(tool_calls=[_tc("spawn_subagent", '{"task":"go"}')]),
+                      _msg(tool_calls=[_tc("run_bash", '{"command":"echo SECRET"}', "c2")]),
+                      _msg(content="查完了"),                       # 子agent 的结论
+                      _msg(content="done")])
+    messages = [{"role": "user", "content": "hi"}]
+    A.agent_turn(client, "m", messages, {"mode": "bypass", "allow": set()})
+    seen = _tool_result(messages)
+    assert "run_bash × 1" in seen and "查完了" in seen
+    assert "SECRET" not in seen and "echo" not in seen
+
+def test_subagent_that_ran_nothing_cannot_claim_otherwise(ws, monkeypatch):
+    """子agent 说自己读了文件,轨迹说它一个工具都没调 —— 外层必须看得见这个矛盾。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    client = _Client([_msg(tool_calls=[_tc("spawn_subagent", '{"task":"go"}')]),
+                      _msg(content="我读完了三个文件,没发现问题"),   # 纯编造,没有任何工具调用
+                      _msg(content="done")])
+    messages = [{"role": "user", "content": "hi"}]
+    A.agent_turn(client, "m", messages, {"mode": "bypass", "allow": set()})
+    assert "(没有调用任何工具)" in _tool_result(messages)
+
+def test_trace_records_denied_calls_separately(ws, monkeypatch):
+    """被权限门拒掉的调用要单独计,不能和执行失败混在一起。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    client = _Client([_msg(tool_calls=[_tc("run_bash", '{"command":"echo hi"}')]),
+                      _msg(content="done")])
+    state = {"mode": "plan", "allow": set()}                        # plan = 只读,run_bash 直接拒
+    A.agent_turn(client, "m", [{"role": "user", "content": "hi"}], state)
+    assert state["trace"] == [{"tool": "run_bash", "error": True, "denied": True}]
+    assert A._trace_summary(state["trace"]) == "run_bash × 1,被拒 1"
+
 def test_max_steps_cap(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())

@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 1929 行 Python,68 个离线测试,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 1955 行 Python,71 个离线测试,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -19,7 +19,7 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `agent.py` | 1383 | 循环 + 工具 + 权限门 + 自学习 |
+| `agent.py` | 1409 | 循环 + 工具 + 权限门 + 自学习 |
 | `console_ui.py` | 160 | 终端界面(可整体替换) |
 | `recall.py` | 252 | 联想记忆:扩散激活检索 |
 | `session.py` | 134 | 会话持久化(想换 SQLite 只改这个) |
@@ -89,7 +89,15 @@ python agent.py --selfcheck
 
 ## 它能做什么
 
-**六个工具** — `read_file` / `write_file` / `edit_file` / `run_bash`,外加 `create_tool`(给自己造新工具)和 `spawn_subagent`(派子 agent,独立上下文,只回结果)。
+**六个工具** — `read_file` / `write_file` / `edit_file` / `run_bash`,外加 `create_tool`(给自己造新工具)和 `spawn_subagent`(派子 agent,独立上下文)。
+
+子 agent 的结论后面**跟着一行它实际做过什么** —— 由主循环按真实分发计数,子 agent 无法自己编:
+
+```
+[子agent 实际调用 — 主循环记录,非子agent自述] read_file × 3 · run_bash × 1,失败 1
+```
+
+所以「我读完了三个文件,没发现问题」配上 `(没有调用任何工具)`,当场就露馅。只记工具名和次数,**不含参数、路径、命令或输出** —— 摘要不会把 key 顺回上层上下文。
 
 **权限分级**(对齐 Claude Code)—— `/mode` 随时切:
 
