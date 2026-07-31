@@ -87,6 +87,20 @@ def test_trace_records_denied_calls_separately(ws, monkeypatch):
     assert state["trace"] == [{"tool": "run_bash", "error": True, "denied": True}]
     assert A._trace_summary(state["trace"]) == "run_bash × 1,被拒 1"
 
+def test_reflection_recalls_on_the_task_not_on_the_reflection_prompt(ws, monkeypatch):
+    """recall 按最后一条 user message 检索,而复盘把 REFLECT_PROMPT 追加成了最后一条 ——
+    于是每次复盘捞回来的都是「怎么写技能」,一字不差,跟刚做完的任务无关(真实轨迹里
+    连着几个不同任务的复盘轮都哈希到同一个值)。复盘恰恰是最该看见本次任务记忆的时候。"""
+    import agent as A
+    import recall as R
+    monkeypatch.setattr(A, "ui", _ui())
+    asked = []
+    monkeypatch.setattr(R, "recall", lambda q, **kw: asked.append(q) or "")
+    client = _Client([_msg(content="没什么值得记的")])
+    A.reflect(client, "m", [{"role": "user", "content": "统计 data/ 里每个 csv 的缺失率"}],
+              {"mode": "bypass", "allow": set()})
+    assert asked == ["统计 data/ 里每个 csv 的缺失率"]
+
 def test_max_steps_cap(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())
