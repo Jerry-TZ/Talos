@@ -311,12 +311,12 @@ def write_file(path: str, content: str) -> str:
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
     with open(full, "w", encoding="utf-8", newline="") as f:
         f.write(content)                                # newline="": no \n -> \r\n translation, so
-    msg = f"wrote {len(content)} chars to {path}"       # what the model wrote is what edit_file reads back
-    if full.endswith(".py") and not _under(full, TOOLS_DIR):
-        # Said in SYSTEM twice and ignored twice; said here, at the moment of writing, it lands.
-        msg += ("\n提示:这是个一次性脚本,跑完就没了。如果这类活以后还会再来,改用 create_tool "
-                "造成工具 —— 下次一句话就能调用,不用重写。纯探路(看看某个 API 返回什么)才用脚本。")
-    return msg
+    # Every .py write used to append a nudge: "next time use create_tool instead". Measured over
+    # 6 real tasks it fired 12 times and converted 0, so it is gone rather than reworded. By the
+    # time it prints, the script is written and working; acting on it means redoing finished work
+    # for a payoff that lands in some *later* session, and the model optimises this turn. No
+    # wording beats that arithmetic — only making the tool path itself cheaper would.
+    return f"wrote {len(content)} chars to {path}"      # what the model wrote is what edit_file reads back
 
 def edit_file(path: str, old: str, new: str) -> str:
     text = _read_full(path)                             # FULL read — a truncated read would corrupt the edit
@@ -607,7 +607,11 @@ TOOLS = {
         {"task": {"type": "string"}}, ["task"],
         "Delegate a self-contained subtask to a fresh sub-agent that has its own isolated context and "
         "the same tools; only its final result returns to you (keeps your own context clean). Give a "
-        "complete, standalone task, e.g. 'read agent.py and report how the permission gate works'.",
+        "complete, standalone task, e.g. 'read agent.py and report how the permission gate works'. "
+        "Do NOT read the file yourself as well — reading it and delegating it costs more context than "
+        "either alone, which defeats the entire point. Say what facts you need back (numbers, names, "
+        "line numbers); a subagent told only to 'summarise' returns what the file is ABOUT, not what "
+        "it SAYS, and you cannot tell the difference from here.",
         "read",   # not itself a side effect: the subagent shares `state`, so each of ITS tool calls is gated
     ),
 }
@@ -891,13 +895,19 @@ def _chat(client, **kwargs):
                 continue
             raise
 
-def agent_turn(client, model: str, messages: list, state: dict) -> str:
-    """Drive one user request to completion, looping over tool calls."""
+def agent_turn(client, model: str, messages: list, state: dict, query: str = "") -> str:
+    """Drive one user request to completion, looping over tool calls.
+
+    `query` overrides what recall searches on. It exists for reflect(), which appends a fixed
+    prompt as the last user message — so recall kept retrieving memories about *how to write
+    skills* instead of about the task just finished, identically every single time (the traces
+    hash to one value across unrelated tasks). Reflection is exactly when the task's own
+    memories matter most."""
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
     flagged = scan_skills()                            # one quarantine set, shared by BOTH paths
     learned = retrieve()                               # always-on: memory + skill descriptions
-    query = next((m["content"] for m in reversed(messages)
-                  if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+    query = query or next((m["content"] for m in reversed(messages)
+                           if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
     recalled = ""
     if query:
         try:
@@ -995,8 +1005,9 @@ REFLECT_PROMPT = (
     "以后还会再来,那该记的教训是「下次用 create_tool 造成工具」,不是把这次的临时做法固化下来。\n"
     "技能要小而精、要能复用。只对这一个任务有用的(比如「验证 xx 工具」)不许写成技能。"
     "拿不准就不写 —— 匹配不上的技能只会白占上下文。\n"
-    "复盘前先把这次产生的临时文件删掉(调试脚本、验证脚本、一次性的中间产物),"
-    "用 run_bash `del`。工作目录是用户的,别留垃圾。\n"
+    "复盘前先把这次产生的临时文件删掉(调试脚本、跑完就没用的中间产物),用 run_bash `del`。"
+    "工作目录是用户的,别留垃圾。**但 assert 验证脚本是交付物,留着** —— 它是结论可复核的凭据,"
+    "用户下次改了数据还要再跑一遍。\n"
     "技能正文必须有一段 `## 何时用`,列 3~5 条**具体场景**,照着用户会怎么开口去写"
     "(例:「要拿 B站视频的播放量/UP主」「工具报错说字段不存在」),别写「处理 API 相关任务」"
     "这种概括。检索是按正文关键词匹配的 —— 场景写得越具体,下次越捞得出来。\n"
@@ -1070,7 +1081,10 @@ def reflect(client, model: str, messages: list, state: dict) -> str:
     """One extra learning turn — saves skills/facts, reusing the gated tools.
     Runs on a COPY of messages so the reflection prompt never pollutes memory."""
     before = _memory_lines()
-    out = agent_turn(client, model, messages + [{"role": "user", "content": REFLECT_PROMPT}], state)
+    task = next((m["content"] for m in messages                  # the request that started all this,
+                 if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+    out = agent_turn(client, model, messages + [{"role": "user", "content": REFLECT_PROMPT}],
+                     state, query=task)                          # not REFLECT_PROMPT itself
     n = _tag_new_memory(before)
     if n and ui is not None:
         ui.note(f"📝 memory.md 新增 {n} 条,已标记来源(手写的行不会被 /forget 建议删除)")

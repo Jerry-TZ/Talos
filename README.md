@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 1976 行 Python,75 个离线测试,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 2000 行 Python,75 个离线测试,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -19,9 +19,9 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `agent.py` | 1409 | 循环 + 工具 + 权限门 + 自学习 |
+| `agent.py` | 1423 | 循环 + 工具 + 权限门 + 自学习 |
 | `console_ui.py` | 160 | 终端界面(可整体替换) |
-| `recall.py` | 273 | 联想记忆:扩散激活检索 |
+| `recall.py` | 283 | 联想记忆:扩散激活检索 |
 | `session.py` | 134 | 会话持久化(想换 SQLite 只改这个) |
 
 行数自己数,别信我:`wc -l agent.py console_ui.py recall.py session.py`
@@ -33,7 +33,7 @@
 极简 agent 赛道很挤,有人用 Zig 做到 678KB 二进制。**Talos 不比谁小,它比谁都好读。**
 
 - **能读完** — 四个文件,注释解释的是*为什么*,不是*是什么*。几乎每条防御旁边都写着它挡的那次真实翻车。
-- **能验证** — 68 个测试,**离线、免 API key、1 秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
+- **能验证** — 75 个测试,**离线、免 API key、1 秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
 - **不吹牛** — [`SECURITY.md`](SECURITY.md) 明写 `create_tool` 就是进程内 RCE、正则黑名单只是减速带。**没有沙箱就是没有沙箱。**
 - **有考卷** — [`EXAM.md`](EXAM.md) / [`EXAM2.md`](EXAM2.md) 是两份可复现的能力测试,带标准答案和作弊检测(比如逐个核验 arXiv ID 真伪,防止编造引用)。记录的是"我怎么验证它真的有用",不是功能列表。
 
@@ -118,6 +118,8 @@ python agent.py --selfcheck
 
 **自学习** — 复杂任务后自动复盘:可复用的做法写进 `skills/`,持久事实写进 `memory.md`。下次遇到相关任务,`recall.py` 用**扩散激活**(节点=记忆,边=共享关键词)把相关技能的正文捞回上下文。
 
+技能正文只在**第一名明显甩开第二名**时才注入 —— 名次是相对的,再不相关的一堆记忆也有个第一名。实测:真命中时冠军甩开亚军 2 倍以上,纯噪声时挤在 1.1 倍以内。以前按名次给正文,问一句跟项目无关的话也会被塞进两条 1200 字的无关技能。
+
 复盘写的行会被**自动打上来源标记**(代码打的,不指望模型自觉):
 
 ```markdown
@@ -179,7 +181,7 @@ Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说
 
 ```bash
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest tests/ -q     # 68 passed,约 1 秒,不联网、不需要 key
+.venv\Scripts\python.exe -m pytest tests/ -q     # 75 passed,约 1 秒,不联网、不需要 key
 python agent.py --selfcheck                       # 免依赖的冒烟检查
 ```
 

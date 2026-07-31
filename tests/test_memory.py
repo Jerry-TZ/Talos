@@ -146,6 +146,20 @@ def test_recall_injects_skill_body(ws):
     assert "owner.name" in out and "stat.view" in out      # 正文进来了,不只是描述
     assert R.recall("今天天气") == ""                       # 不相关就别注入
 
+def test_recall_withholds_the_body_when_nothing_clearly_won(ws):
+    """一堆技能挤在同一个分数上 = 什么都没想起来。这时给正文纯属浪费上下文 ——
+    真实数据里正是这种局面把两条 1200 字的 CSV 技能塞进了一个跟 CSV 无关的任务。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    for name in ("alpha", "beta", "gamma"):                # 三条内容几乎一样的技能
+        with open(os.path.join(R.SKILLS_DIR, f"{name}.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\nname: {name}\ndescription: 处理报告文件\n---\n"
+                    f"读取报告文件然后统计报告文件的内容 {name}\n")
+    out = R.recall("读取报告文件统计内容")
+    assert "alpha" in out or "beta" in out or "gamma" in out    # 描述行还是要给
+    assert "[技能正文" not in out                               # 但正文一条都不给
+    assert all(not p["body"] for p in _trace_lines(R)[-1]["picked"])   # 轨迹如实记录
+
 def test_recall_usage_forgetting(ws):
     import recall as R
     with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
@@ -293,7 +307,7 @@ def test_recall_trace_records_what_was_actually_injected(ws):
     import os
     import recall as R
     with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
-        f.write("- 项目用 GLM alpha beta gamma\n")
+        f.write("- 项目用 GLM alpha\n")            # 只沾一个词 —— 让技能明显领先,才拿得到正文
     os.makedirs(R.SKILLS_DIR, exist_ok=True)
     with open(os.path.join(R.SKILLS_DIR, "s.md"), "w", encoding="utf-8") as f:
         f.write("---\nname: s\ndescription: alpha beta gamma 的做法\n---\n步骤一\n")
