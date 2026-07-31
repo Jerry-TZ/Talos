@@ -21,6 +21,18 @@ def test_edit_matches_across_line_endings(ws):
     A.edit_file(p, "- 总字数: 0", "- 总字数: 265")
     assert "265" in A._read_full(p) and "\r\n" in A._read_full(p)   # 原有换行风格保住
 
+def test_an_oversized_skill_is_refused(ws):
+    """recall 只注入前 SKILL_BODY_MAX 字符,超出的部分两条路都送不到人手里。复盘被要求
+    「技能要小而精」,三次写出 8427 / 7039 / 4535 字节 —— 那是审美判断,判断守不住;
+    字数是形状,形状守得住。普通文件不受这条限制。"""
+    import agent as A
+    big = "x" * (A.SKILL_MAX + 1)
+    os.makedirs(A.SKILLS_DIR, exist_ok=True)
+    out = A.write_file(os.path.join(A.SKILLS_DIR, "huge.md"), big)
+    assert "拒绝" in out and not os.path.exists(os.path.join(A.SKILLS_DIR, "huge.md"))
+    assert "wrote" in A.write_file(os.path.join(A.SKILLS_DIR, "ok.md"), "x" * A.SKILL_MAX)
+    assert "wrote" in A.write_file(os.path.join(ws, "notes.md"), big)   # 只管技能
+
 def test_autotest_reports_a_break_on_the_edit_that_caused_it(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "AUTOTEST", "")                       # 默认关闭

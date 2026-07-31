@@ -314,6 +314,15 @@ def _autocommit(full: str) -> str:
 
 def write_file(path: str, content: str) -> str:
     full = _in_workspace(path)
+    # Only the first SKILL_BODY_MAX characters of a skill are ever injected, so a long one
+    # delivers its frontmatter, its "when to use" list, and half a code block cut off inside a
+    # variable name — every actual step sits past the cut and reaches nobody. Reflection is told
+    # to keep skills small and has ignored it every time (8427, 7039, 4535 bytes): that is a
+    # judgement, and judgements do not hold. A size is a shape, and shapes do.
+    if _under(full, SKILLS_DIR) and len(content) > SKILL_MAX:
+        return (f"拒绝:技能 {len(content)} 字符,上限 {SKILL_MAX}。注入时只截前 "
+                f"{recall_mod().SKILL_BODY_MAX} 字符,超出的部分谁都读不到。"
+                "拆成两条各自独立的技能,或者只留下次真用得上的那几步。")
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
     with open(full, "w", encoding="utf-8", newline="") as f:
         f.write(content)                                # newline="": no \n -> \r\n translation, so
@@ -665,6 +674,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
 
 SKILLS_DIR = os.path.join(HOME, "skills")
 MEMORY_FILE = os.path.join(HOME, "memory.md")
+# Roughly double what recall ever injects (SKILL_BODY_MAX). The slack is for material worth a
+# deliberate read_file; past it nothing is delivered by either route. Enforced in write_file.
+SKILL_MAX = 2500
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Split a leading `---`-fenced block from the body. Minimal `key: value`."""
@@ -1054,8 +1066,14 @@ REFLECT_PROMPT = (
     "到以后每一轮,比没有记忆更糟。"
 )
 CONSOLIDATE_PROMPT = (
-    "用 run_bash `ls skills` 列出所有技能,再 read_file 逐个看。合并重复、删掉太窄或"
-    "没用的(用 run_bash 删文件),让每条 description 更好匹配。保持这套技能小而精。"
+    # 这里原本写着「用 run_bash `ls skills`」,两处都错:cmd.exe 没有 ls,而 run_bash 的
+    # 当前目录是工作区 —— 技能在它的上一级。整理的头两步因此必然失败,是提示词自己教的。
+    f"用 run_bash 列出 {SKILLS_DIR} 里的内容(命令按上面 environment 说的 shell 来),"
+    "再 read_file 逐个看。合并重复、删掉太窄或没用的(用 run_bash 删文件),让每条 "
+    "description 更好匹配。\n"
+    "**几乎每个任务都沾边的技能,搬进 memory.md 再把技能删掉。** 它们不是靠对题赢,是靠"
+    "普遍碍事:每次都挤在第二名,把真正对题的那条压下去。memory.md 每轮全量注入,不参与"
+    "排名,泛用知识放那里既不丢也不挡路。"
 )
 
 def _seal(messages: list) -> None:
