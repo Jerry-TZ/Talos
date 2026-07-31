@@ -24,4 +24,5 @@ def ws(tmp_path, monkeypatch):
     monkeypatch.setattr(recall, "SKILLS_DIR", os.path.join(d, "skills"))
     monkeypatch.setattr(recall, "SESS_DIR", os.path.join(d, "sessions"))
     monkeypatch.setattr(recall, "HITS_FILE", os.path.join(d, "hits.json"))
+    monkeypatch.setattr(recall, "TRACE_FILE", os.path.join(d, "recall_trace.jsonl"))
     return os.path.realpath(d)

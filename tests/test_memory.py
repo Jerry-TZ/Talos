@@ -282,3 +282,49 @@ def test_old_hits_file_still_loads(ws):
     with open(R.HITS_FILE, "w", encoding="utf-8") as f:
         json.dump({R._key(node): [12, 0]}, f)                      # 两元素的旧格式
     assert len(R.dead(min_seen=8)) == 1                            # 读得懂,判得出
+
+def _trace_lines(R):
+    import json
+    with open(R.TRACE_FILE, encoding="utf-8") as f:
+        return [json.loads(ln) for ln in f if ln.strip()]
+
+def test_recall_trace_records_what_was_actually_injected(ws):
+    """聚合计数回答不了「这次为什么捞错了」——要逐轮的 key + 分数 + 有没有给正文。"""
+    import os
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 项目用 GLM alpha beta gamma\n")
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "s.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: s\ndescription: alpha beta gamma 的做法\n---\n步骤一\n")
+    R.recall("alpha beta gamma")
+    picked = _trace_lines(R)[0]["picked"]
+    assert picked and all({"key", "score", "body"} == set(p) for p in picked)
+    assert any(p["body"] for p in picked)                  # 技能给了正文,记下来了
+    assert picked == sorted(picked, key=lambda p: -p["score"])   # 按激活分排序
+
+def test_recall_trace_stores_a_hash_not_the_question(ws):
+    """原文已经在会话 JSONL 里了,这里再存一份只是多开一个泄露面。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 某条事实 alpha beta\n")
+    R.recall("alpha beta 我的密码是 hunter2")
+    raw = open(R.TRACE_FILE, encoding="utf-8").read()
+    assert "hunter2" not in raw and "密码" not in raw
+    assert len(_trace_lines(R)[0]["q"]) == 12
+
+def test_recall_trace_records_empty_rounds_too(ws):
+    """「什么都没捞到」同样是数据 —— 不记就永远不知道召回率有多低。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 某条事实 alpha beta\n")
+    assert R.recall("zzz qqq 完全无关") == ""
+    assert _trace_lines(R)[0]["picked"] == []
+
+def test_recall_survives_an_unwritable_trace(ws, monkeypatch):
+    """观测坏了不该拖垮回忆本身。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 某条事实 alpha beta\n")
+    monkeypatch.setattr(R, "TRACE_FILE", os.path.join(ws, "nope\x00bad", "t.jsonl"))
+    assert "某条事实" in R.recall("alpha beta")

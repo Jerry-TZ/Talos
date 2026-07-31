@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 1955 行 Python,71 个离线测试,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 1976 行 Python,75 个离线测试,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -21,7 +21,7 @@
 |---|---|---|
 | `agent.py` | 1409 | 循环 + 工具 + 权限门 + 自学习 |
 | `console_ui.py` | 160 | 终端界面(可整体替换) |
-| `recall.py` | 252 | 联想记忆:扩散激活检索 |
+| `recall.py` | 273 | 联想记忆:扩散激活检索 |
 | `session.py` | 134 | 会话持久化(想换 SQLite 只改这个) |
 
 行数自己数,别信我:`wc -l agent.py console_ui.py recall.py session.py`
@@ -123,6 +123,12 @@ python agent.py --selfcheck
 ```markdown
 - 项目用 GLM 不用 OpenAI                          ← 你手写的,没有标记
 - pandas 要先 pip install  <!-- reflect 2026-07-29 -->
+```
+
+每轮检索都留一行轨迹(`.talos/recall_trace.jsonl`),记下捞了哪几条、激活分数、有没有注入正文 —— 提问只存哈希。**它只落盘,不统计**:回答"扩散带进来的第 4、5 名是不是长期噪声"要靠真实数据,不是靠调参的直觉。
+
+```bash
+tail -3 .talos/recall_trace.jsonl
 ```
 
 `/forget` 据此清理:**只提议删 Talos 自己写的**,并且分两类给你理由 —— *「出现 12 次从没被想起」*(存了个寂寞)和*「上次想起是 200 天前」*(过时了)。你手写的事实它无权判断,永远不碰。
