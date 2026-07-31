@@ -36,6 +36,7 @@
 - **能验证** — 78 个测试,**离线、免 API key、1 秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
 - **不吹牛** — [`SECURITY.md`](SECURITY.md) 明写 `create_tool` 就是进程内 RCE、正则黑名单只是减速带。**没有沙箱就是没有沙箱。**
 - **有考卷** — [`EXAM.md`](EXAM.md) / [`EXAM2.md`](EXAM2.md) 是两份可复现的能力测试,带标准答案和作弊检测(比如逐个核验 arXiv ID 真伪,防止编造引用)。记录的是"我怎么验证它真的有用",不是功能列表。
+- **有实测** — [`FINDINGS.md`](FINDINGS.md) 记了十一个真实任务量出来的东西:哪条提示词生效、哪条从头到尾没生效、五次翻车、检索改动的前后数字,以及**两个被数据否掉的自己的方案**。样本小,局限写在最前面。
 
 ---
 
@@ -185,7 +186,7 @@ Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说
 python agent.py --selfcheck                       # 免依赖的冒烟检查
 ```
 
-更多文档:[`DEVELOPMENT.md`](DEVELOPMENT.md) 实现逻辑 · [`OVERVIEW.md`](OVERVIEW.md) 能力全景 · [`SELF_LEARNING.md`](SELF_LEARNING.md) 自学习怎么做的
+更多文档:[`DEVELOPMENT.md`](DEVELOPMENT.md) 实现逻辑 · [`OVERVIEW.md`](OVERVIEW.md) 能力全景 · [`SELF_LEARNING.md`](SELF_LEARNING.md) 自学习怎么做的 · [`FINDINGS.md`](FINDINGS.md) 十一个真实任务测出来的东西
 
 ## 由来
 
