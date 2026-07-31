@@ -116,6 +116,24 @@ def test_typeahead_is_dropped_before_the_permission_prompt(ws, monkeypatch):
     A.check_permission({"mode": "default", "allow": set()}, "bash", "run_bash", {"command": "x"})
     assert order == ["drain", "preview", "ask"]
 
+def test_the_prompt_flags_a_file_the_request_named(ws, monkeypatch):
+    """「不许碰交付物」在 SYSTEM 里躺了几个月,被破了三次 —— 遵守它要判断「这个文件是什么」,
+    而这类规则一条都没守住过。「用户有没有亲手打过这个文件名」不是判断,是字符串匹配。
+    不拦截(闸门本来就会问),只是让按 a 之前那半秒有东西可看。"""
+    import types
+    import agent as A
+    notes = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "y", note=notes.append))
+    st = {"mode": "default", "allow": {"run_bash"}, "asked": "写 verify_index.py 用 assert 验证"}
+    A.check_permission(st, "bash", "run_bash", {"command": "del verify_index.py"})
+    assert any("verify_index.py" in n for n in notes)
+    notes.clear()
+    A.check_permission(st, "bash", "run_bash", {"command": "del probe.py"})   # 用户没提过
+    assert not notes
+    A.check_permission(st, "bash", "run_bash", {"command": "python verify_index.py"})
+    assert not notes                          # 只针对删除,跑一下不算
+
 def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
     """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
     import types

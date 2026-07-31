@@ -863,6 +863,23 @@ def _drain_stdin() -> None:
     except Exception:                   # no tty, redirected stdin, exotic terminal —
         pass                            # failing to drain must never block the prompt
 
+_FILENAME = re.compile(r"[\w.\-]+\.\w{1,5}")
+
+def _named_in_request(state: dict, args: dict) -> list:
+    """Files this delete touches whose names the user typed.
+
+    "Anything the user asked you to produce must not be touched" has been in SYSTEM since
+    July and been broken three times, twice on a file the request named outright. Obeying it
+    means deciding what a file IS, and no rule of that kind has held yet. Whether the user
+    typed the name is not a decision — it is a string match, and string matches have held
+    every time. This blocks nothing; the gate already asks. It just puts something on the
+    screen worth the half second before `a`."""
+    cmd = args.get("command", "")
+    if not _DESTRUCTIVE.search(cmd):
+        return []
+    asked = state.get("asked", "")
+    return sorted({f for f in _FILENAME.findall(cmd) if f and f in asked})
+
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
     decision = _policy(state["mode"], cls, name, state["allow"], args)
@@ -873,6 +890,10 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     # decision == "ask"
     _drain_stdin()                      # before preview: the wait that filled the buffer is over
     ui.preview(name, args)
+    if name == "run_bash" and ui is not None:
+        named = _named_in_request(state, args)
+        if named:
+            ui.note("⚠️  " + "、".join(named) + " —— 你在请求里点名要过它,删了就没了")
     try:
         ans = ui.ask()
     except (KeyboardInterrupt, EOFError):
@@ -1192,7 +1213,7 @@ def once(task: str, mode: str = "bypass") -> str:
     import console_ui as ui
     client, model = make_client()
     load_dynamic_tools()
-    state = {"mode": mode, "allow": set(), "view": "normal"}
+    state = {"mode": mode, "allow": set(), "view": "normal", "asked": task}
     messages: list = [{"role": "user", "content": task}]
     try:
         result = agent_turn(client, model, messages, state)
@@ -1350,6 +1371,9 @@ def repl(resume=None) -> None:
                 ui.note(f"已删除 {sid}")
             continue
         mark = len(messages)
+        # Kept for the whole session, not just this turn: a file you named three turns ago is
+        # still yours, and reflection — which is where the deletions happened — runs after.
+        state["asked"] = state.get("asked", "") + "\n" + task
         messages.append({"role": "user", "content": task})
         try:
             result = agent_turn(client, model, messages, state)
