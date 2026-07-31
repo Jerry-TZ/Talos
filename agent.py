@@ -608,10 +608,9 @@ TOOLS = {
         "Delegate a self-contained subtask to a fresh sub-agent that has its own isolated context and "
         "the same tools; only its final result returns to you (keeps your own context clean). Give a "
         "complete, standalone task, e.g. 'read agent.py and report how the permission gate works'. "
-        "Do NOT read the file yourself as well — reading it and delegating it costs more context than "
-        "either alone, which defeats the entire point. Say what facts you need back (numbers, names, "
-        "line numbers); a subagent told only to 'summarise' returns what the file is ABOUT, not what "
-        "it SAYS, and you cannot tell the difference from here.",
+        "Say which facts you need back (numbers, names, line numbers): a subagent told only to "
+        "'summarise' returns what the file is ABOUT, not what it SAYS, and from here you cannot tell "
+        "the difference — its answer reads just as confident either way.",
         "read",   # not itself a side effect: the subagent shares `state`, so each of ITS tool calls is gated
     ),
 }
@@ -1005,9 +1004,10 @@ REFLECT_PROMPT = (
     "以后还会再来,那该记的教训是「下次用 create_tool 造成工具」,不是把这次的临时做法固化下来。\n"
     "技能要小而精、要能复用。只对这一个任务有用的(比如「验证 xx 工具」)不许写成技能。"
     "拿不准就不写 —— 匹配不上的技能只会白占上下文。\n"
-    "复盘前先把这次产生的临时文件删掉(调试脚本、跑完就没用的中间产物),用 run_bash `del`。"
-    "工作目录是用户的,别留垃圾。**但 assert 验证脚本是交付物,留着** —— 它是结论可复核的凭据,"
-    "用户下次改了数据还要再跑一遍。\n"
+    "复盘前把这次**纯粹为了调试才造的**临时文件删掉,用 run_bash `del`。工作目录是用户的,"
+    "别留垃圾。**但凡拿不准就别删。** 用户点名要的产出(报告、汇总、这次任务的答案文件)和 "
+    "assert 验证脚本,一律留着 —— 前者就是任务本身,后者是结论可复核的凭据。这两边的代价不对等:"
+    "删错一个,这次任务白做;留错一个,用户自己删掉只要两秒。\n"
     "技能正文必须有一段 `## 何时用`,列 3~5 条**具体场景**,照着用户会怎么开口去写"
     "(例:「要拿 B站视频的播放量/UP主」「工具报错说字段不存在」),别写「处理 API 相关任务」"
     "这种概括。检索是按正文关键词匹配的 —— 场景写得越具体,下次越捞得出来。\n"
