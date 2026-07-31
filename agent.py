@@ -340,6 +340,8 @@ def _autocommit(full: str) -> str:
     except Exception as e:                              # noqa: BLE001
         return f"\n[自动提交] 跳过:{str(e)[:80]}"
 
+_VERIFY_NAME = re.compile(r"^(verify|validate|check)[\w-]*\.py$", re.IGNORECASE)
+
 def write_file(path: str, content: str) -> str:
     full = _in_workspace(path)
     # Only the first SKILL_BODY_MAX characters of a skill are ever injected, so a long one
@@ -351,6 +353,15 @@ def write_file(path: str, content: str) -> str:
         return (f"拒绝:技能 {len(content)} 字符,上限 {SKILL_MAX}。注入时只截前 "
                 f"{recall_mod().SKILL_BODY_MAX} 字符,超出的部分谁都读不到。"
                 "拆成两条各自独立的技能,或者只留下次真用得上的那几步。")
+    # SYSTEM asks for an assert and gets 2193 characters of print(). Same story as the skill
+    # size: telling it to ADD something has never worked (see create_tool, 12 fires 0
+    # conversions), while refusing the write does. Print-only is a coin flip — the same shape
+    # once caught a real bug because the model happened to read its own output, and once
+    # produced "验证脚本确认了我的分析结论" about a script that could not fail.
+    if _VERIFY_NAME.search(os.path.basename(full)) and "assert" not in content:
+        return ("拒绝:验证脚本里一个 assert 都没有。只 print 的脚本跟产出结论的是同一段代码,"
+                "跑两遍一致什么也证明不了 —— 把你**将要报告的那个数字**写进 assert("
+                "分组之和 == 总数 这类不变量最好),或者别叫 verify/check/validate。")
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
     with open(full, "w", encoding="utf-8", newline="") as f:
         f.write(content)                                # newline="": no \n -> \r\n translation, so
@@ -942,6 +953,16 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         if name == "create_tool":                  # non-delegable: the grant can't bind to code
             ui.note("create_tool 不支持「本会话都允许」—— 每次要执行的代码都不一样,只批准这一次。")
             return True, ""
+        if _DESTRUCTIVE.search(args.get("command", "")):
+            # `a` answers a question nobody asked: the gate ignores the session allow-list for
+            # deletes, so "always" is not on offer here — yet it was being read as a plain yes.
+            # It is also the reflex answer. One session pressed `a` six times, and the seventh
+            # ran `del analyze_orders.py verify_status.py` straight past the ⚠️ line naming
+            # verify_status.py as something the request had asked for. The warning printed and
+            # changed nothing, because it did not change the answer. This does: deletes take a
+            # deliberate `y` and nothing else.
+            ui.note("删除不支持「本会话都允许」—— 会话放行对删除本来就不生效。真要删就单独按 y。")
+            return False, "用户没批准这次删除:对删除回答「本会话都允许」无效,需要单独确认"
         state["allow"].add(name)
         return True, ""
     if verdict == "yes":

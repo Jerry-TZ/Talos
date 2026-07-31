@@ -134,6 +134,21 @@ def test_the_prompt_flags_a_file_the_request_named(ws, monkeypatch):
     A.check_permission(st, "bash", "run_bash", {"command": "python verify_index.py"})
     assert not notes                          # 只针对删除,跑一下不算
 
+def test_all_does_not_approve_a_delete(ws, monkeypatch):
+    """⚠️ 那行字确实打出来了,用户还是按了 a,verify_status.py 没了。警告没改变答案,所以
+    什么也没改变。删除本来就不吃会话放行,对删除回答「本会话都允许」是在答一个没人问的问题。"""
+    import types
+    import agent as A
+    notes = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "a", note=notes.append))
+    st = {"mode": "default", "allow": set(), "asked": ""}
+    ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del out.py"})
+    assert not ok and "本会话都允许" in why
+    assert "run_bash" not in st["allow"]           # 更不能顺手把整个工具放行掉
+    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python x.py"})
+    assert ok and "run_bash" in st["allow"]        # 不删东西的命令照旧
+
 def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
     """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
     import types

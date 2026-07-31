@@ -21,6 +21,15 @@ def test_edit_matches_across_line_endings(ws):
     A.edit_file(p, "- 总字数: 0", "- 总字数: 265")
     assert "265" in A._read_full(p) and "\r\n" in A._read_full(p)   # 原有换行风格保住
 
+def test_a_verification_script_without_assert_is_refused(ws):
+    """SYSTEM 要求验证脚本含 assert,拿到的是 2193 字符的 print —— 「加一个东西」这类要求
+    从来没守住过(create_tool 12 次 0 转化)。只 print 的脚本跟产出结论的是同一段代码。"""
+    import agent as A
+    out = A.write_file(os.path.join(ws, "verify_status.py"), "print('总金额: 108832.10')\n")
+    assert "拒绝" in out and not os.path.exists(os.path.join(ws, "verify_status.py"))
+    assert "wrote" in A.write_file(os.path.join(ws, "verify_status.py"), "assert 1 + 1 == 2\n")
+    assert "wrote" in A.write_file(os.path.join(ws, "analyze.py"), "print('x')\n")   # 只管验证脚本
+
 def test_an_oversized_skill_is_refused(ws):
     """recall 只注入前 SKILL_BODY_MAX 字符,超出的部分两条路都送不到人手里。复盘被要求
     「技能要小而精」,三次写出 8427 / 7039 / 4535 字节 —— 那是审美判断,判断守不住;
