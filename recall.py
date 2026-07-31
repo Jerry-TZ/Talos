@@ -118,7 +118,11 @@ def _load_nodes(blocked=None, keep_fact=None) -> list:
         if f:
             nodes.append({"kind": "往事", "text": f[:80]})
     for n in nodes:
-        n["kw"] = _keywords(n.get("body") or n["text"])
+        # 按**真会被注入的那一段**打分,不是按整个文件。打分靠数关键词交集,不做长度归一化
+        # (归一化量过,排序更差 —— 技能长是因为写得细,细就真的匹配得上)。但那意味着写得越长
+        # 排名越高,而超过 SKILL_BODY_MAX 的部分根本不会交付:一条 8427 字节的技能拿全文去争
+        # 排名,赢了却只给 1200 字,还顺手把真正相关的技能挤到门槛以下。截在同一处,长度就买不到排名了。
+        n["kw"] = _keywords((n.get("body") or n["text"])[:SKILL_BODY_MAX])
     return [n for n in nodes if n["kw"]]
 
 def _edges(nodes: list) -> dict:
