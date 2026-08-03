@@ -494,3 +494,27 @@ def test_a_different_result_is_not_a_repeat(ws):
     st = {}
     for out in ("0 行", "1 行", "2 行", "3 行"):
         assert A._repeat_guard(st, "run_bash", {"command": "python v.py"}, out) == out
+
+def test_a_lone_weak_skill_does_not_get_its_body_injected(ws):
+    """落差只在有两条技能时量得出来。原来只有一条上榜就直接放行 —— 而那是最常见的情形
+    (12 条真实任务句里 6 条如此)。真出事了:一个 Python import 图的任务捞到讲 .md 索引的
+    技能,得分 0.22,正文照塞 1200 字进去。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "md-index.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: md-index\ndescription: 用于:给一堆 .md 文件做索引\n---\n"
+                "扫描目录 统计标题 字数 表格 索引 报告 文档 引用 关系\n")
+    out = R.recall("写 6 个互相 import 的 py 模块,解析 import 关系找出循环依赖链")
+    assert "[技能正文" not in out                    # 沾了几个词就给正文,是误导不是帮助
+    assert "md-index" in out                         # 描述行还是给,让它自己决定要不要读
+
+def test_a_lone_strong_skill_still_gets_its_body(ws):
+    """别矫枉过正:全场只有一条技能但确实对题时,正文照给 —— 那 6 次真实命中就是这样,
+    分数 0.44 到 1.31,而误注入那次 0.22。门槛卡在中间。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "deps.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: deps\ndescription: 用于:解析 import 关系、找循环依赖链\n---\n"
+                "用 ast 解析 import 和 from import,建有向图后跑 DFS 找环\n")
+    out = R.recall("写 6 个互相 import 的 py 模块,解析 import 关系找出循环依赖链")
+    assert "ast 解析" in out                          # 对题的照样给正文
