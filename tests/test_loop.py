@@ -257,6 +257,20 @@ def test_a_timeout_is_retried_like_any_other_busy_signal():
     import agent as A
     assert A._chat(_Client([Exception("Request timed out."), "OK"])) == "OK"
 
+def test_only_a_slow_call_reports_how_long_it_took(monkeypatch):
+    """先试过把秒数放进转圈里实时更新,更糟:Windows 传统控制台没法可靠原地重绘,
+    秒数宽度一变(9s → 10s → 100s)就刷屏。改成事后报一次 —— 但快调用不值一行,
+    一个 43 次调用的任务会多出 43 行噪音。"""
+    import agent as A
+    seen = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(took=seen.append, note=lambda *a: None))
+    clock = iter([0.0, 1.0, 0.0, A.SLOW_CALL + 5])          # 快一次,慢一次
+    monkeypatch.setattr(A.time, "time", lambda: next(clock))
+    A._chat(_Client(["OK"]))
+    assert seen == [], "快调用不该报"
+    A._chat(_Client(["OK"]))
+    assert seen and seen[0] >= A.SLOW_CALL, f"慢调用该报耗时,实际 {seen}"
+
 def test_a_second_timeout_gives_up_instead_of_waiting_another_five_minutes(monkeypatch):
     """超时跟"忙"不是一回事。忙是等一下就好;超时说明这次调用本来就要跑过 CHAT_TIMEOUT,
     重试三遍就是三遍注定失败 —— 默认 300s 下,一次失败要 15 分钟才告诉你。推理模型上

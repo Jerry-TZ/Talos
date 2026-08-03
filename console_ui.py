@@ -10,7 +10,6 @@ here. So this file *is* the "界面",连到内核只靠这几个函数名。想�
 """
 
 import sys
-import time
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -47,21 +46,18 @@ def banner(mode: str, provider: str, model: str) -> None:
 def read_task(mode: str) -> str:
     return console.input(f"[bold {C_YOU}]你[/] [dim]({mode})[/] › ").strip()
 
-class _Elapsed:
-    """转圈时把秒数一起报出来。
-
-    圈在转只说明进程活着,不说明还要等多久 —— 推理模型一次调用几十秒是常态,
-    没有计时的话 20 秒和 200 秒看起来一模一样,你没法判断该等还是该 Ctrl-C。
-    rich 的 status 自带刷新线程,每次重绘都会调 __rich__,所以计时不用自己起线程。"""
-    def __init__(self):
-        self.t0 = time.time()
-
-    def __rich__(self) -> str:
-        return f"[{C_MODEL}]模型思考中…[/] [dim]{time.time() - self.t0:.0f}s[/]"
-
 def thinking():
-    """上下文管理器:模型思考时转个圈,顺带报已经等了多久。"""
-    return console.status(_Elapsed(), spinner="dots")
+    """上下文管理器:模型思考时转个圈。"""
+    return console.status(f"[{C_MODEL}]模型思考中…[/]", spinner="dots")
+
+def took(seconds: float) -> None:
+    """调用回来之后报一次耗时。**不要**试着把秒数放进转圈里实时更新 —— 试过,更糟:
+    Windows 传统控制台(`console.legacy_windows`)没法可靠地原地重绘,静态文字宽度不变
+    时能覆盖住,而秒数宽度会变(9s → 10s → 100s),一变就退化成一行行往下刷屏。
+
+    事后报一次同样解决那个问题:头两次调用就知道这个模型一次要几十秒,之后转圈转到
+    远超那个数,你自己就知道该 Ctrl-C 了。而且这条路不碰 Live,任何终端上都不会刷屏。"""
+    console.print(f"[dim]  ⏱ {seconds:.0f}s[/]")
 
 def show_tool(name: str, args: dict, result: str, is_error: bool, full: bool = False) -> None:
     mark = "[red]✗[/]" if is_error else f"[{C_CODE}]⚙[/]"

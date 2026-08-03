@@ -146,6 +146,7 @@ MAX_STEPS = int(os.environ.get("TALOS_MAX_STEPS", "100"))  # loop safety cap (gu
 # 「拥塞」和「彻底卡死」完全分不出来。实测被这个坑了两次。
 # 300 秒是留给长生成的:air 档小模型写两万字符的文件真的要几分钟,砍太短会误杀。
 CHAT_TIMEOUT = float(os.environ.get("TALOS_TIMEOUT", "300"))
+SLOW_CALL = float(os.environ.get("TALOS_SLOW_CALL", "15"))   # 超过这么久的调用才报耗时
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 _RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
@@ -1160,8 +1161,14 @@ def _chat(client, **kwargs):
     Free tiers (esp. glm-4.7-flash) get congested — '当前模型用户多' is just a busy signal."""
     timeouts = 0
     for attempt in range(3):
+        t0 = time.time()
         try:
-            return client.chat.completions.create(**kwargs)
+            resp = client.chat.completions.create(**kwargs)
+            # 慢调用才报。快的不值一行,而推理模型上"这一次比平常久得多"正是你想知道的事。
+            took = time.time() - t0
+            if ui is not None and took >= SLOW_CALL:
+                ui.took(took)
+            return resp
         except Exception as e:
             s = str(e).lower()
             # "timed out" 是分开的一条:SDK 的 APITimeoutError 说的是 "Request timed out.",
