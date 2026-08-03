@@ -475,3 +475,22 @@ def test_a_broken_index_does_not_take_reflection_down_with_it(ws, monkeypatch):
     import recall as R
     monkeypatch.setattr(R, "explain", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     assert A._known_skills("合并 csv") == ""
+
+def test_the_same_call_with_the_same_result_gets_cut_off(ws):
+    """跑十几个修复脚本、同一个验证脚本连出五次相同结果 —— 那一轮烧了六十次调用后死在上下文。
+    重复不是新信息。第三次就把这件事本身告诉它,而且指向真正的嫌疑人:检查器,不是数据。"""
+    import agent as A
+    st = {}
+    args = {"command": "python verify.py"}
+    assert A._repeat_guard(st, "run_bash", args, "总行数: 642") == "总行数: 642"   # 第一次:原样
+    assert A._repeat_guard(st, "run_bash", args, "总行数: 642") == "总行数: 642"   # 第二次:还原样
+    third = A._repeat_guard(st, "run_bash", args, "总行数: 642")
+    assert "第 3 次" in third and "检查本身是不是写错了" in third
+    assert "总行数: 642" in third                       # 原始输出还得给,不能吞掉
+
+def test_a_different_result_is_not_a_repeat(ws):
+    """结果变了就是有进展 —— 哪怕命令一模一样,也不许拦。"""
+    import agent as A
+    st = {}
+    for out in ("0 行", "1 行", "2 行", "3 行"):
+        assert A._repeat_guard(st, "run_bash", {"command": "python v.py"}, out) == out

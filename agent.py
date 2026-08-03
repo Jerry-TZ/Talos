@@ -1029,6 +1029,37 @@ def _chat(client, **kwargs):
                 continue
             raise
 
+REPEAT_LIMIT = 3     # 同一个调用拿到同一个结果这么多次,就不再假装它是新信息
+
+def _repeat_guard(state: dict, name: str, args: dict, out: str) -> str:
+    """Same call, same result, third time — say so instead of handing back the same string again.
+
+    One run wrote fifteen repair scripts, then ran the same verify script five times for the
+    identical `321/321/642`, plus four empty `findstr 403`. Nothing was learning anything. It
+    burned sixty tool calls and died on context length. MAX_STEPS only catches this at 100,
+    long after the turn stopped making progress — and by then the window is already gone.
+
+    The message goes back through the TOOL RESULT on purpose. A refusal that explains itself
+    outperforms a silent one; that lesson cost a whole task to learn (the model re-proposed one
+    identical delete four times when the denial said nothing). The model needs no new machinery
+    to read a tool result, and the book makes the same point: put the reason in the trajectory.
+
+    Counted per turn, not per session: re-running a command after the user says something new
+    is ordinary, and a guard that fires on that would be worse than no guard."""
+    sig = hashlib.sha1(("\x00".join((name, json.dumps(args, sort_keys=True, default=str), out)))
+                       .encode("utf-8", "replace")).hexdigest()
+    seen = state.setdefault("repeat", {})
+    seen[sig] = seen.get(sig, 0) + 1
+    if seen[sig] < REPEAT_LIMIT:
+        return out
+    if ui is not None:
+        ui.note(f"🔁 同一个调用第 {seen[sig]} 次返回相同结果 —— 已提醒模型换路")
+    return (f"[系统] 这是你第 {seen[sig]} 次执行同一个调用、拿到**一模一样**的结果。再跑一遍还是这个。\n"
+            f"你卡住了,而且卡的多半不是你正在改的那个东西 —— 想想**检查本身是不是写错了**"
+            f"(它测的是不是你以为的那件事?几个断言之间会不会互相矛盾?),而不是继续改被检查的数据。\n"
+            f"别再写同一个脚本的新变体了。要么换一个完全不同的角度,要么直接说清你卡在哪、试过什么。\n"
+            f"原始输出:\n{out}")
+
 def agent_turn(client, model: str, messages: list, state: dict, query: str = "") -> str:
     """Drive one user request to completion, looping over tool calls.
 
@@ -1055,6 +1086,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
               + ("\n\n" + recalled if recalled else ""))
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
     state.setdefault("trace", [])                 # every dispatched tool, in order (see _trace_summary)
+    state["repeat"] = {}                          # 打转计数只在本轮内有效 —— 见 _repeat_guard
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -1069,6 +1101,15 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
             messages.append({"role": "user", "content":
                              f"[系统] 还剩 4 步就到上限了。如果快好了就收尾;如果这条路走不通,"
                              f"别再试变体了 —— 直接说清卡在哪、你试过什么。"})
+        # Both context guards used to run ONLY in the REPL, between turns — and a turn died
+        # inside one. Sixty-odd tool calls on a single request, history grew past the model's
+        # window, `400 Prompt exceeds max length`, work lost. MAX_STEPS never fired: a step cap
+        # guards against spinning, not against one turn getting too long, and 100 steps is far
+        # past where the context runs out. Prune first — it is local, free, and usually enough;
+        # only pay for a summarising call if stubbing the old tool output did not get us under.
+        _prune_old_tool_results(messages)
+        if _ctx_chars(messages) > COMPACT_AT:
+            messages[:] = maybe_compact(client, model, messages)
         with ui.thinking():
             resp = _chat(client, model=model,
                          messages=[{"role": "system", "content": system}] + messages,
@@ -1120,7 +1161,8 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
                 if view != "quiet":
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
             state["trace"].append({"tool": name, "error": is_error, "denied": not allowed})
-            messages.append({"role": "tool", "tool_call_id": c.id, "content": out})
+            messages.append({"role": "tool", "tool_call_id": c.id,
+                             "content": _repeat_guard(state, name, args, out)})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
 # Both are just another agent_turn with a special prompt — so saving reuses the

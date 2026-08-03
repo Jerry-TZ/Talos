@@ -175,3 +175,33 @@ def test_chat_retries_on_busy(monkeypatch):
     import pytest
     with pytest.raises(Exception):
         A._chat(_Client([Exception("invalid api key 401")]))     # 非瞬时错误 -> 直接抛
+
+def test_a_long_turn_prunes_inside_the_loop(ws, monkeypatch):
+    """两道上下文护栏原来只在 REPL 每轮末尾跑,而那次是死在**一轮之内**:六十来次工具调用,
+    历史涨过窗口,400 Prompt exceeds max length,整轮白做。MAX_STEPS 守的是空转,守不了
+    一轮太长 —— 100 步远在上下文耗尽之后。剪枝必须发生在循环里,这个测试就盯这一点:
+    agent_turn 结束时并不剪,所以只要收尾时看到打桩,就说明循环内剪过。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("P" * 3000, False))
+    script = [_msg(tool_calls=[_tc("run_bash", '{"command":"cmd%d"}' % i, cid="c%d" % i)])
+              for i in range(12)] + [_msg(content="done")]
+    messages = [{"role": "user", "content": "hi"}]
+    A.agent_turn(_Client(script), "m", messages, {"mode": "bypass", "allow": set()})
+    stubbed = [m for m in messages
+               if m.get("role") == "tool" and m["content"].startswith("[已省略")]
+    assert stubbed, "循环里没剪枝 —— 一轮长下去照样会撑爆上下文"
+    assert messages[-2]["content"] == "P" * 3000        # 最近的原样留着,别把正在用的也剪了
+
+def test_the_loop_actually_feeds_the_repeat_warning_back(ws, monkeypatch):
+    """光有 _repeat_guard 不算数 —— 得确认循环真的把它接在了工具结果上。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("总行数: 642", False))
+    script = [_msg(tool_calls=[_tc("run_bash", '{"command":"python verify.py"}', cid="c%d" % i)])
+              for i in range(3)] + [_msg(content="done")]
+    messages = [{"role": "user", "content": "hi"}]
+    A.agent_turn(_Client(script), "m", messages, {"mode": "bypass", "allow": set()})
+    tool_msgs = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert tool_msgs[0] == "总行数: 642" and tool_msgs[1] == "总行数: 642"
+    assert "第 3 次" in tool_msgs[2] and "总行数: 642" in tool_msgs[2]
