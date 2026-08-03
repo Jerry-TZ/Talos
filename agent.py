@@ -178,7 +178,6 @@ TRASH_DIR = os.path.join(HOME, ".talos", "trash")
 TRASH_MAX_BYTES = 1 << 20            # 单个文件超过这个不存 —— 回收站是安全网,不是备份系统
 TRASH_MAX_FILES = 300                # 一次最多扫这么多,别在大仓库里空转
 _TRASH_SKIP = {".git", ".venv", "venv", "node_modules", "__pycache__", ".talos", ".pytest_cache"}
-_ARCHIVED: set = set()               # 存过的内容指纹;存过就不再存,所以重复运行几乎零成本
 
 def archive_workspace() -> int:
     """Copy every workspace file we haven't stored yet — BEFORE anything gets a chance to write.
@@ -214,20 +213,35 @@ def archive_workspace() -> int:
             if seen > TRASH_MAX_FILES:
                 return saved
             p = os.path.join(root, fn)
+            # Same two guards every other file tool gets, for the same reason. Without them this
+            # walk was a way around _in_workspace(): read_file REFUSES `.env` outright, while the
+            # archive happily copied `OPENAI_API_KEY=...` into TRASH_DIR — which hangs off HOME,
+            # not the workspace, so deleting the project would not have taken the leak with it.
+            # realpath first, so a symlink planted in the workspace cannot point at ~/.ssh/id_rsa
+            # and get it pulled in. A safety net that widens the blast radius is not a safety net.
+            rp = os.path.realpath(p)
+            # 第三个条件是防自噬:TRASH_DIR 通常在 HOME/.talos 下(被 _TRASH_SKIP 挡掉),但它是
+            # 可配置的,一旦落进工作区,每次存档都会把上一次的存档再存一遍,指数长起来。
+            if (not _under(rp, WORKSPACE) or _is_secret_path(rp)
+                    or _under(rp, os.path.realpath(TRASH_DIR))):
+                continue
             try:
-                if os.path.getsize(p) > TRASH_MAX_BYTES:
+                if os.path.getsize(rp) > TRASH_MAX_BYTES:
                     continue
-                with open(p, "rb") as f:
+                with open(rp, "rb") as f:
                     blob = f.read()
             except OSError:
                 continue                           # 读不到就跳过,一个文件不该弄崩一次调用
             h = hashlib.sha1(blob).hexdigest()
-            if h in _ARCHIVED:
-                continue                           # 这份内容已经在回收站里了
-            _ARCHIVED.add(h)
             rel = os.path.relpath(p, WORKSPACE).replace("\\", "__").replace("/", "__")
+            dest = os.path.join(TRASH_DIR, f"{rel}__{h[:8]}")
+            # 问磁盘,不问内存缓存。原来记的是"这个进程存过哪些指纹",而 SECURITY.md 里
+            # 明写着"不需要了就整个删掉这个目录" —— 照做之后,缓存还说存过,于是本轮剩下的
+            # 时间里那些文件一份备份都没有,而且不报错。存在与否只有磁盘说了算。
+            if os.path.exists(dest):
+                continue
             try:
-                with open(os.path.join(TRASH_DIR, f"{rel}__{h[:8]}"), "wb") as f:
+                with open(dest, "wb") as f:
                     f.write(blob)
                 saved += 1
             except OSError:
@@ -1091,7 +1105,7 @@ def _chat(client, **kwargs):
 
 REPEAT_LIMIT = 3     # 同一个调用拿到同一个结果这么多次,就不再假装它是新信息
 
-def _repeat_guard(state: dict, name: str, args: dict, out: str) -> str:
+def _repeat_guard(seen: dict, name: str, args: dict, out: str) -> str:
     """Same call, same result, third time — say so instead of handing back the same string again.
 
     One run wrote fifteen repair scripts, then ran the same verify script five times for the
@@ -1104,11 +1118,16 @@ def _repeat_guard(state: dict, name: str, args: dict, out: str) -> str:
     identical delete four times when the denial said nothing). The model needs no new machinery
     to read a tool result, and the book makes the same point: put the reason in the trajectory.
 
-    Counted per turn, not per session: re-running a command after the user says something new
-    is ordinary, and a guard that fires on that would be worse than no guard."""
+    `seen` is a plain dict owned by one agent_turn call — deliberately NOT a key in `state`.
+    Counting per turn is right (re-running a command after the user says something new is
+    ordinary, and firing on that would be worse than not firing), but `state` is SHARED with
+    subagents: spawn_subagent hands the caller's own dict to a nested agent_turn, whose entry
+    would reset the counter. A parent stuck re-running one failing command, delegating a single
+    unrelated subtask partway through, would have silently lost every count it had — the guard
+    switched off inside exactly the runaway it exists to catch. A local dict cannot be reached
+    from another frame, so nesting is safe by construction rather than by remembering."""
     sig = hashlib.sha1(("\x00".join((name, json.dumps(args, sort_keys=True, default=str), out)))
                        .encode("utf-8", "replace")).hexdigest()
-    seen = state.setdefault("repeat", {})
     seen[sig] = seen.get(sig, 0) + 1
     if seen[sig] < REPEAT_LIMIT:
         return out
@@ -1146,7 +1165,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
               + ("\n\n" + recalled if recalled else ""))
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
     state.setdefault("trace", [])                 # every dispatched tool, in order (see _trace_summary)
-    state["repeat"] = {}                          # 打转计数只在本轮内有效 —— 见 _repeat_guard
+    repeat: dict = {}                             # 本轮独有;绝不能挂在 state 上 —— 见 _repeat_guard
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -1228,7 +1247,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
             state["trace"].append({"tool": name, "error": is_error, "denied": not allowed})
             messages.append({"role": "tool", "tool_call_id": c.id,
-                             "content": _repeat_guard(state, name, args, out)})
+                             "content": _repeat_guard(repeat, name, args, out)})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
 # Both are just another agent_turn with a special prompt — so saving reuses the

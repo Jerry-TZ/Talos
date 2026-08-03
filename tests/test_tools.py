@@ -382,3 +382,30 @@ def test_archiving_never_takes_the_turn_down(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "TRASH_DIR", os.path.join(ws, "nope\x00bad"))
     assert A.archive_workspace() == 0
+
+def test_the_trash_never_swallows_a_credential_file(ws):
+    """read_file 明确拒绝 .env,而回收站曾经把它原样拷走 —— 而且 TRASH_DIR 挂在 HOME 上,
+    不在工作区里,删掉项目也带不走那份泄漏。安全网扩大了打击面就不叫安全网。"""
+    import agent as A
+    for name in (".env", "id_rsa", "secrets.json"):
+        with open(os.path.join(ws, name), "w", encoding="utf-8") as f:
+            f.write("OPENAI_API_KEY=sk-SECRET")
+    with open(os.path.join(ws, "normal.txt"), "w", encoding="utf-8") as f:
+        f.write("普通内容")
+    A.archive_workspace()
+    dumped = "".join(open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+                     for n in os.listdir(A.TRASH_DIR))
+    assert "sk-SECRET" not in dumped                 # 一个凭据都不许进回收站
+    assert "普通内容" in dumped                       # 普通文件照存不误
+
+def test_clearing_the_trash_does_not_switch_the_net_off(ws):
+    """SECURITY.md 自己写着「不需要了就整个删掉这个目录」。原来的实现记的是「这个进程存过
+    哪些指纹」,照做之后缓存还说存过 —— 本轮剩下的时间里那些文件一份备份都没有,还不报错。"""
+    import agent as A
+    import shutil
+    p = os.path.join(ws, "data.log")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("好数据")
+    assert A.archive_workspace() == 1
+    shutil.rmtree(A.TRASH_DIR)                       # 用户按文档说的清空了回收站
+    assert A.archive_workspace() == 1, "清空之后不再存档 —— 安全网被无声关掉了"

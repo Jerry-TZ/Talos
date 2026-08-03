@@ -20,7 +20,7 @@ def ws(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "SKILLS_DIR", os.path.join(d, "skills"))
     monkeypatch.setattr(agent, "TOOLS_DIR", os.path.join(d, "tools"))
     monkeypatch.setattr(agent, "TRASH_DIR", os.path.join(d, "trash"))
-    agent._ARCHIVED.clear()          # 内容指纹是模块级的,不清就会跨测试串味
+    # 回收站已改成问磁盘,不再有模块级缓存要清
     monkeypatch.setattr(session, "SESS_DIR", os.path.join(d, "sessions"))
     monkeypatch.setattr(recall, "MEMORY_FILE", os.path.join(d, "memory.md"))
     monkeypatch.setattr(recall, "SKILLS_DIR", os.path.join(d, "skills"))

@@ -227,3 +227,24 @@ def test_the_loop_snapshots_before_a_tool_can_overwrite(ws, monkeypatch):
     saved = [open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
              for n in os.listdir(A.TRASH_DIR)]
     assert "好数据" in saved, "覆盖之前没有存档 —— 数据就真没了"
+
+def test_a_subagent_cannot_reset_the_parents_repeat_counter(ws, monkeypatch):
+    """spawn_subagent 把调用方**同一个** state 交给嵌套的 agent_turn。打转计数原来挂在
+    state 上,于是子agent 一进门就把父轮的计数清了 —— 恰好在这道闸该起作用的死循环里
+    把它关掉。计数必须是每次 agent_turn 自己的局部变量。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    real = A.run_tool          # 只假冒 run_bash —— 把 spawn_subagent 也 mock 掉的话,
+    monkeypatch.setattr(       # 嵌套那一轮压根不会发生,这个测试就成了摆设
+        A, "run_tool",
+        lambda name, args: ("总行数: 642", False) if name == "run_bash" else real(name, args))
+    same = _tc("run_bash", '{"command":"python verify.py"}')
+    script = [_msg(tool_calls=[same]), _msg(tool_calls=[same]),
+              _msg(tool_calls=[_tc("spawn_subagent", '{"task":"顺手查点别的"}')]),
+              _msg(content="子agent 干完了"),          # 子agent 自己那一步
+              _msg(tool_calls=[same]), _msg(content="done")]
+    messages = [{"role": "user", "content": "hi"}]
+    A.agent_turn(_Client(script), "m", messages, {"mode": "bypass", "allow": set()})
+    hits = [m["content"] for m in messages
+            if m.get("role") == "tool" and "第 3 次" in str(m.get("content"))]
+    assert hits, "子agent 插了一脚,父轮的打转计数就被清零了"
