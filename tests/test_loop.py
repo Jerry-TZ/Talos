@@ -2,6 +2,8 @@
 import contextlib
 import types
 
+import pytest
+
 def _ui():
     n = lambda *a, **k: None
     return types.SimpleNamespace(thinking=lambda: contextlib.nullcontext(),
@@ -254,6 +256,20 @@ def test_a_timeout_is_retried_like_any_other_busy_signal():
     才发现,超时本身正好落在重试判据之外,等于设了个「一次就放弃」的开关。"""
     import agent as A
     assert A._chat(_Client([Exception("Request timed out."), "OK"])) == "OK"
+
+def test_a_second_timeout_gives_up_instead_of_waiting_another_five_minutes(monkeypatch):
+    """超时跟"忙"不是一回事。忙是等一下就好;超时说明这次调用本来就要跑过 CHAT_TIMEOUT,
+    重试三遍就是三遍注定失败 —— 默认 300s 下,一次失败要 15 分钟才告诉你。推理模型上
+    这是常态,不是意外。上一条测试把超时并进了 transient,这条负责给它封顶。
+
+    "忙" 仍然重试满 3 次:那是免费额度拥塞,等一下真的会好。"""
+    import agent as A
+    monkeypatch.setattr(A.time, "sleep", lambda _s: None)   # 别让退避拖慢套件
+    to = lambda: Exception("Request timed out.")
+    with pytest.raises(Exception, match="timed out"):
+        A._chat(_Client([to(), to(), "OK"]))
+    assert A._chat(_Client([Exception("429 rate limit"),
+                            Exception("当前模型用户多"), "OK"])) == "OK"
 
 def test_the_client_bounds_how_long_one_call_can_hang(monkeypatch):
     """没有超时时用的是 SDK 默认 600 秒 + SDK 自己 2 次重试,外面 _chat 又套 3 次 ——

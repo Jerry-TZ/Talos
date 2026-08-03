@@ -1158,6 +1158,7 @@ def _usage(resp):
 def _chat(client, **kwargs):
     """Call the model, retrying briefly on rate-limit / 'busy' / transient errors.
     Free tiers (esp. glm-4.7-flash) get congested — '当前模型用户多' is just a busy signal."""
+    timeouts = 0
     for attempt in range(3):
         try:
             return client.chat.completions.create(**kwargs)
@@ -1169,7 +1170,11 @@ def _chat(client, **kwargs):
             transient = (any(k in s for k in ("429", "rate limit", "ratelimit", "timeout",
                         "timed out", "overload", "too many", "busy", "503", "502", "并发", "繁忙"))
                         or "用户多" in str(e))
-            if attempt < 2 and transient:
+            # 但超时跟"忙"不是一回事。忙是等一下就好;超时说明这次调用本来就要跑过
+            # CHAT_TIMEOUT,重试三遍就是三遍注定失败 —— 默认 300s 下,一次失败要 15 分钟
+            # 才告诉你。推理模型上这是常态,不是意外。只给它一次机会。
+            timeouts += ("timed out" in s or "timeout" in s)
+            if attempt < 2 and transient and timeouts < 2:
                 if ui is not None:
                     ui.note(f"模型繁忙,{2 ** attempt}s 后重试 ({attempt + 1}/2)…")
                 time.sleep(2 ** attempt)
