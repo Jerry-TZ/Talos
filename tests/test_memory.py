@@ -182,7 +182,9 @@ def test_all_does_not_approve_a_delete(ws, monkeypatch):
         preview=lambda *a: None, ask=lambda: "a", note=notes.append))
     st = {"mode": "default", "allow": set(), "asked": ""}
     ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del out.py"})
-    assert not ok and "本会话都允许" in why
+    assert not ok
+    assert "本会话都允许" in "".join(notes)       # 给人的那句:说清该按哪个键
+    assert "别再提同一条命令" in why              # 给模型的那句:说清别重发(它按不了键)
     assert "run_bash" not in st["allow"]           # 更不能顺手把整个工具放行掉
     ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python x.py"})
     assert ok and "run_bash" in st["allow"]        # 不删东西的命令照旧
@@ -518,3 +520,18 @@ def test_a_lone_strong_skill_still_gets_its_body(ws):
                 "用 ast 解析 import 和 from import,建有向图后跑 DFS 找环\n")
     out = R.recall("写 6 个互相 import 的 py 模块,解析 import 关系找出循环依赖链")
     assert "ast 解析" in out                          # 对题的照样给正文
+
+def test_a_refused_delete_tells_the_model_to_stop_asking(ws, monkeypatch):
+    """驳回消息有两个读者。给人的那句说「按 y」,给模型的那句原来抄了同一段话 ——
+    而「需要单独确认」描述的是模型自己做不到的按键,它只能理解成再试一次。
+    实测一轮里同一条 `del scan_deps.py` 被提了五次。"""
+    import agent as A
+    import types
+    st = {"mode": "default", "allow": {"run_bash"}, "asked": "帮我清理临时文件"}
+    for key in ("a", ""):                       # `a`(无效答案)和回车(明确拒绝)两条路
+        monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+            preview=lambda *a, **k: None, note=lambda *a, **k: None,
+            ask=lambda: key, denied=lambda *a, **k: None))
+        ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del scan_deps.py"})
+        assert not ok
+        assert "别再提同一条命令" in why, f"按 {key!r} 之后模型收到的还是「再试一次」:{why}"

@@ -1085,8 +1085,15 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # verify_status.py as something the request had asked for. The warning printed and
             # changed nothing, because it did not change the answer. This does: deletes take a
             # deliberate `y` and nothing else.
+            # Two audiences, two sentences. The ui.note tells the HUMAN which key to press.
+            # The return value goes to the MODEL, and it used to carry the same words —
+            # "需要单独确认" describes a keystroke the model cannot make, so it read it as
+            # "ask again" and re-sent the identical `del scan_deps.py` five times in one run.
+            # A refusal has to tell its reader something the reader can act on.
             ui.note("删除不支持「本会话都允许」—— 会话放行对删除本来就不生效。真要删就单独按 y。")
-            return False, "用户没批准这次删除:对删除回答「本会话都允许」无效,需要单独确认"
+            return False, ("这次删除没被批准。**别再提同一条命令** —— 是否删除只有用户能决定,"
+                           "而重发只会把同一个提示原样再弹一次。要么就把文件留着继续往下做,"
+                           "要么在回答里说明你想删哪几个、为什么,让用户自己动手。")
         state["allow"].add(name)
         return True, ""
     if verdict == "yes":
@@ -1101,6 +1108,13 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # nothing — hand the model the fact the warning already had.
             return False, (f"用户拒绝删除 {'、'.join(named)}:这是请求里点名要的产出,不是你的"
                            "临时文件。别再尝试删它,换个收尾动作。")
+        if _DESTRUCTIVE.search(args.get("command", "")):
+            # Same defect as the `a` branch above, milder: a bare "用户拒绝了这次调用" reads
+            # as a coin flip, so the model re-sent `del scan_deps.py` after a plain refusal
+            # too. Only the *named* case ever explained itself; this covers the rest.
+            return False, ("用户拒绝了这次删除。**别再提同一条命令** —— 重发只会把同一个"
+                           "提示原样再弹一次。文件留着继续往下做,或者在回答里说明想删哪些、"
+                           "为什么,让用户自己动手。")
         return False, "用户拒绝了这次调用"
     return False, f"用户拒绝,并说:{ans}"          # like Claude Code's "No, and tell it what to do"
 
