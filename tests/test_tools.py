@@ -409,3 +409,39 @@ def test_clearing_the_trash_does_not_switch_the_net_off(ws):
     assert A.archive_workspace() == 1
     shutil.rmtree(A.TRASH_DIR)                       # 用户按文档说的清空了回收站
     assert A.archive_workspace() == 1, "清空之后不再存档 —— 安全网被无声关掉了"
+
+def test_cd_into_the_workspace_from_inside_it_says_so(ws):
+    """_strip_workspace_prefix 只管文件工具的 path 参数,run_bash 的命令串没走那条路 ——
+    同一个错误于是原样撞进 shell:`cd workspace && python gen.py` 连失败三次,而 shell 报的
+    「找不到路径」压根没说是哪一段错了。熔断把它压到三次,但没修它。"""
+    import agent as A
+    name = os.path.basename(ws)
+    err = "报错原文(什么语言都可能)"
+    hinted = A._workspace_hint(f"cd {name} && python gen.py", err, True)
+    assert "已经**站在" in hinted and err in hinted          # 原始报错不能吞掉
+    assert "已经**站在" in A._workspace_hint(f"python {name}/gen.py", err, True)
+
+def test_the_hint_stays_quiet_when_it_is_not_that_mistake(ws):
+    """工作区恰好叫 data、命令里也提到 data,不该因此挨一句无关的提示。"""
+    import agent as A
+    name = os.path.basename(ws)
+    assert A._workspace_hint(f"cd {name} && python gen.py", "ok", False) == "ok"     # 没失败
+    assert A._workspace_hint("python gen.py", "boom", True) == "boom"                 # 没提到工作区名
+    assert A._workspace_hint(f"echo {name}", "boom", True) == "boom"                  # 提到了但不是当路径用
+
+def test_mkdir_dash_p_is_refused_before_it_makes_a_folder_named_dash_p(ws):
+    """cmd 的 mkdir 不认识 -p,把它当目录名 —— 工作区里真的长出过一个叫 `-p` 的目录,
+    而想建的那个没建,报错还写着「-p 已存在」,读起来像成功了。"""
+    import agent as A
+    if os.name != "nt":
+        return
+    with pytest.raises(ValueError, match="mkdir"):
+        A.run_bash("mkdir -p shop")
+    A.run_bash("mkdir shop")                                   # 正常写法照跑
+
+def test_run_bash_actually_attaches_the_hint(ws):
+    """光有 _workspace_hint 不算数 —— run_bash 得真的把它接上去。"""
+    import agent as A
+    name = os.path.basename(ws)
+    out = A.run_bash(f"cd {name} && python gen.py")
+    assert "已经**站在" in out

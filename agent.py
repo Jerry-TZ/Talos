@@ -499,6 +499,12 @@ def run_bash(command: str) -> str:
             hint = _BASH_HINTS.get(bashism.group(1) or bashism.group(0), "")
             raise ValueError(f"这是 cmd.exe,不是 bash —— `{bashism.group(0)}` 用不了。{hint}"
                              "复杂逻辑就 write_file 写个 .py 再 `python 那个文件`,别跟 cmd 较劲。")
+    if os.name == "nt" and re.search(r"\bmkdir\s+-p\b", command, re.IGNORECASE):
+        # cmd 的 mkdir 不认识 -p,于是把它当成目录名:工作区里真的长出了一个叫 `-p` 的目录,
+        # 而想建的那个没建。报错还写着「-p 已存在」,读起来像是成功了。
+        raise ValueError("cmd 的 `mkdir` 本来就会建中间目录 —— 直接 `mkdir 路径` 就行。"
+                         "写 `-p` 会**建出一个名叫 `-p` 的目录**(已经发生过一次),"
+                         "你真正想建的那个反而没建。")
     if os.name == "nt" and "\n" in command:
         # cmd.exe runs only the first line and exits 0 with no output — silent, and the
         # model reads that as success. Refuse loudly instead.
@@ -513,7 +519,40 @@ def run_bash(command: str) -> str:
     out = (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
     if len(out) > BASH_MAX_CHARS:
         out = out[:BASH_MAX_CHARS] + f"\n…(输出共 {len(out)} 字符,已截断到 {BASH_MAX_CHARS};用更精确的命令/grep 缩小范围)"
-    return out
+    return _workspace_hint(command, out, p.returncode != 0)
+
+def _workspace_hint(command: str, out: str, failed: bool) -> str:
+    """`cd workspace` — typed while already standing in the workspace.
+
+    _strip_workspace_prefix fixes this for the file tools' path argument. run_bash never went
+    through it, so the identical mistake sails straight into the shell: `cd workspace && python
+    gen.py` failed three times running, and `python workspace/gen.py` resolved to
+    workspace\\workspace\\gen.py. The repeat guard cut it off at three — which bought time and
+    fixed nothing, because the shell's error ("The system cannot find the path specified") says
+    nothing about which of the two paths is wrong.
+
+    Appending to the failure rather than rewriting the command is the whole point. A path
+    argument is data and can be quietly corrected; a command is the model's own composition,
+    and editing it silently hides the mistake instead of ending it. Explaining a failure is the
+    intervention that has actually worked here twice now — a refusal that gives a reason gets a
+    different next move, a silent one gets the same command again.
+
+    Triggered by the EXIT CODE, never by the wording of the error. The first cut matched on
+    "cannot find the path specified" and would simply never have fired here: cmd.exe writes
+    that sentence in the system language, and on this box it comes back GBK-encoded through a
+    utf-8 decode — `ϵͳ�Ҳ���ָ����·����`. Matching localised, re-decoded shell prose is a
+    guess; a non-zero exit is a fact."""
+    name = os.path.basename(WORKSPACE)
+    if not name or not failed:
+        return out
+    # 只在名字确实被当成路径的一层用时才提示 —— 工作区叫 data 而命令里恰好提到 data 的
+    # 情况不该触发。要么 `cd <名字>`,要么 `<名字>/` 这样带分隔符。
+    if not re.search(rf"\bcd\s+{re.escape(name)}\b|(?:^|[\s\"'=/\\]){re.escape(name)}[/\\]",
+                     command, re.IGNORECASE):
+        return out
+    return (f"{out}\n\n[系统] 你已经**站在 {name}/ 里面了** —— run_bash 的当前目录就是它。"
+            f"再写 `cd {name}` 或 `{name}/xxx`,会解析成 {name}/{name}/xxx,所以找不到。"
+            f"直接用相对路径,别带 {name} 这一层。")
 
 # ── self-extension: the agent writes NEW tools for itself (Pi-style) ───────────
 # ⚠️ create_tool exec()s model-written code IN THIS PROCESS — scarier than
