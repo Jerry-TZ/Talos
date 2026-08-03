@@ -1535,6 +1535,20 @@ def once(task: str, mode: str = "bypass") -> str:
                 + (f" · 缓存命中 {t['cached']}" if t.get("cached") else ""))
     return result
 
+def _due_for_reflection(state: dict, corrected: bool) -> bool:
+    """Count calls SINCE THE LAST REFLECTION, not calls in the last turn.
+
+    The trigger used to read `last_calls`, which is per-turn — so a task that ran fifteen tool
+    calls, died on a connection error, and was picked back up with "继续" ended on a turn worth
+    one call and never reflected at all. Exactly backwards: a task long enough to hit a
+    transient failure is the kind most worth learning from. Three runs in a row lost their
+    learning pass this way, which is also why one pending experiment never got to run.
+
+    Mutates `state`: carries the count across turns, and the caller zeroes it when reflection
+    actually runs."""
+    state["since_reflect"] = state.get("since_reflect", 0) + state.get("last_calls", 0)
+    return corrected or state["since_reflect"] >= REFLECT_AFTER
+
 def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
@@ -1698,11 +1712,13 @@ def repl(resume=None) -> None:
             ui.note(f"🎫 本轮 {_tk.get('steps', 1)} 次调用 · {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
                     + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
         _corr = _is_correction(task)
+        _due = _due_for_reflection(state, _corr)
         if state.pop("capped", False):                 # hit the step cap: it was flailing, so whatever it
             ui.note("⏭ 这轮撞了步数上限,跳过复盘(别把瞎试出来的做法学成技能)")   # settled on is not a lesson
-        elif _corr or state.get("last_calls", 0) >= REFLECT_AFTER:
+        elif _due:
             ui.note("🧠 你纠正了它 — 复盘把这条教训记下…" if _corr
-                    else f"🧠 这次用了 {state['last_calls']} 步 — 复盘看有没有值得记的…")
+                    else f"🧠 这次用了 {state['since_reflect']} 步 — 复盘看有没有值得记的…")
+            state["since_reflect"] = 0
             try:
                 reflect(client, model, messages, state)
             except KeyboardInterrupt:                  # skipping the learning pass costs nothing

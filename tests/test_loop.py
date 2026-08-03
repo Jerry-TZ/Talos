@@ -270,3 +270,26 @@ def test_the_client_bounds_how_long_one_call_can_hang(monkeypatch):
     A.make_client()
     assert seen["timeout"] == A.CHAT_TIMEOUT
     assert seen["max_retries"] == 0            # 重试归 _chat 管,别两层相乘
+
+def test_a_resumed_task_still_gets_its_learning_pass():
+    """判据原来看的是**最后一轮**的调用数。一个跑了十五次调用的任务撞上连接错误、用「继续」
+    接上,收尾那轮只值 1 次调用 —— 于是整个任务一次都没复盘。正好反了:长到会撞上瞬时
+    故障的任务,才是最该学的。连着三轮的复盘就是这么丢的。"""
+    import agent as A
+    st = {"last_calls": 15}
+    assert A._due_for_reflection(st, False)          # 主轮:够了
+    st["since_reflect"] = 0                          # 复盘跑过,清零(repl 里做的)
+    st["last_calls"] = 1                             # 崩了之后「继续」,这轮只有 1 次调用
+    assert not A._due_for_reflection(st, False)      # 刚学过,不用再学
+
+    st2 = {"last_calls": 3}                          # 反过来:主轮没到阈值就崩了
+    assert not A._due_for_reflection(st2, False)     # 3 —— 还不够
+    st2["last_calls"] = 1                            # 「继续」,又一次调用
+    assert not A._due_for_reflection(st2, False)     # 4 —— 还差一点
+    assert A._due_for_reflection(st2, False)         # 5 —— 攒够了,该学了
+    assert st2["since_reflect"] == 5                 # 零散的几轮加起来也算数
+
+def test_a_correction_always_reflects_however_short():
+    """用户纠正你,一次调用也得学 —— 那是最贵的信号。"""
+    import agent as A
+    assert A._due_for_reflection({"last_calls": 1}, True)
