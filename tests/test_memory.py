@@ -446,3 +446,32 @@ def test_recall_survives_an_unwritable_trace(ws, monkeypatch):
         f.write("- 某条事实 alpha beta\n")
     monkeypatch.setattr(R, "TRACE_FILE", os.path.join(ws, "nope\x00bad", "t.jsonl"))
     assert "某条事实" in R.recall("alpha beta")
+
+def test_reflection_sees_the_skills_it_already_has(ws):
+    """复盘写新技能之前,先把相关的已有技能摆到它眼前。
+
+    原来只防同名覆盖,不防同义新增 —— 十六个任务长出十二条技能、一半是噪声,只能靠
+    /consolidate 事后砍回六条。同一件事拆成两条,两条在检索里互相压分,谁都拿不到正文。"""
+    import agent as A
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "csv-merge.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: csv-merge\ndescription: 用于:合并多个 csv 表格\n---\n步骤\n")
+    with open(os.path.join(R.SKILLS_DIR, "rust-build.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: rust-build\ndescription: 用于:升级 rust 依赖\n---\n步骤\n")
+    block = A._known_skills("把三个 csv 表格合并成一张")
+    assert "csv-merge" in block                      # 相关的那条摆出来了
+    assert "rust-build" not in block                 # 不相关的不摆 —— 摆多了等于没摆
+    assert "什么都不写" in block                      # NOOP 这个档位存在了
+
+def test_reflection_prompt_is_unchanged_when_there_is_nothing_to_dedupe(ws):
+    """一条技能都没有(或都不沾边)时,一个字都别加 —— 空表格只会教它去改不存在的文件。"""
+    import agent as A
+    assert A._known_skills("随便什么任务") == ""
+
+def test_a_broken_index_does_not_take_reflection_down_with_it(ws, monkeypatch):
+    """查重是锦上添花。检索炸了就退回原来的行为,不能连累复盘 —— 那才是真正要保住的写入。"""
+    import agent as A
+    import recall as R
+    monkeypatch.setattr(R, "explain", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert A._known_skills("合并 csv") == ""

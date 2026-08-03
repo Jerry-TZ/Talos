@@ -1129,8 +1129,17 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
 REFLECT_PROMPT = (
     "复盘刚才的对话。如果有**可复用的做法**值得留下,用 write_file 存成 "
     f"{os.path.join(SKILLS_DIR, '<kebab-name>.md')}(**用这个完整路径**,别用相对路径):"
-    "开头用 --- 包住 frontmatter(name、description=何时用),"
-    f"再写步骤。如果有关于用户/项目的**持久事实或教训**,用 edit_file 往 {MEMORY_FILE} 追加"
+    "开头用 --- 包住 frontmatter(name、description),再写步骤。\n"
+    # description 是**路由条件**,不是功能简介。原来只写「description=何时用」,产出的六条全是
+    # 功能介绍:「调试API响应结构,识别字段路径和响应格式」匹配到的是「API」「字段」这些术语,
+    # 而下次用户开口说的是「B站接口报错说没这个字段」—— 对不上。recall 按关键词交集打分,
+    # description 里出现用户的原话才捞得出来。「不用于」还补上了打分里一直缺的负向信号:
+    # 现在只有正向分,「该扣住」全靠 BODY_LEAD 那个落差判据间接硬扛。
+    "**description 是路由条件,不是功能简介。** 照这个格式写:"
+    "`用于:<用户会怎么开口,给两三种说法>;不用于:<最容易被误捞的那类任务>`。"
+    "别写「处理 API 相关任务」「调试响应结构」这种功能介绍 —— 检索是拿你这行字跟用户的"
+    "原话求关键词交集,写的是术语就永远对不上口语。\n"
+    f"如果有关于用户/项目的**持久事实或教训**,用 edit_file 往 {MEMORY_FILE} 追加"
     "一行(没有该文件就 write_file 新建)。只存下次真能帮上忙的,一次性的别存。没有值得"
     "存的就直说、别写文件。\n"
     "同名技能**已经存在时,先 read_file 读它,再用 edit_file 改**,绝不许 write_file 盖掉 —— "
@@ -1220,13 +1229,48 @@ def recall_mod():
     import recall
     return recall
 
+def _known_skills(task: str) -> str:
+    """Put the skills we already have in front of reflection, before it writes another one.
+
+    The prompt has only ever guarded against the SAME NAME ("先 read_file 读它,再 edit_file 改").
+    Nothing guarded against the same *idea* under a new name, and that is the leak: sixteen tasks
+    grew twelve skills, half of them noise, and the only cure was running /consolidate by hand
+    to cut it back to six. Two skills covering one thing is worse than one — they split the
+    keyword mass and hold each other below the BODY_LEAD gap, so neither ever gets its body in.
+
+    Showing the neighbours turns "write a new file" from the default into a four-way choice
+    (ADD / UPDATE / DELETE / NOOP — the shape ch3 of the book uses). Note what this is NOT:
+    it does not ask the model to perform an extra action. It constrains a write it was already
+    going to do. Every rule of the additive kind has failed here — create_tool fired 12 times
+    and converted 0. NOOP is the option that never existed before: today reflection can say
+    "写" or "不写", but not "这条我已经会了"."""
+    try:
+        rows = recall_mod().explain(task, k=8, blocked=set(scan_skills()))
+    except Exception:
+        return ""                                    # 检索坏了不该拖垮复盘,退回原来的行为
+    sk = [(s, t) for s, kind, t in rows if kind == "技能"]
+    if not sk:
+        return ""
+    # 只留跟第一名同一量级的。扩散激活跑两跳,任何跟命中项**共享几个关键词**的技能都会拿到
+    # 一点分数 —— 库里只有两条技能时,一条问 CSV 合并的任务照样把「升级 rust 依赖」捞出来,
+    # 因为两个文件都含 frontmatter 那几个词,它们之间连着边。摆一张混着无关项的表比不摆更糟:
+    # 提示词说的是「上面有沾边的就去改」,而它会照做。判据用相对落差不用绝对门槛,理由跟
+    # recall.py 里 BODY_LEAD 那段一样 —— 绝对门槛会误杀短技能,打分是数交集,长的天然占便宜。
+    hits = [t for s, t in sk if s >= 0.5 * sk[0][0]][:4]
+    return ("\n**写之前先看这张表 —— 这些是跟本次任务最相关的已有技能:**\n"
+            + "\n".join("- " + h for h in hits)
+            + "\n上面有沾边的,就 read_file 读那一条、用 edit_file 把这次的新东西补进去"
+              "(**改**,不是新建);确实一条都不沾边,才新建;这次的经验里面已经写过了,"
+              "就**什么都不写**。同一件事拆成两条技能,两条会在检索里互相压分,谁都捞不出来。\n")
+
 def reflect(client, model: str, messages: list, state: dict) -> str:
     """One extra learning turn — saves skills/facts, reusing the gated tools.
     Runs on a COPY of messages so the reflection prompt never pollutes memory."""
     before = _memory_lines()
     task = next((m["content"] for m in messages                  # the request that started all this,
                  if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
-    out = agent_turn(client, model, messages + [{"role": "user", "content": REFLECT_PROMPT}],
+    out = agent_turn(client, model,
+                     messages + [{"role": "user", "content": REFLECT_PROMPT + _known_skills(task)}],
                      state, query=task)                          # not REFLECT_PROMPT itself
     n = _tag_new_memory(before)
     if n and ui is not None:
