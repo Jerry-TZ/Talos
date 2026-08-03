@@ -205,3 +205,25 @@ def test_the_loop_actually_feeds_the_repeat_warning_back(ws, monkeypatch):
     tool_msgs = [m["content"] for m in messages if m.get("role") == "tool"]
     assert tool_msgs[0] == "总行数: 642" and tool_msgs[1] == "总行数: 642"
     assert "第 3 次" in tool_msgs[2] and "总行数: 642" in tool_msgs[2]
+
+def test_the_loop_snapshots_before_a_tool_can_overwrite(ws, monkeypatch):
+    """光有 archive_workspace() 不算数 —— 得确认循环真的在动手**之前**调它。
+    那次十五个脚本原地覆盖,数据没了才是重点;存晚一步等于没存。"""
+    import os
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    p = os.path.join(ws, "data.log")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("好数据")
+    def destroy(name, args):                        # 冒充 `python fix_logs.py`
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("坏数据")
+        return "修复完成", False
+    monkeypatch.setattr(A, "run_tool", destroy)
+    client = _Client([_msg(tool_calls=[_tc("run_bash", '{"command":"python fix_logs.py"}')]),
+                      _msg(content="done")])
+    A.agent_turn(client, "m", [{"role": "user", "content": "hi"}],
+                 {"mode": "bypass", "allow": set()})
+    saved = [open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+             for n in os.listdir(A.TRASH_DIR)]
+    assert "好数据" in saved, "覆盖之前没有存档 —— 数据就真没了"

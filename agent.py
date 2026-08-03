@@ -174,6 +174,66 @@ if os.path.isdir(WORKSPACE):
     # split. HOME paths are absolute, so the agent's brain is unaffected.
     os.chdir(WORKSPACE)
 
+TRASH_DIR = os.path.join(HOME, ".talos", "trash")
+TRASH_MAX_BYTES = 1 << 20            # 单个文件超过这个不存 —— 回收站是安全网,不是备份系统
+TRASH_MAX_FILES = 300                # 一次最多扫这么多,别在大仓库里空转
+_TRASH_SKIP = {".git", ".venv", "venv", "node_modules", "__pycache__", ".talos", ".pytest_cache"}
+_ARCHIVED: set = set()               # 存过的内容指纹;存过就不再存,所以重复运行几乎零成本
+
+def archive_workspace() -> int:
+    """Copy every workspace file we haven't stored yet — BEFORE anything gets a chance to write.
+
+    The delete gate watches for verbs: del, rm, rmdir, Remove-Item. A real run destroyed two
+    300-line log files with **none of them**. It wrote fifteen repair scripts and ran them; each
+    `python fix_logs.py` overwrote the data in place, and every one was auto-allowed because
+    run_bash had been granted for the session. Fifteen rounds of damage, zero prompts. No regex
+    will ever see a .py file that happens to call open(path, 'w') — which is why this does not
+    read the command at all. Nothing to route around when nothing is being matched.
+
+    Content-addressed on purpose, and this is the part that matters. The model made its own
+    backups: every repair script dutifully copied access1.log to access1.log.bak first. The
+    first backup held the good data. The second run backed up the ALREADY-CORRUPTED file over
+    the top of it, and the only clean copy was gone — after which every later script "repaired"
+    from the corrupt .bak. A store keyed by content can't do that: a new version is a new key,
+    the original keeps its own, and nothing is ever overwritten.
+
+    Bounded so it stays a reflex and not a chore: skip the usual junk trees, skip anything over
+    a megabyte, stop after TRASH_MAX_FILES. Restoring is a plain file copy — the trash name is
+    `<flattened path>__<hash prefix>`, and mtime tells you which came first."""
+    saved = seen = 0
+    try:
+        os.makedirs(TRASH_DIR, exist_ok=True)
+    except Exception:
+        # OSError 不够:路径里带 \x00 抛的是 ValueError。这是安全网,不是关键路径 ——
+        # 它自己出任何毛病都不该拦住用户正要做的事,所以这里就是要抓得比平常宽。
+        return 0
+    for root, dirs, files in os.walk(WORKSPACE):
+        dirs[:] = [d for d in dirs if d not in _TRASH_SKIP]
+        for fn in files:
+            seen += 1
+            if seen > TRASH_MAX_FILES:
+                return saved
+            p = os.path.join(root, fn)
+            try:
+                if os.path.getsize(p) > TRASH_MAX_BYTES:
+                    continue
+                with open(p, "rb") as f:
+                    blob = f.read()
+            except OSError:
+                continue                           # 读不到就跳过,一个文件不该弄崩一次调用
+            h = hashlib.sha1(blob).hexdigest()
+            if h in _ARCHIVED:
+                continue                           # 这份内容已经在回收站里了
+            _ARCHIVED.add(h)
+            rel = os.path.relpath(p, WORKSPACE).replace("\\", "__").replace("/", "__")
+            try:
+                with open(os.path.join(TRASH_DIR, f"{rel}__{h[:8]}"), "wb") as f:
+                    f.write(blob)
+                saved += 1
+            except OSError:
+                pass
+    return saved
+
 def _under(full: str, root: str) -> bool:
     try:
         return os.path.commonpath([full, root]) == root
@@ -1157,6 +1217,12 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
             elif name not in TOOLS:
                 out, is_error = f"error: unknown tool {name}", True
             else:
+                # Snapshot BEFORE the write, not after — afterwards there is nothing left to
+                # save. Keyed on the permission class so it covers everything that can touch
+                # a file: run_bash, write_file, edit_file, and self-written tools (which
+                # register as "bash", see load_custom_tools). Read-only calls skip it.
+                if cls in ("bash", "edit"):
+                    archive_workspace()
                 out, is_error = run_tool(name, args)
                 if view != "quiet":
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))

@@ -19,6 +19,8 @@ def ws(tmp_path, monkeypatch):
     monkeypatch.setattr(agent, "MEMORY_FILE", os.path.join(d, "memory.md"))
     monkeypatch.setattr(agent, "SKILLS_DIR", os.path.join(d, "skills"))
     monkeypatch.setattr(agent, "TOOLS_DIR", os.path.join(d, "tools"))
+    monkeypatch.setattr(agent, "TRASH_DIR", os.path.join(d, "trash"))
+    agent._ARCHIVED.clear()          # 内容指纹是模块级的,不清就会跨测试串味
     monkeypatch.setattr(session, "SESS_DIR", os.path.join(d, "sessions"))
     monkeypatch.setattr(recall, "MEMORY_FILE", os.path.join(d, "memory.md"))
     monkeypatch.setattr(recall, "SKILLS_DIR", os.path.join(d, "skills"))

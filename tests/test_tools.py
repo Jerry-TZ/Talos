@@ -348,3 +348,37 @@ def test_approval_manifest_is_not_writable_by_file_tools(ws):
     A.create_tool("ok", "TOOL={'description':'d','parameters':{},'required':[]}\n"
                         "def run(a): return 'x'\n")          # 内部路径仍能写
     assert A.load_dynamic_tools() == ["ok"]
+
+def test_the_original_survives_being_overwritten_in_place(ws):
+    """删除闸门盯的是动词。真实运行里两个 300 行日志被十五个修复脚本原地覆盖销毁,
+    全程没出现过一个 del/rm —— 所以这道网**不看命令**,没有可绕的东西。"""
+    import agent as A
+    p = os.path.join(ws, "access.log")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("好数据")
+    A.archive_workspace()                              # 动手之前存一份
+    with open(p, "w", encoding="utf-8") as f:          # 脚本把它就地改坏了
+        f.write("坏数据")
+    saved = [open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+             for n in os.listdir(A.TRASH_DIR)]
+    assert "好数据" in saved
+
+def test_a_second_backup_cannot_bury_the_first(ws):
+    """模型自己做的备份就是这么毁的:第一次备份存下好数据,第二次把**已经改坏的**文件
+    覆盖上去,唯一的干净副本没了,之后所有脚本都在坏数据上精修。内容寻址不会这样 ——
+    新版本是新键,原件留着自己的键。"""
+    import agent as A
+    p = os.path.join(ws, "access.log")
+    for content in ("原始", "改坏一次", "改坏两次"):
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+        A.archive_workspace()
+    saved = [open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+             for n in os.listdir(A.TRASH_DIR)]
+    assert "原始" in saved and len(saved) == 3         # 三个版本并存,谁也没盖谁
+
+def test_archiving_never_takes_the_turn_down(ws, monkeypatch):
+    """回收站是安全网,不是关键路径。存不进去也绝不能拦住用户正要做的事。"""
+    import agent as A
+    monkeypatch.setattr(A, "TRASH_DIR", os.path.join(ws, "nope\x00bad"))
+    assert A.archive_workspace() == 0
