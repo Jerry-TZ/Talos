@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 2321 行 Python,98 个离线测试,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 2327 行 Python,98 个离线测试,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -19,7 +19,7 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `agent.py` | 1734 | 循环 + 工具 + 权限门 + 自学习 |
+| `agent.py` | 1740 | 循环 + 工具 + 权限门 + 自学习 |
 | `console_ui.py` | 160 | 终端界面(可整体替换) |
 | `recall.py` | 293 | 联想记忆:扩散激活检索 |
 | `session.py` | 134 | 会话持久化(想换 SQLite 只改这个) |
