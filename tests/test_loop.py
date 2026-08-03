@@ -248,3 +248,25 @@ def test_a_subagent_cannot_reset_the_parents_repeat_counter(ws, monkeypatch):
     hits = [m["content"] for m in messages
             if m.get("role") == "tool" and "第 3 次" in str(m.get("content"))]
     assert hits, "子agent 插了一脚,父轮的打转计数就被清零了"
+
+def test_a_timeout_is_retried_like_any_other_busy_signal():
+    """SDK 抛的是 "Request timed out.",里面没有 "timeout" 这个词 —— 刚给客户端设完超时
+    才发现,超时本身正好落在重试判据之外,等于设了个「一次就放弃」的开关。"""
+    import agent as A
+    assert A._chat(_Client([Exception("Request timed out."), "OK"])) == "OK"
+
+def test_the_client_bounds_how_long_one_call_can_hang(monkeypatch):
+    """没有超时时用的是 SDK 默认 600 秒 + SDK 自己 2 次重试,外面 _chat 又套 3 次 ——
+    最坏一个多小时才报错,屏幕上只有一个转圈。而且 SDK 那两次是静默的,「模型繁忙」
+    根本不打印。重试只能有一处,而且必须可见。"""
+    import agent as A
+    import sys
+    seen = {}
+    fake = types.ModuleType("openai")          # 测试是纯 stdlib 离线的,不能真 import openai
+    fake.OpenAI = lambda **kw: seen.update(kw) or object()
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setenv("ZHIPUAI_API_KEY", "k")
+    monkeypatch.setattr(A, "PROVIDER", "glm")
+    A.make_client()
+    assert seen["timeout"] == A.CHAT_TIMEOUT
+    assert seen["max_retries"] == 0            # 重试归 _chat 管,别两层相乘

@@ -141,6 +141,11 @@ def _env_block() -> str:
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
 MAX_STEPS = int(os.environ.get("TALOS_MAX_STEPS", "100"))  # loop safety cap (guards against 空转)
+# 一次 API 调用最多等多久。没有它时用的是 SDK 默认的 600 秒 **加上 SDK 自己的 2 次重试**,
+# 外面 _chat 又套了 3 次 —— 最坏情况一个多小时才报错,而屏幕上只有一个转圈,
+# 「拥塞」和「彻底卡死」完全分不出来。实测被这个坑了两次。
+# 300 秒是留给长生成的:air 档小模型写两万字符的文件真的要几分钟,砍太短会误杀。
+CHAT_TIMEOUT = float(os.environ.get("TALOS_TIMEOUT", "300"))
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 _RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
@@ -155,7 +160,11 @@ def make_client():
     if not key:
         raise SystemExit(f"缺少环境变量 {key_env} —— 设置你的 {PROVIDER} API key(或换 TALOS_PROVIDER)")
     from openai import OpenAI                       # lazy: only needed to actually talk to a model
-    return OpenAI(api_key=key, base_url=base_url), (os.environ.get("TALOS_MODEL") or default_model)
+    # max_retries=0 是有意的:重试归 _chat 管。SDK 默认自己重试 2 次,而 _chat 外面还有 3 次,
+    # 两层相乘 = 最多 6 趟,每趟都可能等满超时 —— 而且 SDK 那两次是静默的,ui.note 里的
+    # 「模型繁忙,Ns 后重试」根本不会打印,于是它看起来就是卡死。一处重试,一处可见。
+    return (OpenAI(api_key=key, base_url=base_url, timeout=CHAT_TIMEOUT, max_retries=0),
+            os.environ.get("TALOS_MODEL") or default_model)
 
 # ── tools: just plain Python functions ────────────────────────────────────────
 # 工作目录限制:文件工具只能在 WORKSPACE 内活动(默认当前目录,TALOS_WORKSPACE 可改)。
@@ -1146,8 +1155,11 @@ def _chat(client, **kwargs):
             return client.chat.completions.create(**kwargs)
         except Exception as e:
             s = str(e).lower()
+            # "timed out" 是分开的一条:SDK 的 APITimeoutError 说的是 "Request timed out.",
+            # 里面没有 "timeout" 这个词 —— 刚给客户端设完超时才发现,超时本身正好落在
+            # 重试判据之外,一次就直接抛出去了。
             transient = (any(k in s for k in ("429", "rate limit", "ratelimit", "timeout",
-                        "overload", "too many", "busy", "503", "502", "并发", "繁忙"))
+                        "timed out", "overload", "too many", "busy", "503", "502", "并发", "繁忙"))
                         or "用户多" in str(e))
             if attempt < 2 and transient:
                 if ui is not None:
