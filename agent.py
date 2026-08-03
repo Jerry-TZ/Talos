@@ -176,6 +176,14 @@ def make_client():
 #   the .py source itself — never writable once WORKSPACE is not HOME.
 HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.path.realpath(os.environ.get("TALOS_WORKSPACE", "."))
+if WORKSPACE == HOME:
+    # `python agent.py` 从仓库根目录跑 —— 默认的 "." 就是 HOME。而 _in_workspace 只问
+    # "在不在 WORKSPACE 里",于是 agent.py、recall.py 自己也落进牢笼内,模型能覆写正在
+    # 跑的循环。那条不变式是 _in_workspace 的 docstring 明写的("the agent still cannot
+    # rewrite the loop it is running inside"),却从来没有代码强制过 —— 它只在你手动设了
+    # TALOS_WORKSPACE 时才成立,而默认恰恰不成立。往下挪一层,让默认路径也守得住。
+    WORKSPACE = os.path.realpath(os.path.join(HOME, "workspace"))
+    os.makedirs(WORKSPACE, exist_ok=True)
 if os.path.isdir(WORKSPACE):
     # Actually stand in the workspace. Otherwise a relative path means two different places:
     # the jail resolves it against the process cwd (outside -> 越界) while the model, quite

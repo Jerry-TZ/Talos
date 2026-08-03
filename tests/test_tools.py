@@ -445,3 +445,29 @@ def test_run_bash_actually_attaches_the_hint(ws):
     name = os.path.basename(ws)
     out = A.run_bash(f"cd {name} && python gen.py")
     assert "已经**站在" in out
+
+
+def test_the_default_workspace_is_never_the_source_tree():
+    """从仓库根目录 `python agent.py` 时,默认的 TALOS_WORKSPACE="." 就等于 HOME ——
+    _in_workspace 只问「在不在 WORKSPACE 里」,agent.py 自己就落进牢笼内了,模型能
+    覆写正在跑的循环。这条不变式 _in_workspace 的 docstring 一直在承诺,但直到一次
+    benchmark 把 analyze_conf.py 写进仓库根目录才发现没人强制。
+
+    子进程里跑:WORKSPACE 是导入时定死的模块级常量,monkeypatch 改不出这个场景。"""
+    import subprocess, sys, os
+    home = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env.pop("TALOS_WORKSPACE", None)                 # 正是"没设"这一档要测
+    # 查的是源码的**绝对**路径。裸写 'agent.py' 不算数:chdir 之后它解析成
+    # workspace/agent.py,那本来就该放行 —— 第一版测试栽在这上面。
+    code = ("import agent, os, sys;"
+            "print(agent.HOME == agent.WORKSPACE);"
+            "sys.exit(0 if all(_refused(agent, os.path.join(agent.HOME, f))"
+            "                  for f in ('agent.py', 'recall.py')) else 1)\n")
+    helper = ("def _refused(agent, p):\n"
+              "    try: agent._in_workspace(p); return False\n"
+              "    except ValueError: return True\n")
+    p = subprocess.run([sys.executable, "-c", helper + code],
+                       cwd=home, env=env, capture_output=True, text=True)
+    assert p.stdout.strip() == "False", f"WORKSPACE 仍等于 HOME: {p.stdout}{p.stderr}"
+    assert p.returncode == 0, f"agent.py 没被牢笼挡住: {p.stdout}{p.stderr}"

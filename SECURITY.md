@@ -89,6 +89,12 @@ run_bash 能跑任何 shell 命令;一个恶意工具里的 `while True` 会挂�
 按代价从低到高:
 
 1. **`TALOS_WORKSPACE` 锁到专用空目录** —— 文件破坏面缩到最小(免费,已内置)
+
+   > 不设也不会退回到最坏情况:`WORKSPACE` 一旦解析成 `HOME`(在仓库根目录直接
+   > `python agent.py` 就是这样),会自动下移到 `HOME/workspace`。**这是补上去的** ——
+   > 之前默认档下 `agent.py`、`recall.py` 自己就在牢笼内,模型可以覆写正在跑的循环。
+   > 是跑 benchmark 时一个产物落在仓库根目录才发现的,不是设计如此。
+
 2. **Windows 沙盒**(Win10/11 Pro 自带)—— 一次性轻量虚拟机,跑不信任任务,关掉即还原
 3. **Docker** —— 持久隔离,几 GB,适合长期无人值守
 
