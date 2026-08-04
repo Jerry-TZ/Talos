@@ -200,7 +200,8 @@ if os.path.isdir(WORKSPACE):
 
 TRASH_DIR = os.path.join(HOME, ".talos", "trash")
 TRASH_MAX_BYTES = 1 << 20            # 单个文件超过这个不存 —— 回收站是安全网,不是备份系统
-TRASH_MAX_FILES = 300                # 一次最多扫这么多,别在大仓库里空转
+TRASH_MAX_FILES = 300                # 一次最多存这么多,别在大仓库里空转(按 mtime 倒序取)
+_TRASH_LAST_SKIP = 0                 # 上次报过的跳过数 —— 只有变多才再说一次
 _TRASH_SKIP = {".git", ".venv", "venv", "node_modules", "__pycache__", ".talos", ".pytest_cache"}
 
 def archive_workspace() -> int:
@@ -297,7 +298,13 @@ def archive_workspace() -> int:
             saved += 1
         except OSError:
             pass
-    if (over or big) and ui is not None:
+    global _TRASH_LAST_SKIP
+    # 只在"跳过的数量变多了"时说一次。这行提示挂在每次写操作前的存档上,而一个任务里
+    # 存档要跑十几次 —— 实测一轮打了 4 遍一模一样的话。信息量在第一遍就交付完了,
+    # 后面全是噪音,跟之前那个转圈刷屏是同一个毛病。变多才是新消息,不变就闭嘴。
+    skipped = over + big
+    if skipped > _TRASH_LAST_SKIP and ui is not None:
+        _TRASH_LAST_SKIP = skipped
         # 静默跳过等于没有网。用户以为整个工作区都存了,实际最重要的那份可能没进。
         ui.note(f"回收站这次跳过了 " +
                 "、".join(([f"{over} 个较旧文件(上限 {TRASH_MAX_FILES})"] if over else [])

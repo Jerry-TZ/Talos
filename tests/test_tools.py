@@ -553,6 +553,7 @@ def test_the_trash_covers_the_files_that_were_just_touched(ws, monkeypatch):
 
     import agent as A
     monkeypatch.setattr(A, "TRASH_MAX_FILES", 5)
+    monkeypatch.setattr(A, "_TRASH_LAST_SKIP", 0)   # 提示只在"跳过数变多"时说,测试要从零起
     monkeypatch.setattr(A, "TRASH_DIR", os.path.join(tempfile.mkdtemp(), "trash"))
     notes = []
     monkeypatch.setattr(A, "ui", __import__("types").SimpleNamespace(note=notes.append))
