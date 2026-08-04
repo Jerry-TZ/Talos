@@ -619,3 +619,30 @@ def test_the_trash_also_covers_the_agents_own_brain(ws, monkeypatch):
     assert any(f.startswith(("s.md__", "skills__s.md__")) for f in kept), f"技能没进回收站: {kept}"
     assert any(f.startswith("memory.md__") for f in kept), f"memory.md 没进回收站: {kept}"
     assert not any(".." in f for f in kept), f"名字里带 .. 的没法恢复: {kept}"
+
+
+def test_the_skip_notice_shuts_up_until_it_gets_meaningfully_worse(ws, monkeypatch):
+    """第一版每次存档都打这行,一轮刷了 4 遍。改成"变多才说"之后,任务每写一个文件跳过数
+    就 +1(实测 206→207→210→211),又刷了 5 遍 —— **判据太灵敏,等于没改**。
+    真正的信息是"你有一批文件没有副本",说一次就交付完了;只有明显变多才算新消息。"""
+    import agent as A
+    monkeypatch.setattr(A, "TRASH_MAX_FILES", 3)
+    monkeypatch.setattr(A, "TRASH_DIR", os.path.join(tempfile.mkdtemp(), "t"))
+    monkeypatch.setattr(A, "_TRASH_LAST_SKIP", 0)
+    notes = []
+    monkeypatch.setattr(A, "ui", __import__("types").SimpleNamespace(note=notes.append))
+
+    def make(n):
+        for i in range(n):
+            with open(os.path.join(ws, "f%03d.txt" % i), "w", encoding="utf-8") as f:
+                f.write("x%d" % i)
+
+    make(10)
+    A.archive_workspace()
+    assert len(notes) == 1, f"第一次该说一声: {notes}"
+    make(11)                                   # 只多一个文件 —— 跳过数 +1
+    A.archive_workspace()
+    assert len(notes) == 1, f"只多一个就又喊,还是刷屏: {notes}"
+    make(40)                                   # 明显变多
+    A.archive_workspace()
+    assert len(notes) == 2, f"跳过数翻了几倍,该再说一次: {notes}"

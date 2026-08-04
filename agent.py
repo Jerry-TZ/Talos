@@ -299,11 +299,13 @@ def archive_workspace() -> int:
         except OSError:
             pass
     global _TRASH_LAST_SKIP
-    # 只在"跳过的数量变多了"时说一次。这行提示挂在每次写操作前的存档上,而一个任务里
-    # 存档要跑十几次 —— 实测一轮打了 4 遍一模一样的话。信息量在第一遍就交付完了,
-    # 后面全是噪音,跟之前那个转圈刷屏是同一个毛病。变多才是新消息,不变就闭嘴。
+    # 这行提示挂在每次写操作前的存档上,而一个任务里存档要跑十几次。第一版每次都打,
+    # 一轮刷了 4 遍;第二版改成"变多才说",结果任务每写一个文件跳过数就 +1
+    # (206→207→210→211),又刷了 5 遍 —— **判据太灵敏,等于没改**。
+    # 真正的信息是"你有一批文件没有副本",说一次就交付完了;只有**明显变多**
+    # (多两成)才算新消息,比如你刚往工作区扔了几百个文件。
     skipped = over + big
-    if skipped > _TRASH_LAST_SKIP and ui is not None:
+    if skipped and skipped >= max(1, _TRASH_LAST_SKIP * 1.2) and ui is not None:
         _TRASH_LAST_SKIP = skipped
         # 静默跳过等于没有网。用户以为整个工作区都存了,实际最重要的那份可能没进。
         ui.note(f"回收站这次跳过了 " +
