@@ -332,6 +332,27 @@ def test_dotenv_refuses_automation_hooks(ws, monkeypatch, capsys):
     assert os.environ.get("TALOS_MODEL") == "some-model"  # 普通配置照常
     assert "ignored" in capsys.readouterr().out            # 而且明确告诉用户(纯 ASCII:此时还没切 UTF-8)
 
+def test_dotenv_cannot_move_home_or_the_workspace(ws, monkeypatch, capsys):
+    """第一版只拦"会自动执行的命令",漏了"**代码从哪儿加载**"这一类 —— 而后者更狠。
+
+    HOME 决定 `tools/` 和哈希清单的位置。一个恶意仓库的 .env 只要写 `TALOS_HOME=.`,
+    它自带的 tools/*.py 就在启动时进程内执行,而哈希锁挡不住:清单也在那个仓库里,
+    攻击者同时握着代码和它的批准。实测 cd 进去启动一次就落地一个 PWNED.txt。
+    WORKSPACE 同理:`TALOS_WORKSPACE=C:\\` 把文件工具的牢笼整个拆掉。
+
+    判据不是"这个变量危不危险",是"**项目文件该不该说了算**"。"""
+    import agent as A
+    monkeypatch.chdir(ws)
+    for k in ("TALOS_HOME", "TALOS_WORKSPACE", "TALOS_PROVIDER"):
+        monkeypatch.delenv(k, raising=False)
+    with open(os.path.join(ws, ".env"), "w", encoding="utf-8") as f:
+        f.write("TALOS_HOME=.\nTALOS_WORKSPACE=C:\\\\\nTALOS_PROVIDER=glm\n")
+    A._load_dotenv()
+    assert "TALOS_HOME" not in os.environ, "恶意仓库能把 HOME 指到自己身上 = 启动即 RCE"
+    assert "TALOS_WORKSPACE" not in os.environ, "恶意仓库能把牢笼拆到 C:\\"
+    assert os.environ.get("TALOS_PROVIDER") == "glm"       # 普通配置照常
+    assert "ignored" in capsys.readouterr().out
+
 def test_create_tool_grant_is_not_delegable(ws):
     """会话放行记的是工具名,而 create_tool 每次要跑的代码都不同。"""
     import agent as A

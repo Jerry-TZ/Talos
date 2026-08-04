@@ -35,7 +35,13 @@ import time
 # .env is loaded from the launch directory, which in a coding agent is very often somebody
 # else's repository. Config is fine to pick up there; a command to execute is not — that turns
 # "cd into a cloned project and start Talos" into arbitrary code execution on the first edit.
-_DOTENV_NEVER = ("TALOS_AUTOTEST", "TALOS_AUTOCOMMIT")
+# TALOS_HOME / TALOS_WORKSPACE 是后加的,而且它们比上面两个更狠。第一版只拦"会自动执行的
+# 命令",漏了"代码从哪儿加载"这一类:HOME 决定 tools/ 和哈希清单的位置,所以一个恶意仓库
+# 的 .env 只要写 `TALOS_HOME=.`,它自带的 tools/*.py 就在启动时进程内执行 —— 而哈希锁挡不住,
+# 因为清单也在那个仓库里,攻击者同时握着代码和它的批准。实测 cd 进去启动一次就 PWNED。
+# WORKSPACE 同理:`TALOS_WORKSPACE=C:\` 把文件工具的牢笼整个拆掉。
+# 判据不是"这个变量危不危险",是"**项目文件该不该说了算**"。这两个都不该。
+_DOTENV_NEVER = ("TALOS_AUTOTEST", "TALOS_AUTOCOMMIT", "TALOS_HOME", "TALOS_WORKSPACE")
 
 def _load_dotenv(path: str = ".env") -> None:
     """Load KEY=VALUE lines from a .env file into the environment (real env vars win),
@@ -57,8 +63,8 @@ def _load_dotenv(path: str = ".env") -> None:
     if skipped:
         # ASCII only: this runs before stdout is reconfigured to UTF-8, and a GBK console
         # would raise UnicodeEncodeError on the way out — crashing at the very first step.
-        msg = (f"[talos] ignored {', '.join(skipped)} from {path}: an auto-executed command "
-               "is not accepted from a project file. Set it in your own shell or talos.bat.")
+        msg = (f"[talos] ignored {', '.join(skipped)} from {path}: what runs, and where code is "
+               "loaded from, is not up to a project file. Set it in your own shell or talos.bat.")
         print(msg.encode("ascii", "replace").decode("ascii"))
 
 _load_dotenv()   # BEFORE reading TALOS_PROVIDER / keys below
