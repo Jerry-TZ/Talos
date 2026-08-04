@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 2431 行 Python,113 个离线测试,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 2431 行 Python,115 个离线测试,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -33,7 +33,7 @@
 极简 agent 赛道很挤,有人用 Zig 做到 678KB 二进制。**Talos 不比谁小,它比谁都好读。**
 
 - **能读完** — 四个文件,注释解释的是*为什么*,不是*是什么*。几乎每条防御旁边都写着它挡的那次真实翻车。
-- **能验证** — 113 个测试,**离线、免 API key、1 秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
+- **能验证** — 115 个测试,**离线、免 API key、1 秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
 - **不吹牛** — [`SECURITY.md`](SECURITY.md) 明写 `create_tool` 就是进程内 RCE、正则黑名单只是减速带。**没有沙箱就是没有沙箱。**
 - **有考卷** — [`EXAM.md`](EXAM.md) / [`EXAM2.md`](EXAM2.md) 是两份可复现的能力测试,带标准答案和作弊检测(比如逐个核验 arXiv ID 真伪,防止编造引用)。记录的是"我怎么验证它真的有用",不是功能列表。
 - **有实测** — [`FINDINGS.md`](FINDINGS.md) 记了十六个真实任务量出来的东西:哪条提示词生效、哪条从头到尾没生效、六次翻车、检索改动的前后数字,以及**两个被数据否掉的自己的方案**。样本小,局限写在最前面。

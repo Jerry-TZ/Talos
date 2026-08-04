@@ -478,7 +478,14 @@ def edit_file(path: str, old: str, new: str) -> str:
                          "old 必须和文件里的字符完全一致(包括缩进和空行)")
     if n > 1:
         raise ValueError(f"`old` string is not unique ({n} matches) — add more surrounding context")
-    write_file(path, text.replace(old, new, 1))
+    result = write_file(path, text.replace(old, new, 1))
+    # write_file 的两道闸(技能超长、验证脚本没有 assert)是**返回拒绝字符串**,不抛异常。
+    # 这里原来把返回值丢了、无条件报 "edited" —— 于是模型收到"改好了"而磁盘纹丝不动。
+    # 代价是真金白银的:一次复盘正确地选了 UPDATE 而不是新建(P1 一直想要、第一次完全
+    # 兑现的行为),三次编辑全被静默丢弃,模型以为成功所以既不重试也不告诉用户,而复盘
+    # 本身又不进 session —— 三层沉默叠在一起,只有拿 mtime 跟磁盘对才看得出来。
+    if result.startswith("拒绝"):
+        raise ValueError(result)
     return f"edited {path}"
 
 # cmd.exe silently does something else with these, or errors uselessly. Name the equivalent.
@@ -1312,14 +1319,19 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
                 args = json.loads(c.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            cls = TOOLS[name][4] if name in TOOLS else "bash"
-            allowed, reason = check_permission(state, cls, name, args)
-            if not allowed:
+            # 先认名字,再问权限。反过来会出两个毛病,都真实发生过(模型编了个 del_probe):
+            # 一是给一个**根本不存在**的工具弹权限框,人得为一件不会发生的事做决定;
+            # 二是未知名字被兜底归成 "bash",于是对着这个假名字按 [a] —— 那一下放行的
+            # 是整个 bash 类,真正的 run_bash 从此不再问。批准的东西必须存在。
+            cls = TOOLS[name][4] if name in TOOLS else None
+            # 名字不认识就别问权限 —— check_permission 会弹框,而框一弹就晚了。
+            allowed, reason = (False, "") if cls is None else check_permission(state, cls, name, args)
+            if cls is None:
+                out, is_error = f"error: unknown tool {name}", True
+            elif not allowed:
                 out, is_error = f"permission denied: {reason}", True
                 if view != "quiet":
                     ui.denied(name, reason)
-            elif name not in TOOLS:
-                out, is_error = f"error: unknown tool {name}", True
             else:
                 # Snapshot BEFORE the write, not after — afterwards there is nothing left to
                 # save. Keyed on the permission class so it covers everything that can touch

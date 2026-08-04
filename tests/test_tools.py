@@ -471,3 +471,29 @@ def test_the_default_workspace_is_never_the_source_tree():
                        cwd=home, env=env, capture_output=True, text=True)
     assert p.stdout.strip() == "False", f"WORKSPACE 仍等于 HOME: {p.stdout}{p.stderr}"
     assert p.returncode == 0, f"agent.py 没被牢笼挡住: {p.stdout}{p.stderr}"
+
+
+def test_an_edit_that_write_file_refuses_is_not_reported_as_edited(tmp_path, monkeypatch):
+    """write_file 的两道闸(技能超长、验证脚本没 assert)是**返回拒绝字符串**,不抛异常。
+    edit_file 原来把返回值丢了、无条件报 "edited",于是模型收到"改好了"而磁盘纹丝不动。
+
+    真实代价:一次复盘正确地选了 UPDATE 而不是新建(P1 一直想要的行为),对着一条
+    8602 字符的技能连改三次,三次全被静默丢弃 —— 模型以为成功所以不重试也不上报,
+    而复盘那一段又不进 session 日志。三层沉默叠一起,只有拿 mtime 跟磁盘对才看得出来。"""
+    import agent as A
+    skills = tmp_path / "skills"; skills.mkdir()
+    monkeypatch.setattr(A, "SKILLS_DIR", str(skills))
+    monkeypatch.setattr(A, "WORKSPACE", str(tmp_path))
+    big = skills / "fat.md"
+    big.write_text("# MARK\n" + "x" * (A.SKILL_MAX + 50), encoding="utf-8")
+    before = big.read_text(encoding="utf-8")
+
+    out, is_error = A.run_tool("edit_file", {"path": str(big), "old": "# MARK", "new": "# CHANGED"})
+    assert is_error, f"超长技能的编辑被静默吞掉了,却报了成功: {out!r}"
+    assert "拒绝" in str(out) and "上限" in str(out), f"拒绝理由没传给模型: {out!r}"
+    assert big.read_text(encoding="utf-8") == before, "说了拒绝,却还是写进去了"
+
+    small = skills / "thin.md"                       # 没超限的照常能改,别把闸门修成一堵墙
+    small.write_text("# MARK\n", encoding="utf-8")
+    out, is_error = A.run_tool("edit_file", {"path": str(small), "old": "# MARK", "new": "# CHANGED"})
+    assert not is_error and "# CHANGED" in small.read_text(encoding="utf-8"), out

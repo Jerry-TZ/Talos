@@ -323,3 +323,20 @@ def test_a_correction_always_reflects_however_short():
     """用户纠正你,一次调用也得学 —— 那是最贵的信号。"""
     import agent as A
     assert A._due_for_reflection({"last_calls": 1}, True)
+
+
+def test_a_tool_that_does_not_exist_never_reaches_the_permission_prompt(monkeypatch):
+    """模型编了个 del_probe,权限框照弹。两个毛病:人要为一件不会发生的事做决定;
+    而未知名字被兜底归成 "bash",对着这个假名字按 [a] 放行的是整个 bash 类,
+    真正的 run_bash 从此不再问。批准的东西必须先存在。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    asked = []
+    monkeypatch.setattr(A, "check_permission",
+                        lambda st, cls, n, a: (asked.append(n), (True, ""))[1])
+    script = [_msg(tool_calls=[_tc("del_probe", '{"path":"x.py"}')]), _msg(content="ok")]
+    messages = [{"role": "user", "content": "hi"}]
+    A.agent_turn(_Client(script), "m", messages, {"mode": "default", "allow": set()})
+    assert asked == [], f"不存在的工具走到了权限门: {asked}"
+    said = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert any("unknown tool" in str(c) for c in said), said
