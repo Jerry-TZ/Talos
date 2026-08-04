@@ -1663,6 +1663,36 @@ def once(task: str, mode: str = "bypass") -> str:
                 + (f" · 缓存命中 {t['cached']}" if t.get("cached") else ""))
     return result
 
+CACHE_TRACE = os.path.join(HOME, ".talos", "cache_trace.jsonl")
+
+def _log_cache(state: dict, tk: dict) -> None:
+    """一轮一行:这轮的 system 块跟上一轮一不一样,以及缓存命中了多少。
+
+    P3(KV cache)当初被划成「已否决」,依据是实测命中 92~99% —— 但那是 `-p` 一次性模式
+    量的,**中间不复盘**。交互式会话里复盘每写一条技能,retrieve() 的常驻块就变了,而它在
+    system prompt 里,一变整个前缀的缓存就作废。今天四轮量到 83~88%,低了约十个百分点,
+    方向对得上。但 n=4,而且"复盘写没写技能"和"命中率"从来没被同时记下来过 —— 所以先量,
+    别改。书 ch2 第一条铁律说的就是这件事,可它说的是"别改 system",没说"改了亏多少"。
+
+    只存哈希和数字,不存正文:常驻块里有 memory.md 的原文。"""
+    if not (tk.get("in") or tk.get("out")):
+        return
+    try:
+        cur = hashlib.sha1(retrieve().encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return                                          # 量化不该拖垮主流程
+    prev = state.get("sys_hash")
+    state["sys_hash"] = cur
+    row = {"in": tk.get("in", 0), "cached": tk.get("cached", 0),
+           "hit": round(tk.get("cached", 0) / tk["in"], 3) if tk.get("in") else None,
+           "sys_changed": prev is not None and prev != cur, "steps": tk.get("steps", 0)}
+    try:
+        os.makedirs(os.path.dirname(CACHE_TRACE), exist_ok=True)
+        with open(CACHE_TRACE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
 def _due_for_reflection(state: dict, corrected: bool) -> bool:
     """Count calls SINCE THE LAST REFLECTION, not calls in the last turn.
 
@@ -1839,6 +1869,7 @@ def repl(resume=None) -> None:
         if _tk.get("in") or _tk.get("out"):
             ui.note(f"🎫 本轮 {_tk.get('steps', 1)} 次调用 · {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
                     + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
+        _log_cache(state, _tk)                         # 量:system 变没变 × 这轮命中多少
         _corr = _is_correction(task)
         _due = _due_for_reflection(state, _corr)
         if state.pop("capped", False):                 # hit the step cap: it was flailing, so whatever it

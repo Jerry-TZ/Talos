@@ -387,3 +387,22 @@ def test_a_subagent_hitting_the_step_cap_does_not_cancel_the_parents_reflection(
     assert not st.get("capped"), "子 agent 撞上限,把父任务的复盘一起取消了"
     assert st["tok"]["calls"] >= 5, "本轮字段隔离了,但 token 汇总也跟着断了"
     assert len(st.get("trace", [])) >= 5, "trace 汇总断了 —— 子 agent 的调用没记进去"
+
+def test_cache_trace_pairs_the_system_hash_with_the_hit_rate(tmp_path, monkeypatch):
+    """P3(KV cache)当初被划成「已否决」,依据是命中 92~99% —— 但那是 -p 一次性模式量的,
+    中间不复盘。交互式会话里复盘每写一条技能,retrieve() 的常驻块就变,而它在 system
+    prompt 里,一变整个前缀作废。要判断这件事,得把"system 变没变"和"命中多少"记在同一行
+    —— 而这两个数从来没被同时记下来过。先量,别改。"""
+    import json
+    import agent as A
+    monkeypatch.setattr(A, "CACHE_TRACE", str(tmp_path / "cache.jsonl"))
+    blocks = iter(["技能表 v1", "技能表 v1", "技能表 v2"])       # 第三轮复盘写了新技能
+    monkeypatch.setattr(A, "retrieve", lambda: next(blocks))
+    st = {}
+    for cached in (900, 950, 300):
+        A._log_cache(st, {"in": 1000, "out": 10, "cached": cached, "steps": 3})
+    rows = [json.loads(l) for l in open(tmp_path / "cache.jsonl", encoding="utf-8")]
+    assert [r["sys_changed"] for r in rows] == [False, False, True], rows
+    assert [r["hit"] for r in rows] == [0.9, 0.95, 0.3]
+    A._log_cache(st, {"in": 0, "out": 0, "cached": 0})          # 空轮不记
+    assert len(list(open(tmp_path / "cache.jsonl", encoding="utf-8"))) == 3
