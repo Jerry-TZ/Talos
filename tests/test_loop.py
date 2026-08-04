@@ -406,3 +406,21 @@ def test_cache_trace_pairs_the_system_hash_with_the_hit_rate(tmp_path, monkeypat
     assert [r["hit"] for r in rows] == [0.9, 0.95, 0.3]
     A._log_cache(st, {"in": 0, "out": 0, "cached": 0})          # 空轮不记
     assert len(list(open(tmp_path / "cache.jsonl", encoding="utf-8"))) == 3
+
+
+def test_cache_trace_counts_reads_per_turn(tmp_path, monkeypatch):
+    """READ_MAX_LINES=250 而 png2epub.py 有 508 行 —— 读全文至少三次,每次都重发整个已积累
+    的上下文。分页上限是为省 token 设的,但在"需要读全文"的任务上可能是净亏:省下的是被读
+    的行数,付出的是上下文重发。n=1,所以先量,别改。"""
+    import json
+    import agent as A
+    monkeypatch.setattr(A, "CACHE_TRACE", str(tmp_path / "c.jsonl"))
+    monkeypatch.setattr(A, "retrieve", lambda: "块")
+    st = {"reads": 4}
+    A._log_cache(st, {"in": 100, "out": 1, "cached": 50, "steps": 2})
+    row = json.loads(open(tmp_path / "c.jsonl", encoding="utf-8").readline())
+    assert row["reads"] == 4, row
+    assert "reads" not in st, "计数没清零,下一轮会把这轮的读数算进去"
+    A._log_cache(st, {"in": 100, "out": 1, "cached": 50, "steps": 2})
+    rows = [json.loads(l) for l in open(tmp_path / "c.jsonl", encoding="utf-8")]
+    assert rows[1]["reads"] == 0

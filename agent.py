@@ -1407,6 +1407,11 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
         for c in tool_calls:
             state["tok"]["calls"] += 1
             name = c.function.name
+            # 记 read_file 次数:png2epub.py 508 行、READ_MAX_LINES=250,读全文至少三次,
+            # 而每次都要重发整个已积累的上下文。分页上限是为省 token 设的,但在"需要读全文"
+            # 的任务上可能是净亏 —— 省下的是被读的行数,付出的是上下文重发。n=1,所以先量。
+            if name == "read_file":
+                state["reads"] = state.get("reads", 0) + 1
             try:
                 args = json.loads(c.function.arguments or "{}")
             except json.JSONDecodeError:
@@ -1685,7 +1690,8 @@ def _log_cache(state: dict, tk: dict) -> None:
     state["sys_hash"] = cur
     row = {"in": tk.get("in", 0), "cached": tk.get("cached", 0),
            "hit": round(tk.get("cached", 0) / tk["in"], 3) if tk.get("in") else None,
-           "sys_changed": prev is not None and prev != cur, "steps": tk.get("steps", 0)}
+           "sys_changed": prev is not None and prev != cur, "steps": tk.get("steps", 0),
+           "reads": state.pop("reads", 0)}          # 本轮 read_file 调了几次
     try:
         os.makedirs(os.path.dirname(CACHE_TRACE), exist_ok=True)
         with open(CACHE_TRACE, "a", encoding="utf-8") as f:
