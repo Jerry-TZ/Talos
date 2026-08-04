@@ -541,3 +541,52 @@ def test_an_oversized_skill_can_still_be_shrunk(ws):
         A.write_file(p, "# MARK\n" + "x" * (A.SKILL_MAX * 4))
     with pytest.raises(ValueError, match="拒绝"):                  # 新建就超限:照旧拒绝
         A.write_file(os.path.join(A.SKILLS_DIR, "brand_new.md"), "x" * (A.SKILL_MAX + 1))
+
+
+def test_the_trash_covers_the_files_that_were_just_touched(ws, monkeypatch):
+    """上限原来是"边走边数,数到就 return",而 os.walk 顺序是确定的 —— 超过上限的工作区里,
+    排在后面的文件**不是这次没轮到,是每一次都轮不到**:跑一百轮也一份副本都没有,而
+    saved=300 看着还挺健康。审计里用 350 个文件复现过,报告文件五轮全被覆盖、零副本。
+
+    改成按 mtime 倒序取前 N —— 会被覆盖的,就是刚被动过的那些。"""
+    import time
+
+    import agent as A
+    monkeypatch.setattr(A, "TRASH_MAX_FILES", 5)
+    monkeypatch.setattr(A, "TRASH_DIR", os.path.join(tempfile.mkdtemp(), "trash"))
+    notes = []
+    monkeypatch.setattr(A, "ui", __import__("types").SimpleNamespace(note=notes.append))
+    for i in range(12):                       # 名字排在前面、且更旧
+        with open(os.path.join(ws, "aa_%02d.txt" % i), "w", encoding="utf-8") as f:
+            f.write("junk%d" % i)
+    time.sleep(0.05)
+    report = os.path.join(ws, "zz_report.md")  # 名字排最后 = 旧实现里永远轮不到
+    with open(report, "w", encoding="utf-8") as f:
+        f.write("原始报告")
+
+    for turn in range(3):                      # 反复覆盖,模拟"十五个修复脚本"
+        A.archive_workspace()
+        with open(report, "w", encoding="utf-8") as f:
+            f.write("覆盖 %d" % turn)
+
+    kept = os.listdir(A.TRASH_DIR)
+    assert any("zz_report" in f for f in kept), f"最近改过的文件一份副本都没有: {kept}"
+    assert sum("zz_report" in f for f in kept) >= 2, "内容寻址应该给每个版本各留一份"
+    assert notes and "跳过" in notes[0], "跳过了文件却不吭声 = 用户以为整个工作区都存了"
+
+def test_a_hardlink_cannot_smuggle_a_credential_file_past_the_name_check(ws):
+    """`mklink /H notes.md .env` 之后 read_file("notes.md") 原样返回 key:realpath 看得穿
+    符号链接,看不穿硬链接(两个名字就是同一份数据,没有"目标"可解析)。而 read 权限类
+    永远不弹框,所以全程静默。判据用 st_nlink —— 链接数是个数字,不是判断题。"""
+    import agent as A
+    real = os.path.join(ws, "secret.txt")
+    with open(real, "w", encoding="utf-8") as f:
+        f.write("OPENAI_API_KEY=sk-SECRET")
+    link = os.path.join(ws, "notes.md")
+    try:
+        os.link(real, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("这个文件系统不支持硬链接")
+    with pytest.raises(ValueError, match="硬链接"):
+        A.read_file(link)
+    assert "wrote" in A.write_file(os.path.join(ws, "plain.md"), "ok")   # 普通文件不受影响
