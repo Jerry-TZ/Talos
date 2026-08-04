@@ -274,6 +274,15 @@ def archive_workspace() -> int:
             continue
         if _is_secret_path(rp) or _under(rp, os.path.realpath(TRASH_DIR)):
             continue
+        # 硬链接同样要挡,而且这里比 _in_workspace 那边更要紧:那边挡住之后模型读不到,
+        # 这里漏掉的话密钥会被**原样拷进 .talos/trash/ 明文躺着**,而且一声不吭。
+        # 上一版只把 st_nlink 判据加进了 _in_workspace —— 而 archive_workspace 从不调用它,
+        # 自己带一套 guard。**补了被发现的那条入口,没补其余的**,正是今天审计的主题。
+        try:
+            if os.stat(rp).st_nlink > 1:
+                continue
+        except OSError:
+            continue
         try:
             if os.path.getsize(rp) > TRASH_MAX_BYTES:
                 big += 1                       # 最该保的大文件正好落这一档,得报出去
@@ -812,6 +821,23 @@ def _trace_summary(entries: list) -> str:
         out.append(f"{t} × {n}" + (f",失败 {err}" if err else "") + (f",被拒 {den}" if den else ""))
     return " · ".join(out)
 
+_CHILD_KEYS = ("mode", "allow", "view",      # 继承:子轮该按同样的权限和显示档跑
+               "tok", "trace",               # 汇总:子轮的消耗算在父这次请求头上
+               "asked")                      # 继承:用户点名要保的东西,派给谁干都算数
+
+def _child_state(parent: dict) -> dict:
+    """子 agent 拿到的 state —— 只有该继承的和该汇总的,**本轮字段一律不给**。
+
+    `capped` / `last_tok` / `last_calls` / `since_reflect` 只描述"刚刚这一轮",跨层就是错的:
+    子 agent 撞 MAX_STEPS 曾把 `capped` 写进父的 state,父任务明明成功返回,repl 却因为这个
+    标记跳过**整个任务**的复盘。
+
+    `asked` 是后补的,而且是同一个错犯第二次:上一版按"继承/汇总/本轮"挑字段时漏了它,
+    于是顶层跑 `del important_report.md` 会打出「⚠️ 你在请求里点名要过它」,子 agent 跑
+    同一条命令**一声不吭**。抽成函数是为了让这条不变式**测得到** —— 上一版的测试在自己
+    的代码里重拼了一遍这个 dict,于是把生产代码改回去,测试照样绿。"""
+    return {k: parent[k] for k in _CHILD_KEYS if k in parent}
+
 def spawn_subagent(task: str) -> str:
     depth = _RUNTIME.get("depth", 0)
     if depth >= 2:
@@ -832,7 +858,7 @@ def spawn_subagent(task: str) -> str:
     # 变量)。第二次是 capped:子 agent 撞 MAX_STEPS 会写 state["capped"]=True,父任务
     # 明明成功返回,repl 却因为这个标记跳过**整个任务**的复盘 —— 实测复现过。
     # 修 repeat 那次只挪了一个变量,没看这一类;这次按类别切干净。
-    child = {k: parent[k] for k in ("mode", "allow", "view", "tok", "trace") if k in parent}
+    child = _child_state(parent)
     try:
         answer = agent_turn(_RUNTIME["client"], _RUNTIME["model"],
                             [{"role": "user", "content": task}], child)

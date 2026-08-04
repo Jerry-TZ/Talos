@@ -126,7 +126,11 @@ def _load_nodes(blocked=None, keep_fact=None) -> list:
         n["kw"] = _keywords(_drop_dont_use((n.get("body") or n["text"])[:SKILL_BODY_MAX]))
     return [n for n in nodes if n["kw"]]
 
-_DONT_USE = re.compile(r"[;;]\s*不用于[::][^\n]*")
+# 分隔符不能只认分号。REFLECT_PROMPT 给的是"照这个格式写",而模型完全可能换行写、
+# 或者用中文逗号 —— 两种都合理。第一版只匹配 `;不用于:`,于是换个写法这道处理就不生效,
+# 「不用于」里的词重新变成正关键词,分数从 0.00 回到 0.55(跟原始 bug 一模一样)。
+# 「只补被发现的那一种写法」跟「只补被发现的那一条入口」是同一个毛病。
+_DONT_USE = re.compile(r"(?:^|[;;,,、])[ \t]*不用于[::][^\n]*", re.MULTILINE)
 
 def _drop_dont_use(text: str) -> str:
     """把 description 里 `不用于:…` 那一段摘掉再去数关键词。

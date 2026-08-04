@@ -582,3 +582,19 @@ def test_the_dont_use_clause_does_not_pull_the_skill_in(ws, monkeypatch):
     hit = R.explain("帮我做前端渲染的页面布局")
     assert not hit, f"「不用于」里写的场景反而把它捞出来了: {hit}"
     assert R.explain("把几个 csv 合并成一张表"), "该捞的还得捞得到"
+
+def test_the_dont_use_clause_is_stripped_however_it_is_punctuated(ws):
+    """第一版正则只匹配 `;不用于:`。而 REFLECT_PROMPT 给的是"照这个格式写",模型完全可能
+    换行写、或者用中文逗号 —— 两种都合理。换个写法这道处理就不生效,「不用于」里的词
+    重新变成正关键词,分数从 0.00 回到 0.55(跟原始 bug 一模一样)。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    for i, desc in enumerate(["用于:把几个 csv 合并成一张表;不用于:前端渲染 页面布局",
+                              "用于:把几个 csv 合并成一张表\n不用于:前端渲染 页面布局",
+                              "用于:把几个 csv 合并成一张表,不用于:前端渲染 页面布局"]):
+        for f in os.listdir(R.SKILLS_DIR):
+            os.remove(os.path.join(R.SKILLS_DIR, f))
+        with open(os.path.join(R.SKILLS_DIR, "m.md"), "w", encoding="utf-8") as fh:
+            fh.write("---\nname: merge\ndescription: %s\n---\n把多个 csv 按主键合并。\n" % desc)
+        assert not R.explain("帮我做前端渲染的页面布局"), f"第 {i} 种写法没被摘掉: {desc[:30]}"
+        assert R.explain("把几个 csv 合并成一张表"), f"第 {i} 种写法把该捞的也摘没了"

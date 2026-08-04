@@ -424,3 +424,17 @@ def test_cache_trace_counts_reads_per_turn(tmp_path, monkeypatch):
     A._log_cache(st, {"in": 100, "out": 1, "cached": 50, "steps": 2})
     rows = [json.loads(l) for l in open(tmp_path / "c.jsonl", encoding="utf-8")]
     assert rows[1]["reads"] == 0
+
+def test_a_subagent_still_warns_about_files_the_user_named(monkeypatch):
+    """按三分类挑字段时漏了 `asked` —— _named_in_request 靠它判断"这次要删的文件,用户在
+    原话里点过名吗"。于是顶层跑 `del important_report.md` 会打出警告,子 agent 跑同一条
+    命令一声不吭。用户点名要的东西,不会因为这活派给子 agent 干就不算数。"""
+    import agent as A
+    parent = {"mode": "default", "allow": set(), "view": "normal", "capped": True,
+              "asked": "帮我整理 important_report.md,别删掉它"}
+    child = A._child_state(parent)          # 打生产代码,别在测试里重拼一遍那个 dict
+    assert "capped" not in child, "本轮字段漏给子轮了"
+    args = {"command": "del important_report.md"}
+    assert A._named_in_request(parent, args) == ["important_report.md"]
+    assert A._named_in_request(child, args) == ["important_report.md"], \
+        "子 agent 里丢了这层警告"

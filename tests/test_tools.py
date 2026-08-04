@@ -646,3 +646,26 @@ def test_the_skip_notice_shuts_up_until_it_gets_meaningfully_worse(ws, monkeypat
     make(40)                                   # 明显变多
     A.archive_workspace()
     assert len(notes) == 2, f"跳过数翻了几倍,该再说一次: {notes}"
+
+
+def test_a_hardlinked_credential_never_reaches_the_trash(ws, monkeypatch):
+    """`_in_workspace` 加了 st_nlink 判据之后 read_file 挡住了硬链接,但 archive_workspace
+    **从不调用 _in_workspace**,自己带一套 guard —— 于是同一个文件,读被拒,而每次写操作前
+    的快照会把密钥**原样拷进 .talos/trash/ 明文躺着**,一声不吭。
+
+    补了被发现的那条入口、没补其余的 —— 这正是当天审计的主题,而修复本身重蹈了它。"""
+    import agent as A
+    monkeypatch.setattr(A, "TRASH_DIR", os.path.join(tempfile.mkdtemp(), "t"))
+    monkeypatch.setattr(A, "_TRASH_LAST_SKIP", 0)
+    real = os.path.join(ws, "secret.txt")
+    with open(real, "w", encoding="utf-8") as f:
+        f.write("OPENAI_API_KEY=sk-LEAK")
+    link = os.path.join(ws, "notes.md")
+    try:
+        os.link(real, link)
+    except (OSError, NotImplementedError, AttributeError):
+        pytest.skip("这个文件系统不支持硬链接")
+    A.archive_workspace()
+    for fn in os.listdir(A.TRASH_DIR):
+        body = open(os.path.join(A.TRASH_DIR, fn), encoding="utf-8", errors="replace").read()
+        assert "sk-LEAK" not in body, f"密钥明文进了回收站: {fn}"
