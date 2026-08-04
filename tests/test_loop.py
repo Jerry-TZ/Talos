@@ -340,3 +340,21 @@ def test_a_tool_that_does_not_exist_never_reaches_the_permission_prompt(monkeypa
     assert asked == [], f"不存在的工具走到了权限门: {asked}"
     said = [m["content"] for m in messages if m.get("role") == "tool"]
     assert any("unknown tool" in str(c) for c in said), said
+
+def test_reflection_looks_at_the_task_that_just_finished(monkeypatch):
+    """REPL 的 messages 跨轮累积,而 reflect() 原来正向取第一条 user 消息 —— 于是从第二轮起,
+    查重摆到复盘眼前的是**本次会话开头那个任务**的技能表,跟刚做完的事毫无关系,而提示词
+    还写着"上面有沾边的就去改"。`/compact` 之后更糟:首条 user 消息变成压缩简报。
+    agent_turn 里算 query 用的就是 reversed,这里跟它对齐。"""
+    import agent as A
+    seen = {}
+    monkeypatch.setattr(A, "_known_skills", lambda t: seen.setdefault("task", t) and "")
+    monkeypatch.setattr(A, "agent_turn", lambda *a, **k: "done")
+    monkeypatch.setattr(A, "_memory_lines", lambda: [])
+    monkeypatch.setattr(A, "_tag_new_memory", lambda before: 0)
+    messages = [{"role": "user", "content": "把三个 csv 合并成一张表"},
+                {"role": "assistant", "content": "好"},
+                {"role": "user", "content": "帮我升级 rust 依赖 cargo update"}]
+    A.reflect(None, "m", messages, {"mode": "bypass", "allow": set()})
+    assert seen["task"] == "帮我升级 rust 依赖 cargo update", \
+        f"复盘查的是会话第一个任务,不是刚做完的: {seen['task']!r}"

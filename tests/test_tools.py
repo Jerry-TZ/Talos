@@ -590,3 +590,31 @@ def test_a_hardlink_cannot_smuggle_a_credential_file_past_the_name_check(ws):
     with pytest.raises(ValueError, match="硬链接"):
         A.read_file(link)
     assert "wrote" in A.write_file(os.path.join(ws, "plain.md"), "ok")   # 普通文件不受影响
+
+
+def test_the_trash_also_covers_the_agents_own_brain(ws, monkeypatch):
+    """`skills/` 和 `memory.md` 是**复盘**写的,而复盘用的是同一套 write_file/edit_file。
+    P0 原文说了要保它们,实现却只 os.walk(WORKSPACE) —— 默认布局下 SKILLS_DIR 在 HOME 下、
+    不在工作区里,于是整个脑子一直在保护圈外。今天刚见过一次复盘静默改坏技能的后果。"""
+    import agent as A
+    # 关键:按**默认布局**摆 —— SKILLS_DIR / memory.md 在 HOME 下,不在工作区里。
+    # 第一版把它们留在 fixture 给的 workspace 内部,于是走 os.walk(WORKSPACE) 也能存到,
+    # 测试对着旧代码照样绿 —— 通过是因为错误的原因。反向验证当场抓到。
+    home = tempfile.mkdtemp()
+    monkeypatch.setattr(A, "TRASH_DIR", os.path.join(home, "trash"))
+    monkeypatch.setattr(A, "SKILLS_DIR", os.path.join(home, "skills"))
+    monkeypatch.setattr(A, "MEMORY_FILE", os.path.join(home, "memory.md"))
+    assert not A._under(os.path.realpath(A.SKILLS_DIR), A.WORKSPACE)   # 真的在圈外
+    os.makedirs(A.SKILLS_DIR, exist_ok=True)
+    sk = os.path.join(A.SKILLS_DIR, "s.md")
+    with open(sk, "w", encoding="utf-8") as f:
+        f.write("---\nname: s\n---\n第一版\n")
+    with open(A.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 事实一\n")
+    A.archive_workspace()
+    kept = os.listdir(A.TRASH_DIR)
+    # 只断言"存下来了、名字能反推",不断言具体拼法 —— SKILLS_DIR 在不在工作区里
+    # 决定了它是 `s.md__h` 还是 `skills__s.md__h`,两种布局都是对的。
+    assert any(f.startswith(("s.md__", "skills__s.md__")) for f in kept), f"技能没进回收站: {kept}"
+    assert any(f.startswith("memory.md__") for f in kept), f"memory.md 没进回收站: {kept}"
+    assert not any(".." in f for f in kept), f"名字里带 .. 的没法恢复: {kept}"

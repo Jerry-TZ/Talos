@@ -236,15 +236,26 @@ def archive_workspace() -> int:
     # 工作区里,排在后面的文件**不是这次没轮到,是每一次都轮不到**:跑一百轮,它们一份
     # 副本都没有,而 saved=300 看着还挺健康。这不是"少存点",是永久盲区。
     # mtime 倒序正好对上这道网要防的东西:会被覆盖的,就是刚刚被动过的那些。
+    # 除了工作区,还要保 agent 自己的脑子:`skills/` 和 `memory.md` 是**复盘**写的,而复盘
+    # 用的是同一套 write_file/edit_file。P0 原文说了要保它们,实现却只 os.walk(WORKSPACE) ——
+    # 默认布局下 SKILLS_DIR 在 HOME 下、不在工作区里,于是整个脑子一直在保护圈外。
     cands = []
-    for root, dirs, files in os.walk(WORKSPACE):
-        dirs[:] = [d for d in dirs if d not in _TRASH_SKIP]
-        for fn in files:
-            p = os.path.join(root, fn)
-            try:
-                cands.append((os.path.getmtime(p), p))
-            except OSError:
-                continue
+    roots = [WORKSPACE, SKILLS_DIR]
+    for base in roots:
+        if not os.path.isdir(base):
+            continue
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in _TRASH_SKIP]
+            for fn in files:
+                p = os.path.join(root, fn)
+                try:
+                    cands.append((os.path.getmtime(p), p))
+                except OSError:
+                    continue
+    try:
+        cands.append((os.path.getmtime(MEMORY_FILE), MEMORY_FILE))
+    except OSError:
+        pass
     cands.sort(reverse=True)
     over = max(0, len(cands) - TRASH_MAX_FILES)
     for _mt, p in cands[:TRASH_MAX_FILES]:
@@ -257,8 +268,10 @@ def archive_workspace() -> int:
         rp = os.path.realpath(p)
         # 第三个条件是防自噬:TRASH_DIR 通常在 HOME/.talos 下(被 _TRASH_SKIP 挡掉),但它是
         # 可配置的,一旦落进工作区,每次存档都会把上一次的存档再存一遍,指数长起来。
-        if (not _under(rp, WORKSPACE) or _is_secret_path(rp)
-                or _under(rp, os.path.realpath(TRASH_DIR))):
+        base = next((b for b in roots if _under(rp, os.path.realpath(b))), None)
+        if base is None and rp != os.path.realpath(MEMORY_FILE):
+            continue
+        if _is_secret_path(rp) or _under(rp, os.path.realpath(TRASH_DIR)):
             continue
         try:
             if os.path.getsize(rp) > TRASH_MAX_BYTES:
@@ -269,7 +282,9 @@ def archive_workspace() -> int:
         except OSError:
             continue                           # 读不到就跳过,一个文件不该弄崩一次调用
         h = hashlib.sha1(blob).hexdigest()
-        rel = os.path.relpath(p, WORKSPACE).replace("\\", "__").replace("/", "__")
+        # 相对于它自己那个根算,否则 skills/ 会变成 `..__..__skills__x.md`,恢复时没人看得懂
+        rel = os.path.relpath(p, base or os.path.dirname(MEMORY_FILE))
+        rel = rel.replace("\\", "__").replace("/", "__")
         dest = os.path.join(TRASH_DIR, f"{rel}__{h[:8]}")
         # 问磁盘,不问内存缓存。原来记的是"这个进程存过哪些指纹",而 SECURITY.md 里
         # 明写着"不需要了就整个删掉这个目录" —— 照做之后,缓存还说存过,于是本轮剩下的
@@ -1549,7 +1564,11 @@ def reflect(client, model: str, messages: list, state: dict) -> str:
     """One extra learning turn — saves skills/facts, reusing the gated tools.
     Runs on a COPY of messages so the reflection prompt never pollutes memory."""
     before = _memory_lines()
-    task = next((m["content"] for m in messages                  # the request that started all this,
+    # reversed:要的是**刚做完的**那个请求,不是本次会话开头那个。REPL 的 messages 跨轮累积,
+    # 正向取到的永远是第一轮的任务 —— 于是从第二轮起,查重摆到复盘眼前的是一张跟本次无关的
+    # 技能表,而提示词还写着"上面有沾边的就去改"。`/compact` 之后更糟:首条 user 消息变成
+    # 压缩简报。agent_turn 里算 query 用的就是 reversed,这里跟它对齐。
+    task = next((m["content"] for m in reversed(messages)        # the request that started all this,
                  if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
     out = agent_turn(client, model,
                      messages + [{"role": "user", "content": REFLECT_PROMPT + _known_skills(task)}],

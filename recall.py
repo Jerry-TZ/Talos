@@ -123,8 +123,22 @@ def _load_nodes(blocked=None, keep_fact=None) -> list:
         # (归一化量过,排序更差 —— 技能长是因为写得细,细就真的匹配得上)。但那意味着写得越长
         # 排名越高,而超过 SKILL_BODY_MAX 的部分根本不会交付:一条 8427 字节的技能拿全文去争
         # 排名,赢了却只给 1200 字,还顺手把真正相关的技能挤到门槛以下。截在同一处,长度就买不到排名了。
-        n["kw"] = _keywords((n.get("body") or n["text"])[:SKILL_BODY_MAX])
+        n["kw"] = _keywords(_drop_dont_use((n.get("body") or n["text"])[:SKILL_BODY_MAX]))
     return [n for n in nodes if n["kw"]]
+
+_DONT_USE = re.compile(r"[;;]\s*不用于[::][^\n]*")
+
+def _drop_dont_use(text: str) -> str:
+    """把 description 里 `不用于:…` 那一段摘掉再去数关键词。
+
+    复盘被教着写「用于:…;不用于:前端渲染」,本意是给打分一个**负向**信号。打分里没有
+    负向这回事 —— `ov = len(kw & qk)` 只会加分,于是那句话把它最该躲开的词变成了自己的
+    关键词:审计实测,查「前端渲染」时这条技能从 0.00 涨到 0.55,还拿到了正文注入。
+    一句用来说"别捞我"的话,成了被捞出来的原因。
+
+    这里只做**中和**,不做反转。真要减分得改打分模型,而 P2 那条改动本来就是"理由成立、
+    证据没有" —— 在没量出收益之前,先把已知的害处去掉就够了。"""
+    return _DONT_USE.sub("", text)
 
 def _edges(nodes: list) -> dict:
     E = {}

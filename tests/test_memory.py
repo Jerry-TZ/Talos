@@ -568,3 +568,17 @@ def test_a_refused_delete_tells_the_model_to_stop_asking(ws, monkeypatch):
         ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del scan_deps.py"})
         assert not ok
         assert "别再提同一条命令" in why, f"按 {key!r} 之后模型收到的还是「再试一次」:{why}"
+
+def test_the_dont_use_clause_does_not_pull_the_skill_in(ws, monkeypatch):
+    """复盘被教着写「用于:…;不用于:前端渲染」,本意是给打分一个负向信号。打分里没有
+    负向这回事(`ov = len(kw & qk)` 只会加分),于是那句话把它最该躲开的词变成了自己的
+    关键词 —— 审计实测:查「前端渲染」时这条技能从 0.00 涨到 0.55,还拿到正文注入。
+    一句用来说「别捞我」的话,成了被捞出来的原因。这里只中和,不反转。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "merge.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: merge\ndescription: 用于:把几个 csv 合并成一张表;"
+                "不用于:前端渲染 页面布局\n---\n把多个 csv 按主键合并。\n")
+    hit = R.explain("帮我做前端渲染的页面布局")
+    assert not hit, f"「不用于」里写的场景反而把它捞出来了: {hit}"
+    assert R.explain("把几个 csv 合并成一张表"), "该捞的还得捞得到"
