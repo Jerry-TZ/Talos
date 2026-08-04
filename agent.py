@@ -441,19 +441,24 @@ def write_file(path: str, content: str) -> str:
     # variable name — every actual step sits past the cut and reaches nobody. Reflection is told
     # to keep skills small and has ignored it every time (8427, 7039, 4535 bytes): that is a
     # judgement, and judgements do not hold. A size is a shape, and shapes do.
+    # 这两道闸**抛异常**,不返回拒绝串。返回值型的拒绝要求每个调用方都记得 if,而三个调用
+    # 方里有两个忘了:edit_file 丢掉返回值、无条件报 "edited"(一次正确的复盘 UPDATE 因此
+    # 被静默扔掉,见 FINDINGS 二十);create_tool 也丢掉返回值,于是 _load_tool 撞上不存在
+    # 的文件、except 里的 os.remove 再抛一个 FileNotFoundError —— 模型拿到的是「系统找不到
+    # 指定的文件」,而不是真实原因。抛出去,谁都躲不开;run_tool 会转成 error: 交给模型。
     if _under(full, SKILLS_DIR) and len(content) > SKILL_MAX:
-        return (f"拒绝:技能 {len(content)} 字符,上限 {SKILL_MAX}。注入时只截前 "
-                f"{recall_mod().SKILL_BODY_MAX} 字符,超出的部分谁都读不到。"
-                "拆成两条各自独立的技能,或者只留下次真用得上的那几步。")
+        raise ValueError(f"拒绝:技能 {len(content)} 字符,上限 {SKILL_MAX}。注入时只截前 "
+                         f"{recall_mod().SKILL_BODY_MAX} 字符,超出的部分谁都读不到。"
+                         "拆成两条各自独立的技能,或者只留下次真用得上的那几步。")
     # SYSTEM asks for an assert and gets 2193 characters of print(). Same story as the skill
     # size: telling it to ADD something has never worked (see create_tool, 12 fires 0
     # conversions), while refusing the write does. Print-only is a coin flip — the same shape
     # once caught a real bug because the model happened to read its own output, and once
     # produced "验证脚本确认了我的分析结论" about a script that could not fail.
     if _VERIFY_NAME.search(os.path.basename(full)) and "assert" not in content:
-        return ("拒绝:验证脚本里一个 assert 都没有。只 print 的脚本跟产出结论的是同一段代码,"
-                "跑两遍一致什么也证明不了 —— 把你**将要报告的那个数字**写进 assert("
-                "分组之和 == 总数 这类不变量最好),或者别叫 verify/check/validate。")
+        raise ValueError("拒绝:验证脚本里一个 assert 都没有。只 print 的脚本跟产出结论的是同一段"
+                         "代码,跑两遍一致什么也证明不了 —— 把你**将要报告的那个数字**写进 assert("
+                         "分组之和 == 总数 这类不变量最好),或者别叫 verify/check/validate。")
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
     with open(full, "w", encoding="utf-8", newline="") as f:
         f.write(content)                                # newline="": no \n -> \r\n translation, so
@@ -478,14 +483,7 @@ def edit_file(path: str, old: str, new: str) -> str:
                          "old 必须和文件里的字符完全一致(包括缩进和空行)")
     if n > 1:
         raise ValueError(f"`old` string is not unique ({n} matches) — add more surrounding context")
-    result = write_file(path, text.replace(old, new, 1))
-    # write_file 的两道闸(技能超长、验证脚本没有 assert)是**返回拒绝字符串**,不抛异常。
-    # 这里原来把返回值丢了、无条件报 "edited" —— 于是模型收到"改好了"而磁盘纹丝不动。
-    # 代价是真金白银的:一次复盘正确地选了 UPDATE 而不是新建(P1 一直想要、第一次完全
-    # 兑现的行为),三次编辑全被静默丢弃,模型以为成功所以既不重试也不告诉用户,而复盘
-    # 本身又不进 session —— 三层沉默叠在一起,只有拿 mtime 跟磁盘对才看得出来。
-    if result.startswith("拒绝"):
-        raise ValueError(result)
+    write_file(path, text.replace(old, new, 1))     # 被拒会抛,不会静默变成 "edited"
     return f"edited {path}"
 
 # cmd.exe silently does something else with these, or errors uselessly. Name the equivalent.

@@ -25,10 +25,33 @@ def test_a_verification_script_without_assert_is_refused(ws):
     """SYSTEM 要求验证脚本含 assert,拿到的是 2193 字符的 print —— 「加一个东西」这类要求
     从来没守住过(create_tool 12 次 0 转化)。只 print 的脚本跟产出结论的是同一段代码。"""
     import agent as A
-    out = A.write_file(os.path.join(ws, "verify_status.py"), "print('总金额: 108832.10')\n")
-    assert "拒绝" in out and not os.path.exists(os.path.join(ws, "verify_status.py"))
+    with pytest.raises(ValueError, match="拒绝"):        # 抛,不是返回拒绝串 —— 见下一条测试
+        A.write_file(os.path.join(ws, "verify_status.py"), "print('总金额: 108832.10')\n")
+    assert not os.path.exists(os.path.join(ws, "verify_status.py"))
     assert "wrote" in A.write_file(os.path.join(ws, "verify_status.py"), "assert 1 + 1 == 2\n")
     assert "wrote" in A.write_file(os.path.join(ws, "analyze.py"), "print('x')\n")   # 只管验证脚本
+
+def test_a_refusal_reaches_every_caller_of_write_file(ws):
+    """write_file 原来用**返回值**表达拒绝,于是三个调用方里有两个忘了检查:
+
+    - `edit_file` 丢掉返回值、无条件报 "edited" —— 一次正确的复盘 UPDATE 被静默扔掉
+    - `create_tool` 丢掉返回值 —— _load_tool 撞上不存在的文件,except 里的 os.remove 再抛
+      一个 FileNotFoundError,模型拿到「系统找不到指定的文件」而不是真实原因
+
+    修法不是给每个调用方补 if(下一个调用方还会忘),是让 write_file 抛出来。
+    这条测试盯的就是"拒绝到得了每一个调用方",不是某一个调用方的实现。"""
+    import agent as A
+    p = os.path.join(ws, "verify_x.py")
+    A.write_file(p, "assert 1 == 1\n# MARK\n")
+    out, is_error = A.run_tool("edit_file", {"path": p, "old": "assert 1 == 1", "new": "print(1)"})
+    assert is_error and "assert" in str(out), f"把最后一个 assert 编辑掉了,却报成功: {out!r}"
+    assert "assert 1 == 1" in open(p, encoding="utf-8").read(), "说了拒绝,却还是写进去了"
+
+    code = "TOOL={'description':'x','parameters':{},'required':[]}\ndef run(a):\n    print(1)\n"
+    out, is_error = A.run_tool("create_tool", {"name": "check_stuff", "code": code})
+    assert is_error and "assert" in str(out), f"报的不是真实原因: {out!r}"
+    assert "找不到" not in str(out) and "No such file" not in str(out), \
+        f"os.remove 把真实原因盖掉了: {out!r}"
 
 def test_an_oversized_skill_is_refused(ws):
     """recall 只注入前 SKILL_BODY_MAX 字符,超出的部分两条路都送不到人手里。复盘被要求
@@ -37,8 +60,9 @@ def test_an_oversized_skill_is_refused(ws):
     import agent as A
     big = "x" * (A.SKILL_MAX + 1)
     os.makedirs(A.SKILLS_DIR, exist_ok=True)
-    out = A.write_file(os.path.join(A.SKILLS_DIR, "huge.md"), big)
-    assert "拒绝" in out and not os.path.exists(os.path.join(A.SKILLS_DIR, "huge.md"))
+    with pytest.raises(ValueError, match="拒绝"):
+        A.write_file(os.path.join(A.SKILLS_DIR, "huge.md"), big)
+    assert not os.path.exists(os.path.join(A.SKILLS_DIR, "huge.md"))
     assert "wrote" in A.write_file(os.path.join(A.SKILLS_DIR, "ok.md"), "x" * A.SKILL_MAX)
     assert "wrote" in A.write_file(os.path.join(ws, "notes.md"), big)   # 只管技能
 
