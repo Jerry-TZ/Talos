@@ -521,3 +521,23 @@ def test_an_edit_that_write_file_refuses_is_not_reported_as_edited(tmp_path, mon
     small.write_text("# MARK\n", encoding="utf-8")
     out, is_error = A.run_tool("edit_file", {"path": str(small), "old": "# MARK", "new": "# CHANGED"})
     assert not is_error and "# CHANGED" in small.read_text(encoding="utf-8"), out
+
+
+def test_an_oversized_skill_can_still_be_shrunk(ws):
+    """8602 字符的技能配 2500 的上限:任何一次编辑之后仍然超限,于是全被拒 —— 这条技能
+    被冻死了,唯一出路是一次砍掉六千字的巨型改写,而模型不会那么做。闸门的目的是别让
+    技能长大,不是把已经长大的锁死。变短放行,变长和新建照旧拒绝。"""
+    import agent as A
+    os.makedirs(A.SKILLS_DIR, exist_ok=True)
+    p = os.path.join(A.SKILLS_DIR, "fat.md")
+    with open(p, "w", encoding="utf-8") as f:               # 绕开闸门造一个已经超限的
+        f.write("# MARK\n" + "x" * (A.SKILL_MAX * 3))
+    n0 = len(open(p, encoding="utf-8").read())
+
+    out = A.write_file(p, "# MARK\n" + "x" * (A.SKILL_MAX * 2))   # 仍超限,但短了
+    assert "wrote" in out and len(open(p, encoding="utf-8").read()) < n0, out
+
+    with pytest.raises(ValueError, match="拒绝"):                  # 变长:照旧拒绝
+        A.write_file(p, "# MARK\n" + "x" * (A.SKILL_MAX * 4))
+    with pytest.raises(ValueError, match="拒绝"):                  # 新建就超限:照旧拒绝
+        A.write_file(os.path.join(A.SKILLS_DIR, "brand_new.md"), "x" * (A.SKILL_MAX + 1))

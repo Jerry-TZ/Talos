@@ -189,6 +189,18 @@ def test_all_does_not_approve_a_delete(ws, monkeypatch):
     ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python x.py"})
     assert ok and "run_bash" in st["allow"]        # 不删东西的命令照旧
 
+    # 按 `a` 删除是一次**拒绝**,所以文件名该粘住。原来只有按回车那条分支记 denied,
+    # 而真实会话里人几乎总是按 a —— 于是这道闸上线之后一次都没触发过,还被当成
+    # "场景没出现" 挂了很久。现在:run_bash 已经会话放行了,提到 out.py 照样重新问。
+    asked = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: asked.append(a), ask=lambda: "y", note=notes.append))
+    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python cleanup.py out.py"})
+    assert asked, "按 a 拒了删除,换个写法提到同一个文件却直接放行了"
+    asked.clear()
+    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python other.py"})
+    assert ok and not asked, "跟被拒文件无关的命令不该受牵连"
+
 def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
     """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
     import types

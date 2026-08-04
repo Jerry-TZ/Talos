@@ -447,9 +447,22 @@ def write_file(path: str, content: str) -> str:
     # 的文件、except 里的 os.remove 再抛一个 FileNotFoundError —— 模型拿到的是「系统找不到
     # 指定的文件」,而不是真实原因。抛出去,谁都躲不开;run_tool 会转成 error: 交给模型。
     if _under(full, SKILLS_DIR) and len(content) > SKILL_MAX:
-        raise ValueError(f"拒绝:技能 {len(content)} 字符,上限 {SKILL_MAX}。注入时只截前 "
-                         f"{recall_mod().SKILL_BODY_MAX} 字符,超出的部分谁都读不到。"
-                         "拆成两条各自独立的技能,或者只留下次真用得上的那几步。")
+        # 已经超限的技能允许**变短**。不放这个口子它就被冻死:8602 字符的那条,任何一次
+        # 编辑之后仍然超限,于是唯一出路是一次砍掉六千字的巨型改写 —— 模型不会那么做,
+        # 结果是这条技能永远修不了、也永远瘦不下来。闸门的目的是别让技能长大,不是把
+        # 已经长大的锁死。变长、以及新建一条就超限的,照旧拒绝。
+        prev = ""
+        if os.path.exists(full):
+            try:
+                prev = open(full, encoding="utf-8", errors="replace").read()
+            except OSError:
+                prev = ""
+        if not (len(prev) > SKILL_MAX and len(content) < len(prev)):
+            raise ValueError(f"拒绝:技能 {len(content)} 字符,上限 {SKILL_MAX}。注入时只截前 "
+                             f"{recall_mod().SKILL_BODY_MAX} 字符,超出的部分谁都读不到。"
+                             "拆成两条各自独立的技能,或者只留下次真用得上的那几步。"
+                             + (f"(这条现在 {len(prev)} 字符 —— 改小一点是允许的,"
+                                "可以分几次删到上限以内。)" if len(prev) > SKILL_MAX else ""))
     # SYSTEM asks for an assert and gets 2193 characters of print(). Same story as the skill
     # size: telling it to ADD something has never worked (see create_tool, 12 fires 0
     # conversions), while refusing the write does. Print-only is a coin flip — the same shape
@@ -1113,6 +1126,11 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # "需要单独确认" describes a keystroke the model cannot make, so it read it as
             # "ask again" and re-sent the identical `del scan_deps.py` five times in one run.
             # A refusal has to tell its reader something the reader can act on.
+            # 按 `a` 删除**也是一次拒绝**,却一直没记进 denied —— 粘性只在下面 "no"/"say"
+            # 那条分支里写。真实会话里人几乎总是按 a,所以这道闸从上线到现在一次都没在真实
+            # 运行里触发过(FINDINGS「还没解决的」里那条挂账就是这么来的,当时以为是场景没
+            # 出现,其实是这里漏了一行)。不记 = 粘性等于不存在。
+            state.setdefault("denied", set()).update(_FILENAME.findall(args.get("command", "")))
             ui.note("删除不支持「本会话都允许」—— 会话放行对删除本来就不生效。真要删就单独按 y。")
             return False, ("这次删除没被批准。**别再提同一条命令** —— 是否删除只有用户能决定,"
                            "而重发只会把同一个提示原样再弹一次。要么就把文件留着继续往下做,"
