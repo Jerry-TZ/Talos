@@ -358,3 +358,32 @@ def test_reflection_looks_at_the_task_that_just_finished(monkeypatch):
     A.reflect(None, "m", messages, {"mode": "bypass", "allow": set()})
     assert seen["task"] == "帮我升级 rust 依赖 cargo update", \
         f"复盘查的是会话第一个任务,不是刚做完的: {seen['task']!r}"
+
+def test_a_subagent_hitting_the_step_cap_does_not_cancel_the_parents_reflection(monkeypatch):
+    """一个 state 里混着三类性质完全不同的东西,而子 agent 原来拿的是父的同一个 dict:
+
+        继承 — mode / allow / view      子轮该按同样的权限跑
+        汇总 — tok / trace              一次请求的总账,子轮的消耗算在父头上
+        本轮 — capped / last_* / asked  只描述"刚刚这一轮",跨层就是错的
+
+    代价出过两次:第一次是 repeat 计数被子轮清零(已修);第二次是 capped —— 子 agent
+    撞 MAX_STEPS 会写 state["capped"]=True,父任务明明成功返回,repl 却因为这个标记
+    跳过**整个任务**的复盘。修 repeat 那次只挪了一个变量,没看这一类。
+
+    这条测试同时钉住两头:本轮字段不许漏上去,汇总字段不许因此断掉。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "MAX_STEPS", 3)
+    real = A.run_tool
+    monkeypatch.setattr(A, "run_tool",
+                        lambda n, a: ("ok", False) if n == "run_bash" else real(n, a))
+    busy = _msg(tool_calls=[_tc("run_bash", '{"command":"echo x"}')])
+    script = ([_msg(tool_calls=[_tc("spawn_subagent", '{"task":"子任务"}')])]
+              + [busy] * 4                       # 子 agent 一路打转到撞上限
+              + [_msg(content="parent done")])   # 父 agent 正常收尾
+    st = {"mode": "bypass", "allow": set()}
+    out = A.agent_turn(_Client(script), "m", [{"role": "user", "content": "父任务"}], st)
+    assert out == "parent done"
+    assert not st.get("capped"), "子 agent 撞上限,把父任务的复盘一起取消了"
+    assert st["tok"]["calls"] >= 5, "本轮字段隔离了,但 token 汇总也跟着断了"
+    assert len(st.get("trace", [])) >= 5, "trace 汇总断了 —— 子 agent 的调用没记进去"

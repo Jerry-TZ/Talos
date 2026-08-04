@@ -810,11 +810,23 @@ def spawn_subagent(task: str) -> str:
     if ui is not None:
         ui.note("↳ 派出子agent: " + (task[:60] + "…" if len(task) > 60 else task))
     _RUNTIME["depth"] = depth + 1
-    trace = _RUNTIME["state"].setdefault("trace", [])
-    start = len(trace)                    # our slice of the shared trace: the subagent runs on the
-    try:                                  # caller's `state`, so its calls land right here after `start`
+    parent = _RUNTIME["state"]
+    trace = parent.setdefault("trace", [])
+    start = len(trace)                    # our slice of the shared trace — 见下,trace 是**共享**的
+    # 一个 state 里混着三类性质完全不同的东西,而原来子 agent 拿的是父的同一个 dict:
+    #
+    #   继承 — mode / allow / view      子轮该按同样的权限跑
+    #   汇总 — tok / trace              一次请求的总账,子轮的消耗算在父头上
+    #   本轮 — capped / last_* / asked  只描述"刚刚这一轮",跨层就是错的
+    #
+    # 混用的代价出过两次。第一次是 repeat 计数被子轮清零(已修,改成 agent_turn 的局部
+    # 变量)。第二次是 capped:子 agent 撞 MAX_STEPS 会写 state["capped"]=True,父任务
+    # 明明成功返回,repl 却因为这个标记跳过**整个任务**的复盘 —— 实测复现过。
+    # 修 repeat 那次只挪了一个变量,没看这一类;这次按类别切干净。
+    child = {k: parent[k] for k in ("mode", "allow", "view", "tok", "trace") if k in parent}
+    try:
         answer = agent_turn(_RUNTIME["client"], _RUNTIME["model"],
-                            [{"role": "user", "content": task}], _RUNTIME["state"])
+                            [{"role": "user", "content": task}], child)
     finally:
         _RUNTIME["depth"] = depth
     # Without this the caller sees only prose and cannot tell a real answer from a guessed one.
