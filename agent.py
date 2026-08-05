@@ -823,7 +823,8 @@ def _trace_summary(entries: list) -> str:
 
 _CHILD_KEYS = ("mode", "allow", "view",      # 继承:子轮该按同样的权限和显示档跑
                "tok", "trace",               # 汇总:子轮的消耗算在父这次请求头上
-               "asked")                      # 继承:用户点名要保的东西,派给谁干都算数
+               "asked",                     # 继承:用户点名要保的东西,派给谁干都算数
+               "denied")                    # 继承+回传:拒绝过的文件名,换个 agent 也还是拒绝过
 
 def _child_state(parent: dict) -> dict:
     """子 agent 拿到的 state —— 只有该继承的和该汇总的,**本轮字段一律不给**。
@@ -836,6 +837,7 @@ def _child_state(parent: dict) -> dict:
     于是顶层跑 `del important_report.md` 会打出「⚠️ 你在请求里点名要过它」,子 agent 跑
     同一条命令**一声不吭**。抽成函数是为了让这条不变式**测得到** —— 上一版的测试在自己
     的代码里重拼了一遍这个 dict,于是把生产代码改回去,测试照样绿。"""
+    parent.setdefault("denied", set())        # 先让父拥有这个 set,子才好共享
     return {k: parent[k] for k in _CHILD_KEYS if k in parent}
 
 def spawn_subagent(task: str) -> str:
@@ -1160,6 +1162,28 @@ def _drain_stdin() -> None:
         pass                            # failing to drain must never block the prompt
 
 _FILENAME = re.compile(r"[\w.\-]+\.\w{1,5}")
+_TOKEN = re.compile(r"[\w.\-\\/]{2,}")
+
+def _targets(cmd: str) -> set:
+    """命令里提到的文件。
+
+    只用 `_FILENAME` 不够 —— 它要求 `.<1~5 字符>` 结尾,于是 `Makefile`、`LICENSE`、
+    `.gitignore`、`rmdir output` 的目录名**一个都记不下来**。拒绝这些之后 `denied`
+    是空的,粘性等于没有。(这是同一个洞的第三次:先是只记按回车那条分支,再是
+    `cmd /c` 换写法,现在是没有扩展名。每次都只补了被发现的那一条路径。)
+
+    补法不是继续加正则 —— 加不完。改成**问文件系统**:命令里的 token,存在就记。
+    `del` / `type` / `python` 不是文件,自然被滤掉;真有个叫 `del` 的文件反而该记。
+
+    **多记的代价是多弹一次框,少记的代价是文件没了。** 所以一律往多了记。
+    """
+    out = set(_FILENAME.findall(cmd))          # 别改成 _targets —— 这就是 _targets
+    for tok in _TOKEN.findall(cmd):
+        if tok.startswith("-"):
+            continue                                  # 是开关不是文件
+        if os.path.exists(tok) or os.path.exists(os.path.join(WORKSPACE, tok)):
+            out.add(tok)
+    return {t for t in out if t}
 
 def _named_in_request(state: dict, args: dict) -> list:
     """Files this delete touches whose names the user typed.
@@ -1174,7 +1198,7 @@ def _named_in_request(state: dict, args: dict) -> list:
     if not _DESTRUCTIVE.search(cmd):
         return []
     asked = state.get("asked", "")
-    return sorted({f for f in _FILENAME.findall(cmd) if f and f in asked})
+    return sorted({f for f in _targets(cmd) if f and f in asked})
 
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
@@ -1185,7 +1209,11 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # x.md`, and a regex can never see `python -c "os.remove('x.md')"` or a .py file that
         # does the same. Once you have said no about a name, anything mentioning that name
         # asks again — whatever it is written in.
-        if any(f in args.get("command", "") for f in state.get("denied", ())):
+        cmd_nc = os.path.normcase(args.get("command", ""))
+        # Windows 上 Report.md 和 report.md 是同一个文件,而 `in` 是区分大小写的 ——
+        # 拒绝 `del Report.md` 之后,`del report.md` 直接放行。normcase 在 Windows 上
+        # 折大小写、在 POSIX 上原样返回,正好就是各自文件系统的语义。
+        if any(os.path.normcase(f) in cmd_nc for f in state.get("denied", ())):
             decision = "ask"
     if decision == "allow":
         return True, ""
@@ -1234,7 +1262,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # 那条分支里写。真实会话里人几乎总是按 a,所以这道闸从上线到现在一次都没在真实
             # 运行里触发过(FINDINGS「还没解决的」里那条挂账就是这么来的,当时以为是场景没
             # 出现,其实是这里漏了一行)。不记 = 粘性等于不存在。
-            state.setdefault("denied", set()).update(_FILENAME.findall(args.get("command", "")))
+            state.setdefault("denied", set()).update(_targets(args.get("command", "")))
             ui.note("删除不支持「本会话都允许」—— 会话放行对删除本来就不生效。真要删就单独按 y。")
             return False, ("这次删除没被批准。**别再提同一条命令** —— 是否删除只有用户能决定,"
                            "而重发只会把同一个提示原样再弹一次。要么就把文件留着继续往下做,"
@@ -1244,7 +1272,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     if verdict == "yes":
         return True, ""
     if verdict in ("no", "say") and name == "run_bash":
-        state.setdefault("denied", set()).update(_FILENAME.findall(args.get("command", "")))
+        state.setdefault("denied", set()).update(_targets(args.get("command", "")))
     if verdict == "no":
         if named:
             # The ⚠️ goes to the human; the model got back "用户拒绝了这次调用" and nothing

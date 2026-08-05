@@ -598,3 +598,51 @@ def test_the_dont_use_clause_is_stripped_however_it_is_punctuated(ws):
             fh.write("---\nname: merge\ndescription: %s\n---\n把多个 csv 按主键合并。\n" % desc)
         assert not R.explain("帮我做前端渲染的页面布局"), f"第 {i} 种写法没被摘掉: {desc[:30]}"
         assert R.explain("把几个 csv 合并成一张表"), f"第 {i} 种写法把该捞的也摘没了"
+
+
+def test_a_refusal_survives_the_subagent_boundary(ws, monkeypatch):
+    """`denied` 原来不在 `_CHILD_KEYS` 里,于是子 agent 是一张白纸:父拒过的文件,
+    子 agent 一声不吭就动了;子里拒的也传不回父。粘性存在的全部意义就是「换个写法
+    也拦得住」—— 换个 agent 是最省事的换写法。
+
+    `asked` 上个版本补过同一个洞,`denied` 没补 —— 又一次「只补了被发现的那条路径」。"""
+    import agent as A
+    parent = {"mode": "default", "allow": {"run_bash"}, "asked": ""}
+    parent.setdefault("denied", set()).add("Keep.md")
+    child = A._child_state(parent)
+    assert child.get("denied") == {"Keep.md"}, "父拒过的文件,子 agent 看不见"
+    # set 是引用共享,所以回传也通:子里新拒的,父下一步就该看得到
+    child["denied"].add("Child.md")
+    assert "Child.md" in parent["denied"], "子 agent 里的拒绝没有回传给父"
+
+
+def test_a_file_without_an_extension_still_sticks(ws):
+    """`_FILENAME` 要求 `.<1~5 字符>` 结尾,于是 Makefile / LICENSE / .gitignore /
+    rmdir 的目录名一个都记不下来 —— 拒绝之后 denied 是空的,粘性等于不存在。
+    补法不是继续加正则(加不完),是问文件系统:命令里的 token,存在就记。"""
+    import os
+    import agent as A
+    for n in ("Makefile", "LICENSE", ".gitignore"):
+        open(os.path.join(A.WORKSPACE, n), "w").close()
+    os.mkdir(os.path.join(A.WORKSPACE, "outdir"))
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        for cmd, want in (("del Makefile", "Makefile"), ("del LICENSE", "LICENSE"),
+                          ("del .gitignore", ".gitignore"), ("rmdir outdir", "outdir")):
+            assert want in A._targets(cmd), f"{cmd!r} 没能记下 {want}"
+        assert A._targets("del NoSuchThing") == set()   # 不存在的不误记
+    finally:
+        os.chdir(cwd)
+
+
+def test_case_only_rename_does_not_slip_past_the_stickiness(ws, monkeypatch):
+    """Windows 上 Report.md 和 report.md 是同一个文件,而消费 denied 用的是区分大小写
+    的 `in`。拒绝 `del Report.md` 之后,`del report.md` 直接放行 —— 改个大小写就绕过去了。"""
+    import types
+    import agent as A
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "n", note=lambda *a: None))
+    st = {"mode": "default", "allow": {"run_bash"}, "asked": "", "denied": {"Report.md"}}
+    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "type report.md"})
+    assert not ok, "只改大小写就绕过了粘性"
