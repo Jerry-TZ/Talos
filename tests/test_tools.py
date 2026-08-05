@@ -669,3 +669,23 @@ def test_a_hardlinked_credential_never_reaches_the_trash(ws, monkeypatch):
     for fn in os.listdir(A.TRASH_DIR):
         body = open(os.path.join(A.TRASH_DIR, fn), encoding="utf-8", errors="replace").read()
         assert "sk-LEAK" not in body, f"密钥明文进了回收站: {fn}"
+
+def test_a_long_call_says_it_is_still_alive(monkeypatch):
+    """转圈本身不说明还活着。原来的理由是「跑两次就知道这个模型一次要几十秒」——
+    实测一轮里单次调用 16s~235s(15 倍跨度),没有基线可学,用户只能猜,猜错就把
+    一个还活着的调用 Ctrl-C 掉。所以要定期**追加**一行(不是原地重绘:legacy_windows
+    上秒数宽度一变就刷屏)。
+
+    不用 console.begin_capture():rich 的捕获缓冲是**线程局部**的,后台线程的 print
+    根本进不去那个 buffer —— 第一版测试就是这么假红的。
+    """
+    import time
+    ui = pytest.importorskip("console_ui", reason="需要 rich(界面层的可选依赖)")
+    lines = []
+    monkeypatch.setattr(ui.console, "print", lambda *a, **k: lines.append(str(a[0]) if a else ""))
+    monkeypatch.setattr(ui, "HEARTBEAT", 0.05)
+    with ui.thinking():
+        time.sleep(0.25)
+    beats = [ln for ln in lines if "已等" in ln]
+    assert beats, f"长调用期间一行心跳都没有:{lines!r}"
+    assert "0.1s" not in " ".join(beats), f"秒数没取整:{beats!r}"

@@ -10,6 +10,7 @@ here. So this file *is* the "界面",连到内核只靠这几个函数名。想�
 """
 
 import sys
+import threading
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -46,17 +47,55 @@ def banner(mode: str, provider: str, model: str) -> None:
 def read_task(mode: str) -> str:
     return console.input(f"[bold {C_YOU}]你[/] [dim]({mode})[/] › ").strip()
 
+HEARTBEAT = 30   # 每这么多秒往下追加一行"还活着"
+
+class _Thinking:
+    """转圈 + 每 HEARTBEAT 秒**追加**一行「已等 Ns」。
+
+    为什么不是把秒数塞进转圈里实时更新:试过,更糟。legacy_windows 下原地重绘不可靠,
+    而秒数宽度会变(9s → 10s → 100s),一变就退化成刷屏。**追加**没有这个问题 ——
+    新的一行本来就该往下走,任何终端都对。
+
+    为什么非要有它:原来的理由是「头两次调用就知道这个模型一次要几十秒,转圈转到远超
+    那个数你自己就知道该 Ctrl-C」。这条理由被实测推翻了 —— 一轮任务里单次调用实测
+    16s / 26s / 45s / 87s / 174s / 235s,**15 倍的跨度,根本没有基线可学**。用户只能猜,
+    猜错就把一个还活着的调用 Ctrl-C 掉了(真发生了,好几次)。
+
+    legacy_windows 上干脆不开转圈:Live 在那儿本来就不可靠,只留追加的行。
+    """
+
+    def __init__(self, label: str):
+        self._stop = threading.Event()
+        self._status = None if console.legacy_windows else console.status(label, spinner="dots")
+        self._label = label
+
+    def __enter__(self):
+        if self._status is not None:
+            self._status.__enter__()
+        else:
+            console.print(f"[dim]  {self._label}[/]")
+        threading.Thread(target=self._beat, daemon=True).start()
+        return self
+
+    def _beat(self) -> None:
+        waited = 0
+        while not self._stop.wait(HEARTBEAT):
+            waited += HEARTBEAT
+            # 用 :.0f —— waited 是累加出来的,HEARTBEAT 非整数时会攒出
+            # 0.15000000000000002 这种。生产里 HEARTBEAT=30 看不出来,测试里一眼就露。
+            console.print(f"[dim]  … 已等 {waited:.0f}s,还在等模型回话(Ctrl-C 停这一轮)[/]")
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        return self._status.__exit__(*exc) if self._status is not None else False
+
+
 def thinking():
-    """上下文管理器:模型思考时转个圈。"""
-    return console.status(f"[{C_MODEL}]模型思考中…[/]", spinner="dots")
+    """上下文管理器:模型思考时转个圈,并定期报"还活着"。"""
+    return _Thinking(f"[{C_MODEL}]模型思考中…[/]")
 
 def took(seconds: float) -> None:
-    """调用回来之后报一次耗时。**不要**试着把秒数放进转圈里实时更新 —— 试过,更糟:
-    Windows 传统控制台(`console.legacy_windows`)没法可靠地原地重绘,静态文字宽度不变
-    时能覆盖住,而秒数宽度会变(9s → 10s → 100s),一变就退化成一行行往下刷屏。
-
-    事后报一次同样解决那个问题:头两次调用就知道这个模型一次要几十秒,之后转圈转到
-    远超那个数,你自己就知道该 Ctrl-C 了。而且这条路不碰 Live,任何终端上都不会刷屏。"""
+    """调用回来之后报一次耗时 —— 跟上面的心跳配套:心跳说"还活着",这条说"花了多久"。"""
     console.print(f"[dim]  ⏱ {seconds:.0f}s[/]")
 
 def show_tool(name: str, args: dict, result: str, is_error: bool, full: bool = False) -> None:
