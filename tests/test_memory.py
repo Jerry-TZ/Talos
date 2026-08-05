@@ -643,6 +643,15 @@ def test_case_only_rename_does_not_slip_past_the_stickiness(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", types.SimpleNamespace(
         preview=lambda *a: None, ask=lambda: "n", note=lambda *a: None))
+    # 判据跟着**文件系统**走,不跟着我这台机器走:Windows 上 report.md 就是同一个文件,
+    # 必须再问;POSIX 上它真是另一个文件,拦了反而是误报。第一版把 Windows 的语义写死
+    # 在断言里,本机全绿、CI(Linux)当场红 —— 而红得对。
+    case_insensitive = os.path.normcase("A") != "A"
     st = {"mode": "default", "allow": {"run_bash"}, "asked": "", "denied": {"Report.md"}}
-    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "type report.md"})
-    assert not ok, "只改大小写就绕过了粘性"
+    ok, _ = A.check_permission(dict(st), "bash", "run_bash", {"command": "type Report.md"})
+    assert not ok, "原样的文件名都没粘住"                      # 两个平台都该拦
+    ok, _ = A.check_permission(dict(st), "bash", "run_bash", {"command": "type report.md"})
+    if case_insensitive:
+        assert not ok, "Windows 上改个大小写就绕过了粘性"
+    else:
+        assert ok, "POSIX 上 report.md 是另一个文件,不该被误拦"
