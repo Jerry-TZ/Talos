@@ -80,6 +80,12 @@ class _Thinking:
     def _beat(self) -> None:
         waited = 0
         while not self._stop.wait(HEARTBEAT):
+            # wait() 返回 False 到真正 print 之间还有一个窗口:调用刚好这时回来,
+            # __exit__ 的 _stop.set() 已经执行,而这一行照样会打出去 —— 打到哪?
+            # 打到紧跟其后的权限弹框上。「允许? [y]一次…」被一行「已等 30s」冲掉,
+            # 人就在一个看不清的提示上按键。再查一次,窗口关掉。
+            if self._stop.is_set():
+                return
             waited += HEARTBEAT
             # 用 :.0f —— waited 是累加出来的,HEARTBEAT 非整数时会攒出
             # 0.15000000000000002 这种。生产里 HEARTBEAT=30 看不出来,测试里一眼就露。
