@@ -447,3 +447,89 @@ def test_a_subagent_still_warns_about_files_the_user_named(monkeypatch):
     assert A._named_in_request(parent, args) == ["important_report.md"]
     assert A._named_in_request(child, args) == ["important_report.md"], \
         "子 agent 里丢了这层警告"
+
+def test_paging_through_one_file_gets_cut_off(monkeypatch):
+    """_repeat_guard 拦不住翻页:它的判据是「输出一模一样」,而换个 offset 输出就不同,
+    判据一次都不成立。实测一轮里同一个脚本被换着 offset 读了几十次,连着两轮撞满
+    100 步上限。所以按 (read_file, path) 单独数,换 offset 也算同一次。
+    edit_file 故意不数 —— 同一个文件改十遍是正常干活,读十遍不是。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    seen = {}
+    args = lambda off: {"path": "v.py", "offset": off, "limit": 40}
+    for i in range(A.READ_LIMIT - 1):                       # 前 READ_LIMIT-1 次照常给内容
+        assert A._read_guard(seen, "read_file", args(i * 40), f"内容{i}") == f"内容{i}"
+    cut = A._read_guard(seen, "read_file", args(999), "内容N")
+    assert "别再一段一段翻" in cut and "内容N" not in cut     # 到点了:不给内容,只给出路
+    # 改同一个文件不受影响,数的也不是它
+    for _ in range(A.READ_LIMIT * 2):
+        assert A._read_guard(seen, "edit_file", {"path": "v.py"}, "edited") == "edited"
+    assert A._read_guard(seen, "read_file", {"path": "别的.py"}, "另一个") == "另一个"
+
+def test_the_read_guard_is_actually_wired_into_the_loop(ws, monkeypatch):
+    """两条守卫的单元测试都直接调 `_read_guard` —— 把 agent_turn 里那一行调用删掉,
+    它们照样绿。**接线本身没人测。** 这条从 agent_turn 走一遍真实分发。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("原始内容", False))
+    n = A.READ_LIMIT + 1
+    script = [_msg(tool_calls=[_tc("read_file", '{"path":"same.py","offset":%d}' % i, cid="c%d" % i)])
+              for i in range(n)] + [_msg(content="done")]
+    messages = [{"role": "user", "content": "读它"}]
+    A.agent_turn(_Client(script), "m", messages, {"mode": "bypass", "allow": set()})
+    tools = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert tools[0] == "原始内容" and "别再一段一段翻" in tools[-1]
+
+def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
+    """真实一轮:模型三十几次 run_bash 打印 agent.py 的不同片段,一次 read_file 都没用 ——
+    上一版守卫按**工具名**计数,于是一次都没触发。文件工具关在 workspace 里,读上一级的
+    源码只能走 run_bash,所以这条路不是它偷偷绕的,是唯一的路。
+    **按工具名计数的守卫,绕过它不需要动机,换个工具就行。**"""
+    import agent as A, os
+    monkeypatch.setattr(A, "ui", _ui())
+    p = os.path.join(A.WORKSPACE, "big.py")
+    open(p, "w", encoding="utf-8").write("x = 1\n" * 50)
+    seen = {}
+    for i in range(A.READ_LIMIT - 1):
+        cmd = {"command": f'findstr /n "def" {p}'}          # 每次片段不同,输出也不同
+        assert A._read_guard(seen, "run_bash", cmd, f"片段{i}") == f"片段{i}"
+    cut = A._read_guard(seen, "run_bash", {"command": f"type {p}"}, "片段N")
+    assert "别再一段一段翻" in cut and "片段N" not in cut
+    # 解释器本身不算被读的文件。每条命令开头都是那个 venv 的 python.exe,不滤掉的话
+    # 它会先于任何真实文件撞上限,把正常命令的输出也拦掉 —— 实测就是这么误伤的。
+    exe = os.path.join(A.WORKSPACE, "python.exe")
+    open(exe, "w").write("")
+    seen2 = {}
+    for i in range(A.READ_LIMIT * 2):          # 每次读**不同**的文件,只有解释器是重复的
+        cmd = {"command": exe + f' -c "print(open(\'f{i}.txt\').read())"'}
+        assert A._read_guard(seen2, "run_bash", cmd, "输出") == "输出"
+    # grep 的**搜索词**不算文件。`_targets` 第一步是无条件的文件名正则,而它吃得下
+    # `os.path` 这种带点的标识符 —— 六个不同文件配同一个搜索词,也能把计数记满。
+    seen3 = {}
+    for i in range(A.READ_LIMIT * 2):
+        assert A._read_guard(seen3, "run_bash",
+                             {"command": f'findstr /n "os.path" f{i}.py'}, "命中") == "命中"
+    # 改过的文件下次读确实是新内容 —— 写一次就该清零,否则边写边看的循环第 6 轮就断了
+    seen4, path = {}, os.path.join(A.WORKSPACE, "calc.py")
+    for _ in range(A.READ_LIMIT * 3):
+        assert A._read_guard(seen4, "read_file", {"path": path}, "内容") == "内容"
+        A._read_guard(seen4, "edit_file", {"path": path}, "edited")
+    # 换个拼法不该重置:v.py / ./v.py / 绝对路径 是同一个文件
+    seen5, spells = {}, ("v.py", "./v.py", os.path.join(A.WORKSPACE, "v.py"))
+    for i in range(A.READ_LIMIT):
+        last = A._read_guard(seen5, "read_file", {"path": spells[i % 3]}, "内容")
+    assert "别再一段一段翻" in last and len(seen5) == 1   # 三种拼法必须落在同一个键上
+    # 上限跟着文件长度走:一本要翻 N 页的文件,读 N 次是翻完一遍,不是打转。
+    # 定死 6 次的话,2118 行的 agent.py 在第 6 次就被拦 —— 而翻完一遍要 9 次。
+    big = os.path.join(A.WORKSPACE, "long.py")
+    open(big, "w", encoding="utf-8").write("x = 1\n" * (A.READ_MAX_LINES * 9))
+    assert A._pages(big) == 9
+    seen6 = {}
+    for _ in range(A.READ_LIMIT * 2):                    # 12 次:小文件早拦了,这个还没到
+        assert A._read_guard(seen6, "read_file", {"path": big}, "内容") == "内容"
+    for _ in range(A.READ_LIMIT):
+        last = A._read_guard(seen6, "read_file", {"path": big}, "内容")
+    assert "别再一段一段翻" in last                       # 但翻到两遍还是要拦
+    # 跑脚本不算读:同一个文件被执行多少次都不该拦(判官就是这么反复跑的)
+    for _ in range(A.READ_LIMIT * 2):
+        assert A._read_guard(seen, "run_bash", {"command": f"python {p} arg"}, "跑完了") == "跑完了"

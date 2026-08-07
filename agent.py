@@ -137,8 +137,12 @@ def _env_block() -> str:
             "Relative paths are ALREADY rooted there, in run_bash and in the file tools alike. "
             "Write 'logs/a.txt', never the workspace's own name — prefixing it builds a nested "
             "copy inside itself and you will spend the next ten steps hunting your own files.\n"
-            + (f"File tools are limited to that directory. Your own skills/tools/memory live in "
-               f"{HOME} and stay writable; the agent's source code there does NOT.\n"
+            + (f"WRITING is limited to that directory (plus your own skills/tools/memory in "
+               f"{HOME}). READING is wider: read_file can open the project's own source under "
+               f"{HOME} directly — .py/.md/.json/.txt/.toml/.cfg/.ini/.yml. So read agent.py "
+               f"with read_file, NOT by shelling out to findstr or writing an extractor script. "
+               f"Credentials, .talos/, .venv/, .git/ stay closed, and the agent's source stays "
+               f"read-only — you cannot rewrite the loop you are running inside.\n"
                if HOME != WORKSPACE else "")
             + f"Python: {sys.executable}\n"
             "run_bash commands must be ONE line. For multi-line code, write_file a .py file "
@@ -336,10 +340,21 @@ def _under(full: str, root: str) -> bool:
 _SECRET_NAMES = {".env", ".netrc", "_netrc", "credentials", "id_rsa", "id_dsa", "id_ecdsa",
                  "id_ed25519", ".npmrc", ".pypirc", ".git-credentials", "secrets.json"}
 _SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".docker"}
+# 按**词干**挡,不按整名 —— `credentials.json`、`token.json`、`client_secret_1234.json`、
+# `secrets.yml` 都是 gcloud / Firebase / Google API 的出厂文件名。旧判据是整名相等,
+# 于是只有字面量 `secrets.json` 被挡住,其余全放行;只读一放开,它们立刻都在射程内。
+# 误伤一个叫 token.py 的普通文件,代价是一次「读不了」;漏掉一个,代价是 key 进上下文
+# 和明文会话日志。**这道闸只该往严了写。**
+_SECRET_STEMS = ("credential", "secret", "token", "client_secret", "service-account",
+                 "service_account", "serviceaccount", "apikey", "api_key", "keyfile", "keystore")
 
 def _is_secret_path(full: str) -> bool:
     base = os.path.basename(full).lower()
     if base in _SECRET_NAMES or base.startswith(".env."):
+        return True
+    stem = os.path.splitext(base)[0]
+    if any(stem == s or stem.startswith(s + "_") or stem.startswith(s + "-")
+           or stem.startswith(s + "s") for s in _SECRET_STEMS):
         return True
     parts = {p.lower() for p in full.replace("/", os.sep).split(os.sep)}
     return bool(parts & _SECRET_DIRS)
@@ -364,12 +379,24 @@ def _strip_workspace_prefix(path: str) -> str:
     here = lambda p: os.path.isdir(os.path.join(WORKSPACE, os.path.dirname(p) or "."))
     return rest if not here(path) and here(rest) else path
 
-def _in_workspace(path: str) -> str:
-    """Allow the workspace, plus the agent's own brain (skills/tools/memory).
+# 可以**只读**的源码后缀。写路径永远够不到 HOME —— 见 `_in_workspace` 的 `for_read`。
+_READABLE_EXT = (".py", ".md", ".json", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml")
+# 即便只读也不许进的目录:`.talos/` 是明文会话日志和记忆碎片,`.venv/`、`.git/` 是
+# 几万个文件的黑洞(模型一旦漫游进 site-packages,一轮预算就没了)。
+_NO_READ_DIRS = _TRASH_SKIP | {"env", "build", "dist", ".mypy_cache", ".ruff_cache", "site-packages"}
 
-    Note what is NOT allowed when WORKSPACE is pointed elsewhere: HOME itself, i.e.
-    agent.py and friends. Reflection still writes skills; the agent still cannot
-    rewrite the loop it is running inside."""
+def _in_workspace(path: str, for_read: bool = False) -> str:
+    """Allow the workspace, plus the agent's own brain (skills/tools/memory)。
+    `for_read=True` 时**额外**放开 HOME 下的源码文件 —— 只读,写路径一律够不到。
+
+    为什么要放开:读工具被关在 workspace 里,而看自己的源码是常规任务(画流程图、
+    查一个函数怎么走)。封死的结果不是它不读,是它**造一个读取器** —— 实测一轮里写了
+    三十个 `extractN.py`,让脚本读文件再跑脚本,把翻页守卫整个绕过去,烧掉一轮预算。
+    **那个绕行不是它想绕,是唯一的路被封了。** 把正路修通,守卫才拦得住。
+
+    放开的只有「读」这一侧,而且上面那几道闸一个不少:凭据文件名、硬链接、工具批准
+    清单,全在这个判断之前。`.env` 依然读不到;`agent.py` 依然改不了 ——
+    **反射还能写技能,agent 仍然改不了自己正在跑的那个循环。**"""
     full = os.path.realpath(_strip_workspace_prefix(path))
     if full == os.path.realpath(_tool_hashes_path()):
         # This file decides which code runs at startup. With the default layout it sits inside
@@ -397,7 +424,11 @@ def _in_workspace(path: str) -> str:
     if (_under(full, WORKSPACE) or _under(full, SKILLS_DIR) or _under(full, TOOLS_DIR)
             or full == os.path.realpath(MEMORY_FILE)):
         return full
-    raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})")
+    if (for_read and _under(full, HOME) and full.lower().endswith(_READABLE_EXT)
+            and not (set(os.path.relpath(full, HOME).lower().split(os.sep)) & _NO_READ_DIRS)):
+        return full
+    raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})"
+                     + ("" if for_read else ";只读的话可以直接 read_file 项目源码"))
 
 READ_MAX_LINES = 250   # cap lines returned to the model (token saver); page with offset/limit
 BASH_MAX_CHARS = 4000  # cap run_bash output sent to the model
@@ -409,7 +440,7 @@ def _read_full(path: str) -> str:
     PowerShell's `>` writes UTF-16LE by default, and plenty of editors add a
     UTF-8 BOM — decode those properly rather than crashing (or worse, handing
     edit_file mojibake it would then write back over the original)."""
-    full = _in_workspace(path)
+    full = _in_workspace(path, for_read=True)
     if os.path.isdir(full):                       # Windows raises a bare "Permission denied" here
         raise ValueError(f"{path} 是目录,不是文件。列目录用 run_bash `dir {path}`。")
     size = os.path.getsize(full)
@@ -1384,6 +1415,94 @@ def _repeat_guard(seen: dict, name: str, args: dict, out: str) -> str:
             f"别再写同一个脚本的新变体了。要么换一个完全不同的角度,要么直接说清你卡在哪、试过什么。\n"
             f"原始输出:\n{out}")
 
+READ_LIMIT = 6       # 一轮里同一个文件读到第这么多次,就不再返回内容
+
+# 「这条命令是在读文件内容吗」。**这条正则是这个守卫能不能站住的全部关键。**
+# 上一版只数 `read_file`,而模型根本没走 read_file —— 文件工具关在 workspace 里,
+# 读上一级的源码只能靠 run_bash,于是它用 findstr / python 切片打印,读了三十几次同一个
+# agent.py,守卫一次都没触发。**按工具名计数,绕过它不需要动机,换个工具就行。**
+# 宁可多认(多一句唠叨),不能少认(少认就是三十次调用白烧)。
+_READISH = re.compile(r"findstr|\btype\b|\bcat\b|\bmore\b|\bhead\b|\btail\b|"
+                      r"Get-Content|Select-String|open\s*\(|readlines|read_text", re.I)
+
+def _pages(p: str) -> int:
+    """整本翻一遍要几次 read_file。上限必须跟着文件长度走 —— 定死 6 次是我自己给自己
+    挖的坑:同一天里我先把 `read_file` 放开到能读 `agent.py`(2118 行),又用一个
+    定死 6 次的闸把它堵回去,而按 READ_MAX_LINES=250 分页,翻完一遍就要 9 次。
+    结果模型在第 6 次被拦下,只好退回去 run_bash 切片、派子 agent —— **正是这条守卫
+    要治的那个行为,被这条守卫自己逼出来了。**"""
+    try:
+        base = p if os.path.isabs(p) else os.path.join(WORKSPACE, p)
+        with open(base, "rb") as f:
+            return max(1, -(-f.read().count(b"\n") // READ_MAX_LINES))
+    except OSError:
+        return 1
+
+def _read_key(p: str):
+    """按**解析后的真实路径**计数,不按拼写。`v.py` 被拦住之后写成 `./v.py` 或绝对路径
+    就又能读了 —— 而守卫的提示语本身就在叫模型换个写法,等于自己给自己发了钥匙。"""
+    try:
+        # 相对路径按 **WORKSPACE** 解,不按进程 cwd —— 文件工具就是这么解的,
+        # 而这个函数拿到的是没解析过的原始参数。
+        base = p if os.path.isabs(p) else os.path.join(WORKSPACE, p)
+        return ("read", os.path.normcase(os.path.realpath(base)))
+    except OSError:
+        return ("read", os.path.normcase(p))
+
+def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
+    """同一个文件在一轮里读到第 READ_LIMIT 次 —— 不给内容了,只回一句「别再翻页」。
+
+    `_repeat_guard` 拦不住这个。它的判据是**输出一模一样**,而翻页读只要换个
+    `offset`/`limit`,输出就不同 —— 判据一次都不成立。实测:一轮里同一个 verify 脚本
+    被换着 offset 读了几十次,`_repeat_guard` 一路在喊「第 3 次 / 第 4 次」(那是别的
+    调用触发的),却每次都照样把内容递回去。连着两轮撞满 100 步上限,烧掉约 950 万 token。
+
+    只数 `read_file`,不数 `edit_file`/`write_file` —— 这个区分是这条守卫的全部要害:
+    **同一个文件反复改是正常干活**(边写边试,改十遍很常见);**反复读不是** ——
+    文件在这一轮里没被改过的话,读第七遍不会读出新东西,而每读一遍都要把整个
+    已积累的上下文重发一次。翻页上限本来是为省 token 设的,翻不动就成了纯烧钱。
+
+    键上带 `"read"` 前缀,和 `_repeat_guard` 的 sha1 摘要共用同一个 per-turn dict 而
+    不会撞车 —— 一个是 tuple,一个是 str。至于为什么必须是 per-turn 而不能挂 `state`,
+    见 `_repeat_guard` 的注释,同一个理由(子 agent 共享 state,会把计数清零)。"""
+    if name in ("write_file", "edit_file"):
+        # 改过的文件下一次读**确实**是新内容 —— 这条守卫的整个前提是「文件没变」,
+        # 不在写的时候清零,就把「边写边看」这个最普通的循环给掐了(实测第 6 轮
+        # read→edit→read 就开始拿不到内容,而文件每轮都真的变了)。
+        seen.pop(_read_key(str(args.get("path", ""))), None)
+        return out
+    if name == "read_file":
+        paths = {str(args.get("path", ""))}
+    elif name == "run_bash" and _READISH.search(args.get("command", "")):
+        # 只认命令里**真实存在**的文件(`_targets` 会去问文件系统),所以
+        # `findstr /n "xxx" a.py` 记的是 a.py,不是那个搜索词。
+        # 两道过滤,少一道都误伤:
+        # ① 必须**真的存在**。`_targets` 的第一步是无条件 `_FILENAME.findall`,而那个正则
+        #    `[\w.\-]+\.\w{1,5}` 吃得下 `os.path`、`sys.exit`、`args.get` —— 于是
+        #    `findstr /n "os.path" a.py` 里被记下的是**搜索词**,六个不同文件也能把它记满。
+        # ② 滤掉可执行文件。每条命令开头都是那个 venv 的 python.exe,不滤就是解释器
+        #    自己先撞上限,把正常命令的输出拦掉。**这条守卫误伤的第一个受害者是它自己。**
+        paths = {p for p in _targets(args.get("command", ""))
+                 if not p.lower().endswith((".exe", ".bat", ".cmd", ".com"))
+                 and (os.path.exists(p) or os.path.exists(os.path.join(WORKSPACE, p)))}
+    else:
+        return out                     # 跑脚本、写文件、编辑 —— 都不是"读同一个文件"
+    hot, n = "", 0
+    for p in sorted(paths):                    # sorted:两个都超限时,消息里点哪个得是确定的
+        key = _read_key(p)
+        seen[key] = seen.get(key, 0) + 1
+        # 整本翻两遍还没找到要的东西,那就不是在读,是在打转。
+        if seen[key] >= max(READ_LIMIT, 2 * _pages(p)) and seen[key] > n:
+            hot, n = p, seen[key]
+    if not hot:
+        return out
+    if ui is not None:
+        ui.note(f"📖 {os.path.basename(hot)} 本轮已读 {n} 次(整本 {_pages(hot)} 页)—— 不再返回内容")
+    return (f"[系统] 这一轮你已经读了 {os.path.basename(hot)} {n} 次(换 offset、换成 findstr/type 打印切片,都算)。"
+            f"文件没变,再读一遍不会读出新东西,而每读一遍都要把整段上下文重发。\n"
+            f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
+            f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。")
+
 def agent_turn(client, model: str, messages: list, state: dict, query: str = "") -> str:
     """Drive one user request to completion, looping over tool calls.
 
@@ -1502,7 +1621,8 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
             state["trace"].append({"tool": name, "error": is_error, "denied": not allowed})
             messages.append({"role": "tool", "tool_call_id": c.id,
-                             "content": _repeat_guard(repeat, name, args, out)})
+                             "content": _read_guard(repeat, name, args,
+                                                    _repeat_guard(repeat, name, args, out))})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
 # Both are just another agent_turn with a special prompt — so saving reuses the

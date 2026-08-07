@@ -655,3 +655,30 @@ def test_case_only_rename_does_not_slip_past_the_stickiness(ws, monkeypatch):
         assert not ok, "Windows 上改个大小写就绕过了粘性"
     else:
         assert ok, "POSIX 上 report.md 是另一个文件,不该被误拦"
+
+
+def test_reading_the_projects_own_source_is_allowed_but_writing_it_is_not(ws, monkeypatch):
+    """读工具被关在 workspace 里时,模型不会放弃读源码 —— 它会**造一个读取器**:
+    实测一轮写了三十个 extractN.py,让脚本读文件再跑脚本,把翻页守卫整个绕过去。
+    绕行不是它想绕,是唯一的路被封了。所以只读这一侧放开到项目根目录的源码;
+    写这一侧一步不让 —— agent 仍然改不了自己正在跑的那个循环。"""
+    import agent as A, os, pytest
+    src = os.path.join(A.HOME, "agent.py")
+    assert "def _load_dotenv" in A.read_file(src)               # 读得到自己的源码(第一页里)
+    # 断在 write_file / edit_file 上,不是断在 _in_workspace 上 —— 这个 diff 的整个安全
+    # 论证是「只有 _read_full 传 for_read=True」,而那正是原来谁都没断言的一条。
+    with pytest.raises(ValueError, match="越界"):
+        A.write_file(src, "x")
+    with pytest.raises(ValueError, match="越界"):
+        A.edit_file(src, "def _load_dotenv", "def PWNED")
+    assert "def PWNED" not in open(src, encoding="utf-8").read()
+    for bad in ("credentials.json", "token.json", "client_secret_9.json", "secrets.yml"):
+        with pytest.raises(ValueError, match="凭据"):           # gcloud/Firebase 的出厂文件名
+            A._in_workspace(os.path.join(A.HOME, bad), for_read=True)
+    with pytest.raises(ValueError, match="凭据"):
+        A._in_workspace(os.path.join(A.HOME, ".env"), for_read=True)
+    for d in (".talos", ".venv", "venv", "env", ".pytest_cache"):  # 明文日志和依赖黑洞,只读也不进
+        with pytest.raises(ValueError, match="越界"):
+            A._in_workspace(os.path.join(A.HOME, d, "x.py"), for_read=True)
+    with pytest.raises(ValueError, match="越界"):                # 排除按路径分量,不按前缀
+        A._in_workspace(os.path.join(A.HOME, "docs", ".talos", "x.json"), for_read=True)
