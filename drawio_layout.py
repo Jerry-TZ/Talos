@@ -28,16 +28,55 @@ from xml.sax.saxutils import escape, quoteattr
 
 GRID = 10
 VGAP, HGAP = 60, 60
+COLGAP = 140              # 栏间距。要明显大于栏内的 HGAP —— 判官只能靠留白认出「这是两栏」
+MAX_ASPECT = 2.0          # 和 drawiocheck 同一个数:超了就多折一栏
 BARYCENTER_ROUNDS = 4
 
 # 形状按 kind 分,尺寸只有三种(drawiocheck 允许至多三种),填充取 Wong 色盲安全色
 KINDS = {
-    "start":     ("rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#E69F00;", 180, 50),
-    "terminal":  ("rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#E69F00;", 180, 50),
-    "gate":      ("rhombus;whiteSpace=wrap;html=1;fillColor=#56B4E9;", 220, 70),
-    "step":      ("rounded=0;whiteSpace=wrap;html=1;fillColor=none;", 200, 50),
+    "start":     "rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#E69F00;",
+    "terminal":  "rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#E69F00;",
+    "gate":      "rhombus;whiteSpace=wrap;html=1;fillColor=#56B4E9;",
+    "step":      "rounded=0;whiteSpace=wrap;html=1;fillColor=none;",
 }
 DEFAULT_KIND = "step"
+
+# 尺寸不再按 kind 写死,而是按文字量从这三档里挑 —— 写死是上一版文字撑出框的**根因**:
+# 标签从 4 个字到 40 个字,框却全是 220×70。判官那条「尺寸种类 ≤3」逼出了「全都一样大」,
+# 而全都一样大 + 标签长短差十倍 = 文字必然出框。**一条规则制造了另一条规则要治的病。**
+# 档位仍然只有三种宽,所以「尺寸别乱」那个初衷没丢 —— 丢的只是「必须一样大」。
+WIDTHS = (200, 280, 360)
+PAD = 16                  # 文字左右各留的空白
+LINE_H = 16               # 12px 字的行高
+
+
+def _text_w(s):
+    """12px 下的文字宽度。中日韩按全宽 12,拉丁按 6.6 —— 够粗但方向对,
+    而「够粗」正是这里要的:宁可框大一点,也别让字戳出去。"""
+    return sum(12.0 if ord(c) > 0x2E80 else 6.6 for c in s)
+
+
+def _fit(label, kind):
+    """挑一个刚好放得下这段文字的尺寸。
+
+    菱形是关键:它在离中心 dy 处的可用宽度只有 `w·(1-2|dy|/h)`,
+    两行文字的外侧那行离中心 LINE_H/2,可用宽度掉到 w 的四分之三左右。
+    按外接矩形算就会出框 —— 上一版就是这么出的。"""
+    tw = _text_w(label)
+    # 先把行数压到最少,再加宽 —— 顺序反过来的话所有块都会停在最窄那档、
+    # 靠断行硬塞进去,而 `check_permission(state, cls, name, args)` 断成两行是很难读的。
+    # 图里的字大半是代码标识符,标识符断行读者要自己拼回去。**宁可宽,别断。**
+    for lines in (1, 2, 3):
+        for w in WIDTHS:
+            h = 50 if lines == 1 else 50 + (lines - 1) * LINE_H
+            if kind == "gate":
+                h += 20                                   # 菱形本来就要高一点才装得下
+                avail = w * (1 - (lines - 1) * LINE_H / h) - PAD
+            else:
+                avail = w - PAD
+            if tw / lines <= avail:
+                return w, _snap(h)
+    return WIDTHS[-1], _snap(50 + 2 * LINE_H)
 
 
 def _snap(v):
@@ -106,6 +145,47 @@ def _order(nodes, edges, back, rank):
     return layers
 
 
+def _columns(ranks, row_h, col_w, rank, edges, back):
+    """一柱到底太高就折成几栏 —— 论文里长流程本来就是这么排的,不是取巧。
+
+    只切**连续的秩区间**:同一层的块永远待在同一栏,栏内仍然自上而下读。
+
+    切在哪儿,以前只看长宽比 —— 于是切口正好落在分叉最密的地方,栏间拉出四条线,
+    判官(它管着「换栏边免检长度和上行,免检不能变成藏线的地方」)当场报红。
+    **判官是对的:该改的是切口,不是上限。** 所以现在在满足长宽比的前提下,
+    枚举所有切法,挑**跨栏边最少**的那一个;跨了不止一栏的切法直接淘汰
+    (那种边会被判官判成「跳着栏连」,而且画出来就是横穿全图)。
+    栏数最多到 4,切点组合最多几百种,算它一遍比排错一次便宜得多。"""
+    from itertools import combinations
+    fwd = [(rank[e["source"]], rank[e["target"]])
+           for i, e in enumerate(edges) if i not in back]
+
+    def score(cuts):
+        col = {r: sum(1 for c in cuts if r >= ranks[c]) for r in ranks}
+        spans = [col[b] - col[a] for a, b in fwd]
+        if any(d > 1 for d in spans):
+            return None                                   # 跳栏,淘汰
+        groups = [[r for r in ranks if col[r] == k] for k in range(len(cuts) + 1)]
+        if any(not g for g in groups):
+            return None
+        h = max(sum(row_h[r] + VGAP for r in g) - VGAP for g in groups)
+        w = len(groups) * col_w + (len(groups) - 1) * COLGAP
+        if h > MAX_ASPECT * w:
+            return None
+        return max([spans.count(1)] + [sum(1 for a, b in fwd if col[a] == k and col[b] == k + 1)
+                                       for k in range(len(cuts))]), groups
+
+    best = None
+    for k in range(0, min(3, len(ranks) - 1) + 1):        # k 个切点 = k+1 栏
+        for cuts in combinations(range(1, len(ranks)), k):
+            got = score(cuts)
+            if got and (best is None or got[0] < best[0]):
+                best = got
+        if best:                                          # 栏数够用就不再往上加
+            return best[1]
+    return [ranks]
+
+
 def build(graph):
     nodes = [n["id"] for n in graph["nodes"]]
     meta = {n["id"]: n for n in graph["nodes"]}
@@ -115,26 +195,33 @@ def build(graph):
             if e[end] not in meta:
                 raise ValueError(f"边指向不存在的块: {e[end]}")
 
+    if not nodes:
+        raise ValueError("图里一个块都没有 —— nodes 至少要有一个 {id, label}")
+    for n in graph["nodes"]:
+        if not n.get("label"):
+            raise ValueError(f"块 {n.get('id')!r} 没有 label —— 每个块都要有字")
     back = _back_edges(nodes, edges)
     rank = _ranks(nodes, edges, back)
     layers = _order(nodes, edges, back, rank)
 
-    size = {n: KINDS.get(meta[n].get("kind", DEFAULT_KIND), KINDS[DEFAULT_KIND])[1:]
-            for n in nodes}
+    size = {n: _fit(meta[n]["label"], meta[n].get("kind", DEFAULT_KIND)) for n in nodes}
     row_h = {r: max(size[n][1] for n in ns) for r, ns in layers.items()}
     width = max(sum(size[n][0] for n in ns) + HGAP * (len(ns) - 1)
                 for ns in layers.values())
 
-    geo, y = {}, 0
-    for r in sorted(layers):
-        row = layers[r]
-        span = sum(size[n][0] for n in row) + HGAP * (len(row) - 1)
-        x = (width - span) / 2                       # 每层居中,整体才是一根轴
-        for n in row:
-            w, h = size[n]
-            geo[n] = (_snap(x), _snap(y), w, h)
-            x += w + HGAP
-        y += row_h[r] + VGAP
+    geo = {}
+    cols = _columns(sorted(layers), row_h, width, rank, edges, back)
+    for ci, col in enumerate(cols):
+        x0, y = ci * (width + COLGAP), 0
+        for r in col:
+            row = layers[r]
+            span = sum(size[n][0] for n in row) + HGAP * (len(row) - 1)
+            x = x0 + (width - span) / 2              # 每层在本栏内居中,一栏就是一根轴
+            for n in row:
+                w, h = size[n]
+                geo[n] = (_snap(x), _snap(y + (row_h[r] - h) / 2), w, h)
+                x += w + HGAP
+            y += row_h[r] + VGAP
 
     out = ['<?xml version="1.0" encoding="UTF-8"?>',
            f'<mxfile host="drawio_layout.py">',
@@ -143,18 +230,48 @@ def build(graph):
            '      <root>', '        <mxCell id="0"/>',
            '        <mxCell id="1" parent="0"/>']
     for n in nodes:
-        style, _w, _h = KINDS.get(meta[n].get("kind", DEFAULT_KIND), KINDS[DEFAULT_KIND])
+        style = KINDS.get(meta[n].get("kind", DEFAULT_KIND), KINDS[DEFAULT_KIND])
         x, yy, w, h = geo[n]
         out.append(f'        <mxCell id={quoteattr(n)} value={quoteattr(meta[n]["label"])} '
                    f'style="{style}fontSize=12;" vertex="1" parent="1">'
                    f'<mxGeometry x="{x}" y="{yy}" width="{w}" height="{h}" as="geometry"/></mxCell>')
+    # 回边和换栏边:给显式转折点,让它们**沿着图的外缘绕**,别走直线。
+    #
+    # 上一版这两类边是直连的,drawio 的正交路由就让它们从图中间穿过去 —— 回边横穿两栏、
+    # 压着 maybe_compact 和 _chat 两个块。当时我在判官里给它们开了豁免,理由是
+    # 「换栏边天生又长又往上」。**理由对,结论错了:天生又长又往上的东西不该豁免,
+    # 该不让它走直线。** 判官只看两端坐标,看不见中间那段,所以豁免掉的正是它看不见的那部分。
+    #
+    # 绕法就是纸质流程图几十年的走法:先向下走到所有块底下,再横过去,再向上接进目标。
+    # 回边走最左边的外缘(左边一定是空的);换栏边走两栏之间那条 COLGAP 宽的空隙
+    # (那里按构造就没有块)。两段横走都在 ybot 上,那也在所有块底下。
+    ybot = max(g[1] + g[3] for g in geo.values()) + 40
+    xleft = min(g[0] for g in geo.values()) - 40
+    col_of = {n: ci for ci, col in enumerate(cols) for r in col for n in layers[r]}
+
+    def _detour(e, i):
+        s, t = geo[e["source"]], geo[e["target"]]
+        sx, tx = s[0] + s[2] / 2, t[0] + t[2] / 2
+        ty = t[1] + t[3] / 2
+        if i in back:                                    # 回边:绕最左边
+            via = xleft
+        elif col_of[e["target"]] != col_of[e["source"]]:  # 换栏:走栏间那条空隙
+            via = col_of[e["target"]] * (width + COLGAP) - COLGAP / 2
+        else:
+            return ""
+        pts = [(sx, ybot), (via, ybot), (via, ty)]
+        return ('<Array as="points">'
+                + "".join(f'<mxPoint x="{_snap(px)}" y="{_snap(py)}"/>' for px, py in pts)
+                + "</Array>")
+
     for i, e in enumerate(edges):
         dashed = "dashed=1;strokeColor=#D55E00;" if e.get("kind") == "exception" else ""
         out.append(f'        <mxCell id="e{i}" value={quoteattr(e.get("label", ""))} '
                    f'style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;{dashed}" '
                    f'edge="1" parent="1" source={quoteattr(e["source"])} '
                    f'target={quoteattr(e["target"])}>'
-                   f'<mxGeometry relative="1" as="geometry"/></mxCell>')
+                   f'<mxGeometry relative="1" as="geometry">{_detour(e, i)}'
+                   f'</mxGeometry></mxCell>')
     out += ['      </root>', '    </mxGraphModel>', '  </diagram>', '</mxfile>']
     return "\n".join(out)
 
