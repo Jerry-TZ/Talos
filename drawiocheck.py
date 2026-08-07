@@ -311,9 +311,13 @@ def check(path, expected_width_mm=None):
                         f" —— 相连的块要挨着放,别让线横跨整张图")
     # 12. 菱形 = 判定,判定必须有分支。只有一条出边的菱形是把「顺序执行的一步」
     # 画成了问号 —— 读者会停下来找另一条路,而根本没有。形状是有语义的,不是装饰。
+    # 数**不同的去处**,不是数边。两条同源同宿的平行边在图上重合成一条,肉眼看不见,
+    # 却把「≥2 条出边」满足了 —— 实测真发生过:`_is_correction` 那个菱形拉了
+    # 「是纠正」「非纠正」两条边,终点是同一个块。判定的意思是**分叉**,
+    # 两条通往同一处的线不是分叉,是同一条线写了两个标签。
     one_way = [_label(boxes[i]) for i in boxes
                if "rhombus" in (boxes[i].get("style") or "")
-               and sum(1 for e in edges if e.get("source") == i) < 2]
+               and len({e.get("target") for e in edges if e.get("source") == i}) < 2]
     if one_way:
         problems.append(f"菱形只有一条出边({len(one_way)} 个): {'、'.join(x[:18] for x in one_way[:3])}"
                         f" —— 菱形是判定,不分支就该画成方框")
@@ -426,6 +430,17 @@ def _selfcheck():
     assert any("断栏" in g for g in run(_TWOCOL.replace(_FOLD_EDGE, "", 1))), "删掉换栏边却没报断栏"
     assert any("跳着栏连" in g for g in run(_TWOCOL.replace("</root>", _JUMP_EDGE, 1))), \
         "跨两栏直连却没报"
+    # 菱形拉两条平行边到同一个块 —— 图上重合成一条,肉眼看不见,却把「≥2 条出边」
+    # 满足了。真发生过:`_is_correction` 那个菱形的「是纠正」「非纠正」终点是同一个块,
+    # 判官返回 []。所以数的是**不同的去处**,不是边的条数。
+    _par = ("<mxfile><diagram><mxGraphModel><root>"
+            '<mxCell id="0"/><mxCell id="1" parent="0"/>'
+            + _box("a", 40, 40, "#0072B2")
+            + _box("b", 40, 160, "#0072B2").replace("rounded=1;", "rhombus;")
+            + _box("c", 40, 280, "#E69F00")
+            + _edge("e1", "a", "b") + _edge("e2", "b", "c") + _edge("e3", "b", "c")
+            + _edge("e4", "c", "a") + "</root></mxGraphModel></diagram></mxfile>")
+    assert any("菱形只有一条出边" in g for g in run(_par)), f"平行边骗过了菱形规则: {run(_par)}"
     for want, (old, new) in _BAD.items():
         assert old in _GOOD, f"自检样本对不上: {old!r}"          # 改坏之前先确认改的是真东西
         got = run(_GOOD.replace(old, new, 1))
