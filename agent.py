@@ -1329,8 +1329,13 @@ def _chat(client, **kwargs):
             # "timed out" 是分开的一条:SDK 的 APITimeoutError 说的是 "Request timed out.",
             # 里面没有 "timeout" 这个词 —— 刚给客户端设完超时才发现,超时本身正好落在
             # 重试判据之外,一次就直接抛出去了。
+            # "connection" 是后补的一条,补的理由值得写下来:一轮任务做完、正要复盘时
+            # 掉了一次网,`APIConnectionError("Connection error.")` —— 这串里一个既有关键词
+            # 都不含,于是**不重试、直接抛**,整轮的复盘就没了(工作本身已经存盘,丢的是学习)。
+            # 断网比 429 更该重试:429 是对面忙,掉线常常下一秒就好。
             transient = (any(k in s for k in ("429", "rate limit", "ratelimit", "timeout",
-                        "timed out", "overload", "too many", "busy", "503", "502", "并发", "繁忙"))
+                        "timed out", "overload", "too many", "busy", "503", "502",
+                        "connection", "并发", "繁忙"))
                         or "用户多" in str(e))
             # 但超时跟"忙"不是一回事。忙是等一下就好;超时说明这次调用本来就要跑过
             # CHAT_TIMEOUT,重试三遍就是三遍注定失败 —— 默认 300s 下,一次失败要 15 分钟

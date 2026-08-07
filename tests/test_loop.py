@@ -178,6 +178,15 @@ def test_chat_retries_on_busy(monkeypatch):
     with pytest.raises(Exception):
         A._chat(_Client([Exception("invalid api key 401")]))     # 非瞬时错误 -> 直接抛
 
+def test_a_dropped_connection_is_retried_not_raised(monkeypatch):
+    """真实丢过一次复盘:任务做完、正要复盘时掉网,SDK 抛 `APIConnectionError("Connection error.")`。
+    那串里一个既有的瞬时关键词都不含 —— 没有 429、没有 timeout、没有 busy —— 于是一次就抛了出去,
+    复盘那一轮整个没了。掉线比"对面忙"更该重试:429 要等对方缓过来,掉线常常下一秒就通。"""
+    import agent as A
+    monkeypatch.setattr(A.time, "sleep", lambda *a: None)
+    monkeypatch.setattr(A, "ui", _ui())
+    assert A._chat(_Client([Exception("Connection error."), "OK"])) == "OK"
+
 def test_a_long_turn_prunes_inside_the_loop(ws, monkeypatch):
     """两道上下文护栏原来只在 REPL 每轮末尾跑,而那次是死在**一轮之内**:六十来次工具调用,
     历史涨过窗口,400 Prompt exceeds max length,整轮白做。MAX_STEPS 守的是空转,守不了
