@@ -22,6 +22,14 @@
    也没有孤立块。**「画成一条边」和「在某个块的文字里提一嘴」必须分得开**;
 7. 每个块的文字 <= MAX_LABEL 字符,且边不许走斜线(要 orthogonalEdgeStyle)。
    字数上限治的是同一个毛病:把说明塞进块里,图就退化成了排版过的段落。
+
+上面七条**全是禁令**,而禁令有一个平凡最优解:什么都别画。头一版只有它们,
+拿回来的是 15 个一模一样的无填充灰框排成两列、20 条线对穿 —— 七条一条没绕,
+图却比之前更难看。所以后面三条是**正向要求**:
+
+9.  向上走的边 <= MAX_BACK_EDGES 条(流程图里往上的边就该只有循环回边那一条);
+10. 每条边两端中心距 <= MAX_EDGE_LEN —— 相连的块要挨着,别让线横跨整张图;
+11. 全图至少 MIN_FILLS 种填充色 —— 一种颜色 = 没有视觉层次,判定和普通步骤分不开。
 """
 import json
 import re
@@ -33,6 +41,9 @@ MAX_SIZES = 3             # 允许几种不同的块尺寸
 MIN_FONTSIZE = 10.0
 MAX_LABEL = 42            # 一个块里最多几个字符(中文按 1 个算)
 MM_PER_PX = 25.4 / 96     # drawio 的坐标单位是 CSS px,96dpi
+MAX_BACK_EDGES = 1        # 向上走的边最多几条(流程图里那就是循环回边)
+MAX_EDGE_LEN = 400.0      # 一条边两端中心的距离上限(px)
+MIN_FILLS = 2             # 全图至少用到几种填充色
 
 # Wong 2011 色盲安全配色 + 中性色。大小写不敏感。
 PALETTE = {
@@ -148,6 +159,40 @@ def check(path, expected_width_mm=None):
         if _style(e).get("edgeStyle") != "orthogonalEdgeStyle":
             problems.append(f"边 {e.get('id')} 不是正交走线(要 edgeStyle=orthogonalEdgeStyle)")
 
+    # 9~11. 正向要求 —— 上面 1~8 全是**禁令**,而禁令有一个平凡最优解:什么都别画。
+    # 头一版只有禁令,结果拿回来的是 15 个一模一样的无填充灰框排成两列、20 条线对穿:
+    # 尺寸种类=1 ✅、fillColor 全是 none(而 none 在白名单里)✅、x 只有两个值所以对齐 ✅、
+    # 文字全砍成四个字 ✅ —— 七条一条没绕,图比之前更难看。
+    # **「不许难看」和「要好看」不是同一件事,前者的最优解是空白。** 所以这三条是正向的。
+    def _center(i):
+        x, y, w, h = geos[i]
+        return x + w / 2, y + h / 2
+
+    back, longest = 0, []
+    for e in edges:
+        s, t = e.get("source"), e.get("target")
+        if s not in geos or t not in geos or not geos[s] or not geos[t]:
+            continue
+        (x1, y1), (x2, y2) = _center(s), _center(t)
+        if y2 < y1 - 1:                       # 终点在起点上方 = 往回走
+            back += 1
+        d = ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+        if d > MAX_EDGE_LEN:
+            longest.append(f"{_label(boxes[s])!r}→{_label(boxes[t])!r} {d:.0f}px")
+    # 9. 往上走的边就是回边。流程图只该有回边一条往上;更多说明块的摆放没跟着流程走。
+    if back > MAX_BACK_EDGES:
+        problems.append(f"向上的边有 {back} 条(上限 {MAX_BACK_EDGES})—— "
+                        f"块的上下顺序没跟着流程走,读者得来回跳")
+    # 10. 有边相连的块必须挨着。两列格子 + 长线对穿正是这条抓的。
+    if longest:
+        problems.append(f"边太长({len(longest)} 条 > {MAX_EDGE_LEN:.0f}px): {'; '.join(longest[:3])}"
+                        f" —— 相连的块要挨着放,别让线横跨整张图")
+    # 11. 全图一种填充 = 没有视觉层次。判定、普通步骤、终止至少要能一眼分开。
+    fills = {(_style(c).get("fillColor") or "none").strip().lower() for c in boxes.values()}
+    if len(fills) < MIN_FILLS:
+        problems.append(f"全图只有 {len(fills)} 种填充({fills})—— "
+                        f"至少 {MIN_FILLS} 种,判定/普通步骤/终止要能一眼分开")
+
     # 8. 图宽(给了才查)
     if expected_width_mm is not None and ids:
         right = max(geos[i][0] + geos[i][2] for i in ids)
@@ -164,21 +209,32 @@ _GOOD = """<mxfile><diagram><mxGraphModel><root>
 <mxCell id="0"/><mxCell id="1" parent="0"/>
 <mxCell id="a" value="开始" style="rounded=1;fillColor=#0072B2;fontSize=12;" vertex="1" parent="1">
   <mxGeometry x="40" y="40" width="160" height="60" as="geometry"/></mxCell>
-<mxCell id="b" value="结束" style="rounded=1;fillColor=#E69F00;fontSize=12;" vertex="1" parent="1">
+<mxCell id="b" value="干活" style="rounded=1;fillColor=#0072B2;fontSize=12;" vertex="1" parent="1">
   <mxGeometry x="40" y="160" width="160" height="60" as="geometry"/></mxCell>
+<mxCell id="c" value="结束" style="rounded=1;fillColor=#E69F00;fontSize=12;" vertex="1" parent="1">
+  <mxGeometry x="40" y="280" width="160" height="60" as="geometry"/></mxCell>
 <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="a" target="b">
   <mxGeometry relative="1" as="geometry"/></mxCell>
+<mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="b" target="c">
+  <mxGeometry relative="1" as="geometry"/></mxCell>
+<mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="c" target="a">
+  <mxGeometry relative="1" as="geometry"/></mxCell>
 </root></mxGraphModel></diagram></mxfile>"""
+# 三个块一条链 + 一条回边 —— 这就是「向上的边只该有回边那一条」的合法形状,
+# 干净样本必须长成真流程图的样子,否则正向那三条根本没有能通过的基准。
 
 _BAD = {
     "块重叠": ('y="160"', 'y="80"'),
     "没对齐网格": ('x="40" y="40"', 'x="43" y="40"'),
     "配色不在白名单": ('fillColor=#0072B2', 'fillColor=#FF00FF'),
-    "字号过小": ('fontSize=12;" vertex="1" parent="1">\n  <mxGeometry x="40" y="40"',
-                 'fontSize=6;" vertex="1" parent="1">\n  <mxGeometry x="40" y="40"'),
+    "字号过小": ('fontSize=12;', 'fontSize=6;'),
     "块里文字过长": ('value="开始"', 'value="' + "很长的说明" * 12 + '"'),
     "不是正交走线": ('edgeStyle=orthogonalEdgeStyle;', 'edgeStyle=elbowEdgeStyle;'),
     "缺 source/target": ('source="a" target="b"', 'source="a"'),
+    # 三条正向要求各自的坏法
+    "向上的边": ('source="a" target="b"', 'source="b" target="a"'),   # 回边之外又多一条往上
+    "边太长": ('y="280"', 'y="960"'),
+    "只有 1 种填充": ('fillColor=#E69F00', 'fillColor=#0072B2'),
 }
 
 
