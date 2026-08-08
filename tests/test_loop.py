@@ -533,3 +533,15 @@ def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
     # 跑脚本不算读:同一个文件被执行多少次都不该拦(判官就是这么反复跑的)
     for _ in range(A.READ_LIMIT * 2):
         assert A._read_guard(seen, "run_bash", {"command": f"python {p} arg"}, "跑完了") == "跑完了"
+    # 一条命令里同一个文件出现两种拼法,只能算**一次**读。`_targets` 对一条命令既返回短名
+    # (`_FILENAME`)又返回整条路径(`_TOKEN`),而计数曾经是在拼法上循环的 —— 一条命令加 2,
+    # 第 3 次就被拦下,而消息里写着"本轮已读 6 次"(数字和事实对不上,这是它露出来的马脚)。
+    # 用两个**相对**拼法,不碰盘符:上面那个绝对路径的写法在 Windows+py3.10 上侥幸不红
+    # (`_TOKEN` 吃不下 `C:`,3.10 又把 `\a\b.py` 当绝对路径解析到当前盘,两个键分属不同盘符),
+    # 而 CI 的另外三格全红。判据要在四格上都成立,就不能依赖盘符。
+    seen7 = {}
+    open(os.path.join(A.WORKSPACE, "twice.py"), "w", encoding="utf-8").write("x = 1\n")
+    for _ in range(A.READ_LIMIT - 1):
+        assert A._read_guard(seen7, "run_bash", {"command": "type ./twice.py"}, "片段") == "片段"
+    assert len(seen7) == 1, f"同一个文件被记成了 {len(seen7)} 个键"
+    assert sum(seen7.values()) == A.READ_LIMIT - 1, "一条命令把同一个文件数了不止一次"

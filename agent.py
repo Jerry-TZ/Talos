@@ -1487,9 +1487,20 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
                  and (os.path.exists(p) or os.path.exists(os.path.join(WORKSPACE, p)))}
     else:
         return out                     # 跑脚本、写文件、编辑 —— 都不是"读同一个文件"
-    hot, n = "", 0
+    # 一条命令里同一个文件会出现**两个拼法**:`_targets` 既给短名(`_FILENAME`),又给整条
+    # 路径(`_TOKEN`)。`_read_key` 把这些拼法收敛到同一个键 —— 可计数是在**拼法**上循环的,
+    # 于是一条命令加 2:守卫在第 3 次就把人拦住,嘴里还说着"本轮已读 6 次"。
+    # **去重必须发生在键上,不是在拼法上** —— 这正是 `_read_key` 存在的理由,而我只把它用在
+    # 查表上,没用在这一步。
+    # 为什么本机测不出来:`_TOKEN` 的字符类里没有 `:`,`C:\a\b.py` 被切成 `\a\b.py`;而
+    # py3.10 的 `ntpath.isabs` 认为单个反斜杠开头就算绝对路径 —— 它被解析到**当前盘**,
+    # 两个键正好落在不同盘符上,各算一次,侥幸对了。py3.13 改了 `isabs`(单斜杠不再算绝对),
+    # POSIX 上两个拼法本来就同键 —— CI 四格红三格,唯一绿的正是我本机那格。
+    first = {}
     for p in sorted(paths):                    # sorted:两个都超限时,消息里点哪个得是确定的
-        key = _read_key(p)
+        first.setdefault(_read_key(p), p)
+    hot, n = "", 0
+    for key, p in sorted(first.items()):
         seen[key] = seen.get(key, 0) + 1
         # 整本翻两遍还没找到要的东西,那就不是在读,是在打转。
         if seen[key] >= max(READ_LIMIT, 2 * _pages(p)) and seen[key] > n:
