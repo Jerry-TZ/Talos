@@ -307,6 +307,12 @@ def _selfcheck():
 
 
 if __name__ == "__main__":
+    # 同 drawiocheck:输出全是中文,Windows 控制台默认编码装不下,会在打印那一行炸掉。
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     if "--selfcheck" in sys.argv:
         _selfcheck()
         raise SystemExit(0)

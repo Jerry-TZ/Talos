@@ -457,6 +457,15 @@ def _selfcheck():
 
 
 if __name__ == "__main__":
+    # 判官的每一句都是中文,而 Windows 控制台默认不是 UTF-8 —— 不改这里,脚本会在
+    # **打印结论的那一行**炸 UnicodeEncodeError,退出码 1。于是「图有问题」和「打印不出来」
+    # 长得一模一样,而后者跟图无关。stderr 也要:排版那一拨意见就写在 stderr 上。
+    # (抄 agent.py:2141 的同一手,别新发明。CI 的 windows 两格就是这么红的。)
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     if "--selfcheck" in sys.argv:
         _selfcheck()
         raise SystemExit(0)
