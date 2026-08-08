@@ -24,3 +24,9 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-dev.txt
       - run: python -m pytest tests/ -q
       - run: python agent.py --selfcheck
+      # 这两个脚本 802 行,`tests/` 一行都没碰过它们 —— 唯一的验证就是它们自己的
+      # `--selfcheck`,而在这之前那只在我本机、只在 win/py3.10 上跑过。同一天里
+      # 一个只在那一格绿的 bug 刚溜进 main(见 FINDINGS 二十六节尾声),
+      # **凡是只在我本机跑过的判据,都要当成没跑过。**
+      - run: python drawiocheck.py --selfcheck
+      - run: python drawio_layout.py --selfcheck
