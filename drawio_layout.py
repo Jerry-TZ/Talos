@@ -298,6 +298,64 @@ def _selfcheck():
     probs = drawiocheck.check(p)
     assert probs == [], f"自己排的版没过自己的判官: {probs}"
 
+    # 第二个样本:**故意难排**。上面那个 6 块的太软 —— 实测把 GRID / VGAP / HGAP /
+    # COLGAP / MAX_ASPECT / BARYCENTER_ROUNDS / PAD / LINE_H 这些旋钮随便拧,判官
+    # 一声不吭(9 个里 8 个没反应)。原因是它只有 4 层、标签全是两三个字的单行:
+    # `_fit` 永远停在第一档、`_snap` 永远无事可做、`_columns` 永远不用折栏、
+    # 层内最多 2 个块所以没有交叉可减。**样本软的时候,后面所有断言都是摆设。**
+    # 所以这一个要同时满足:标签长到要折行(逼出 _fit/_snap/PAD/LINE_H)、层数多到
+    # 必须折栏(逼出 _columns/COLGAP/MAX_ASPECT)、某一层三个块且边会交叉(逼出重心排序)。
+    # 标签必须长到**最宽那一档也放不下**才会折行。14 个汉字不行 —— `_fit` 加宽到 280
+    # 就收了,块高永远是 50,于是 `_snap`/`PAD`/`LINE_H` 一条都走不到。
+    # 这里量过:29 字 = 343px,而三档可用 360-16=344px —— **差 1px 就放下了**,
+    # 于是"长标签"是假的。要 33 字以上才真折行;又得留在 MAX_LABEL=42 以内,
+    # 否则红的是「文字过长」而不是折行。这一档的余量很窄,改标签时重跑一遍旋钮灵敏度。
+    _L = "这一步要做的事情说明得长到必须折成两行才放得进去否则测不到折"   # 30 字,加前缀 33~34
+    hard = {"title": "hard", "nodes": [
+        {"id": "n0", "label": "开始:" + _L, "kind": "start"},
+        {"id": "n1", "label": "第一步 " + _L},
+        {"id": "g1", "label": "条件甲成立吗?", "kind": "gate"},
+        {"id": "p1", "label": "分支一 " + _L}, {"id": "p2", "label": "分支二"},
+        {"id": "p3", "label": "分支三 " + _L},
+        {"id": "m1", "label": "汇合 " + _L}, {"id": "m2", "label": "汇合之后再算一遍"},
+        {"id": "n2", "label": "第二步"}, {"id": "n3", "label": "第三步 " + _L},
+        {"id": "n4", "label": "第四步"}, {"id": "n5", "label": "第五步 " + _L},
+        {"id": "n6", "label": "第六步"}, {"id": "n7", "label": "第七步 " + _L},
+        {"id": "t", "label": "结束", "kind": "terminal"},
+        {"id": "x", "label": "出错中止", "kind": "terminal"}],
+        "edges": [
+        {"source": "n0", "target": "n1"}, {"source": "n1", "target": "g1"},
+        # 三条分支 + 交叉的汇合(p1→m2、p3→m1):不减交叉就会拧成麻花
+        {"source": "g1", "target": "p1", "label": "是"},
+        {"source": "g1", "target": "p2", "label": "否"},
+        {"source": "g1", "target": "p3", "label": "其他"},
+        {"source": "p1", "target": "m2"}, {"source": "p2", "target": "m1"},
+        {"source": "p3", "target": "m1"}, {"source": "p2", "target": "m2"},
+        {"source": "m1", "target": "n2"}, {"source": "m2", "target": "n2"},
+        {"source": "n2", "target": "n3"}, {"source": "n3", "target": "n4"},
+        {"source": "n4", "target": "n5"}, {"source": "n5", "target": "n6"},
+        {"source": "n6", "target": "n7"}, {"source": "n7", "target": "t"},
+        {"source": "t", "target": "n1", "label": "回边"},
+        {"source": "n3", "target": "x", "label": "Exception", "kind": "exception"}]}
+    ph = os.path.join(d, "hard.drawio")
+    open(ph, "w", encoding="utf-8").write(build(hard))
+    probs = drawiocheck.check(ph)
+    assert probs == [], f"难排的样本没过判官: {probs}"
+
+    # 第三个样本:**又高又窄**。上面那个有三条分支,横向被撑到 880px,比例才 1.45 ——
+    # 它永远不需要折栏,于是 COLGAP / MAX_ASPECT / `_columns` 整条路走不到。
+    # 折栏只有在「高得放不下」时才发生,所以这里要的是一根没有分支的长链。
+    tall = {"title": "tall",
+            "nodes": [{"id": "c0", "label": "开始", "kind": "start"}]
+                     + [{"id": f"c{i}", "label": f"第 {i} 步"} for i in range(1, 13)]
+                     + [{"id": "ct", "label": "结束", "kind": "terminal"}],
+            "edges": [{"source": f"c{i}", "target": f"c{i + 1}"} for i in range(12)]
+                     + [{"source": "c12", "target": "ct"}]}
+    pt = os.path.join(d, "tall.drawio")
+    open(pt, "w", encoding="utf-8").write(build(tall))
+    probs = drawiocheck.check(pt)
+    assert probs == [], f"长链样本没过判官(它必须折栏才放得下): {probs}"
+
     # 反向:回边确实被认出来了(否则秩会算错,图就摊平成一条链)
     back = _back_edges([n["id"] for n in g["nodes"]], g["edges"])
     assert len(back) == 1, f"回边应恰好 1 条,实际 {back}"

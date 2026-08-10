@@ -102,6 +102,65 @@ def test_every_rule_in_drawiocheck_has_a_case_that_dies_without_it():
         + "\n  ".join(survivors))
 
 
+# ── 排版那一侧:旋钮拧了,判官得有反应 ────────────────────────────────────────
+# drawiocheck 的规则是**语句**,摘掉就行;drawio_layout 没有"规则"这种东西,它的
+# 行为藏在一组常数里。所以这边换个测法:把常数拧到一个错值,自检必须红。
+# 不用改源码 —— 这些常数是模块全局,函数在调用时才查,`setattr` 就够了。
+_KNOBS = {"GRID": 5, "VGAP": 20, "HGAP": 20, "COLGAP": 40, "MAX_ASPECT": 99.0,
+          "BARYCENTER_ROUNDS": 0, "WIDTHS": (207, 287, 367), "PAD": 3, "LINE_H": 5}
+
+# **判官没有对应规则的旋钮。** 这不是"样本还不够狠",硬把样本拧到能红是在造假绿,
+# 所以写下来锁住:少一条是回归,多一条说明判官变强了,两种都该被这条测试拦下来问一句。
+_BLIND = {
+    "HGAP": "判官没有「同层块之间最小间距」这条规则 —— 任何样本都测不出来",
+    "COLGAP": "栏距缩到 COL_GAP_MIN 以下时,判官认不出这是两栏,分栏那几条规则跟着一起"
+              "失效(而不是报错)。**这是判官的设计缺口,不是样本的**:一条规则在输入退化时"
+              "静默消失,比它不存在更糟",
+    "PAD": "它只改 `_fit` 算出的行数,而判官用自己的 PAD 重算一遍 —— 两边同时变,差不出来",
+    "LINE_H": "同上。判官的「文字竖着放不下」要 3 行才触发,而这些标签在判官眼里是 2 行,"
+              "余量吃不掉这个差",
+}
+
+
+def _knob_sweep():
+    """返回 {旋钮: 自检有没有注意到}。"""
+    import contextlib, importlib, io as _io
+    out = {}
+    for name, bad in _KNOBS.items():
+        for m in ("drawio_layout", "drawiocheck"):
+            sys.modules.pop(m, None)
+        sys.path.insert(0, HERE)
+        layout = importlib.import_module("drawio_layout")
+        setattr(layout, name, bad)
+        try:
+            with contextlib.redirect_stdout(_io.StringIO()):
+                layout._selfcheck()
+            out[name] = False
+        except AssertionError:
+            out[name] = True
+        finally:
+            for m in ("drawio_layout", "drawiocheck"):
+                sys.modules.pop(m, None)
+    return out
+
+
+def test_the_layout_sample_is_hard_enough_to_notice_its_own_knobs():
+    """排版的自检样本必须难到:任何一个旋钮拧错,判官都会叫。
+
+    原来那个 6 块样本 9 个旋钮里 8 个没反应 —— 只有 4 层、标签全是两三个字的单行,
+    `_fit` 永远停在第一档、`_snap` 永远无事可做、`_columns` 永远不用折栏、
+    层内最多 2 个块所以没有交叉可减。**样本软的时候,后面所有断言都是摆设。**
+    加了「会折行的长标签」和「又高又窄的长链」两个样本之后是 5/9,剩下四个见 `_BLIND`。"""
+    got = _knob_sweep()
+    blind = {k for k, noticed in got.items() if not noticed}
+    assert blind == set(_BLIND), (
+        f"盲区变了。现在盲的: {sorted(blind)};记录在案的: {sorted(_BLIND)}\n"
+        f"  多出来的 = 回归(样本变软了);少掉的 = 判官变强了,把它从 _BLIND 里删掉")
+
+
 if __name__ == "__main__":                      # 直接跑给人看:python tests/test_mutation.py
     for name, still_green in _sweep("drawiocheck.py"):
         print(f"  {'NO CASE ' if still_green else 'covered '} {name}")
+    print()
+    for name, noticed in _knob_sweep().items():
+        print(f"  {'覆盖   ' if noticed else '盲区   '} {name:20s} {_BLIND.get(name, '')[:52]}")
