@@ -192,6 +192,7 @@ def _columns(ranks, row_h, col_w, rank, edges, back):
 # 完全合法 —— 模型从别处粘一段说明进来就可能带上。判官那时只能回一句
 # 「读不了 …: not well-formed」,连是哪个标签都指不出来。**在写出去之前就拦掉。**
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+MAX_NODES = 60            # 再多就既排不快也读不懂 —— 见 build() 里那段
 
 
 def build(graph):
@@ -204,6 +205,16 @@ def build(graph):
         if not isinstance(n, dict) or not n.get("id"):
             raise ValueError(f"第 {i + 1} 个块没有 id —— 每个块都要有 id 和 label")
     nodes = [n["id"] for n in graph["nodes"]]
+    if len(nodes) > MAX_NODES:
+        # **不优化,划边界。** 两个已知的规模问题都在这条线外面:`_columns` 枚举切点是
+        # O(R³·(R+E)),实测 50 块 0.5s / 100 块 7.9s / 200 块 122s / 300 块跑不完;
+        # `_back_edges` 的 DFS 是递归的,998 块直链 RecursionError。
+        # 但**一张要给人看的流程图,60 个块已经远超能读的极限**(判官那条
+        # 「缩到 183mm 后最窄的块不能小于 12mm」比这管得还严)。与其为一个不该出现的
+        # 输入去改算法,不如让它当场说清楚 —— 卡死十分钟和崩一个调用栈,
+        # 都是"没告诉你该怎么办"的同一种毛病。
+        raise ValueError(f"{len(nodes)} 个块,超过上限 {MAX_NODES} —— 一张给人看的流程图放不下"
+                         "这么多。拆成几张分图,或者把细节收进一个块的说明里。")
     if len(set(nodes)) != len(nodes):
         # 原来 meta 按 id 去重、nodes 不去重:重复 id 的块**静默丢掉一个的标签**,
         # 而且产出两个同 id 同坐标的 mxCell —— mxGraphModel 的 id 是主键,那是个非法模型。
@@ -385,6 +396,16 @@ def _selfcheck():
     open(pt, "w", encoding="utf-8").write(build(tall))
     probs = drawiocheck.check(pt)
     assert probs == [], f"长链样本没过判官(它必须折栏才放得下): {probs}"
+
+    # 规模上限:超了要**当场说清楚**,不是排上十分钟、也不是崩个 RecursionError。
+    huge = {"title": "huge",
+            "nodes": [{"id": f"z{i}", "label": f"第 {i} 步"} for i in range(MAX_NODES + 1)],
+            "edges": [{"source": f"z{i}", "target": f"z{i + 1}"} for i in range(MAX_NODES)]}
+    try:
+        build(huge)
+        raise AssertionError(f"{MAX_NODES + 1} 个块没被拦下 —— 上限失效了")
+    except ValueError as exc:
+        assert "超过上限" in str(exc), f"拦是拦了,话说得不对: {exc}"
 
     # 反向:回边确实被认出来了(否则秩会算错,图就摊平成一条链)
     back = _back_edges([n["id"] for n in g["nodes"]], g["edges"])
