@@ -545,3 +545,56 @@ def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
         assert A._read_guard(seen7, "run_bash", {"command": "type ./twice.py"}, "片段") == "片段"
     assert len(seen7) == 1, f"同一个文件被记成了 {len(seen7)} 个键"
     assert sum(seen7.values()) == A.READ_LIMIT - 1, "一条命令把同一个文件数了不止一次"
+
+
+def test_a_broken_guard_must_not_take_the_whole_turn_down(ws, monkeypatch):
+    """两条守卫跑在 `run_tool` 的 try/except **外面**,所以它们抛什么都直接冲出 agent_turn。
+    实测:路径里带 `\x00` 的 read_file —— `os.stat`/`open` 抛的是 `ValueError`,而
+    `_read_key` 只 `except OSError`,接不住。与其追每一种可能的异常,不如认下这件事:
+    **守卫是省钱的,不是干活的;它自己坏了就别守,不该拦下整轮的活。**"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("正常结果", False))
+    script = [_msg(tool_calls=[_tc("read_file", '{"path":"a\u0000b.py"}', cid="c0")]),
+              _msg(content="done")]
+    messages = [{"role": "user", "content": "读它"}]
+    assert A.agent_turn(_Client(script), "m", messages,
+                        {"mode": "bypass", "allow": set()}) == "done"
+    assert [m["content"] for m in messages if m.get("role") == "tool"] == ["正常结果"]
+    # 兜的是**调用点**,不是某一条守卫的内部 —— 所以两条守卫抛什么类型都得接住。
+    # 断言必须走 agent_turn:直接调 `_read_guard` 测不到接线,而接线正是这条修的东西。
+    for victim in ("_read_guard", "_repeat_guard"):
+        with monkeypatch.context() as m:
+            m.setattr(A, "ui", _ui())
+            m.setattr(A, "run_tool", lambda name, args: ("正常结果", False))
+            m.setattr(A, victim, lambda *a, **k: (_ for _ in ()).throw(RuntimeError("守卫坏了")))
+            msgs = [{"role": "user", "content": "读它"}]
+            assert A.agent_turn(_Client([_msg(tool_calls=[_tc("read_file", '{"path":"v.py"}')]),
+                                         _msg(content="done")]),
+                                "m", msgs, {"mode": "bypass", "allow": set()}) == "done", \
+                f"{victim} 抛异常时整轮被带走了"
+            assert [m2["content"] for m2 in msgs if m2.get("role") == "tool"] == ["正常结果"]
+
+
+def test_pages_does_not_slurp_the_whole_file(ws, monkeypatch):
+    """`read_file` 拒绝超大文件时,建议的正是「用 run_bash 的 more/findstr 截取」—— 那条
+    命令回头就落进 `_read_guard` → `_pages`。所以这条路径**专门服务于大文件**,而它原来
+    `f.read()` 整个吞下去。一道用来省 token 的闸,不该是全程序里内存峰值最高的地方。"""
+    import agent as A, os, tracemalloc
+    big = os.path.join(A.WORKSPACE, "huge.log")
+    with open(big, "wb") as f:
+        for _ in range(40):
+            f.write(b"x" * (1 << 20) + b"\n")            # 40MB,超过 READ_MAX_BYTES
+    tracemalloc.start()
+    pages = A._pages(big)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 4 << 20, f"_pages 峰值 {peak} 字节 —— 整个文件被吞进内存了"
+    assert pages >= 1
+    # 而且没到上限时根本不该去读文件:前几次调用一次 _pages 都不许发生
+    calls = []
+    monkeypatch.setattr(A, "_pages", lambda p: calls.append(p) or 1)
+    seen = {}
+    for _ in range(A.READ_LIMIT - 1):
+        A._read_guard(seen, "read_file", {"path": big}, "内容")
+    assert calls == [], f"没到上限就扫了 {len(calls)} 遍文件"

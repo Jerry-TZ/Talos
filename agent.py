@@ -341,23 +341,30 @@ _SECRET_NAMES = {".env", ".netrc", "_netrc", "credentials", "id_rsa", "id_dsa", 
                  "id_ed25519", ".npmrc", ".pypirc", ".git-credentials", "secrets.json"}
 _SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".docker"}
 # 按**词干**挡,不按整名 —— `credentials.json`、`token.json`、`client_secret_1234.json`、
-# `secrets.yml` 都是 gcloud / Firebase / Google API 的出厂文件名。旧判据是整名相等,
-# 于是只有字面量 `secrets.json` 被挡住,其余全放行;只读一放开,它们立刻都在射程内。
-# 误伤一个叫 token.py 的普通文件,代价是一次「读不了」;漏掉一个,代价是 key 进上下文
-# 和明文会话日志。**这道闸只该往严了写。**
+# `secrets.yml` 都是 gcloud / Firebase / Google API 的出厂文件名。整名相等的旧判据只挡得住
+# 字面量 `secrets.json`,其余全放行;而只读一放开到 HOME,它们立刻都进了射程。
+#
+# **但这条只管放开的那一侧(HOME 下的只读),不是全局的。** 上一版把它并进 `_is_secret_path`、
+# 摆在 workspace 分支之前 —— 于是它连**写**都挡住了:`tokens.json`、`api_keys.py`、
+# `secret_santa.md` 在工作区里建不出来,而且 `archive_workspace()` 会**静默跳过**它们 ——
+# 备份里没有,也不报错。我当初给误伤定的价是「一次读不了」,实际是**文件建不出来、
+# 而且没有备份**。词干匹配是启发式的,而启发式只该管它被引入时要管的那一片。
 _SECRET_STEMS = ("credential", "secret", "token", "client_secret", "service-account",
                  "service_account", "serviceaccount", "apikey", "api_key", "keyfile", "keystore")
 
 def _is_secret_path(full: str) -> bool:
+    """严格闸:整名 + 目录名。**任何路径都要过这一道**,工作区里的也不例外。"""
     base = os.path.basename(full).lower()
     if base in _SECRET_NAMES or base.startswith(".env."):
         return True
-    stem = os.path.splitext(base)[0]
-    if any(stem == s or stem.startswith(s + "_") or stem.startswith(s + "-")
-           or stem.startswith(s + "s") for s in _SECRET_STEMS):
-        return True
     parts = {p.lower() for p in full.replace("/", os.sep).split(os.sep)}
     return bool(parts & _SECRET_DIRS)
+
+def _looks_like_secret(full: str) -> bool:
+    """词干闸:启发式,**只用在 HOME 下那条只读放开的支路上**。理由见上面那段注释。"""
+    stem = os.path.splitext(os.path.basename(full).lower())[0]
+    return any(stem == s or stem.startswith(s + "_") or stem.startswith(s + "-")
+               or stem.startswith(s + "s") for s in _SECRET_STEMS)
 
 def _strip_workspace_prefix(path: str) -> str:
     """`workspace/data/x.csv`, typed while already standing in workspace/.
@@ -426,6 +433,12 @@ def _in_workspace(path: str, for_read: bool = False) -> str:
         return full
     if (for_read and _under(full, HOME) and full.lower().endswith(_READABLE_EXT)
             and not (set(os.path.relpath(full, HOME).lower().split(os.sep)) & _NO_READ_DIRS)):
+        # 词干闸只挡在这一支上:放开的是 HOME,里面躺着 gcloud/Firebase 的出厂文件名。
+        # 工作区里同名的文件是模型自己建的,不该被这条启发式误伤(见 `_looks_like_secret`)。
+        if _looks_like_secret(full):
+            raise ValueError(f"拒绝访问 {path}:文件名像凭据(credentials/token/secret/key 这类)。"
+                             "项目源码可以只读,凭据不行 —— 读到的内容会进模型上下文和明文会话日志。"
+                             "确实要处理它,把它复制进工作区再操作。")
         return full
     raise ValueError(f"越界:{path} 不在工作目录内({WORKSPACE})"
                      + ("" if for_read else ";只读的话可以直接 read_file 项目源码"))
@@ -1430,11 +1443,22 @@ def _pages(p: str) -> int:
     挖的坑:同一天里我先把 `read_file` 放开到能读 `agent.py`(2118 行),又用一个
     定死 6 次的闸把它堵回去,而按 READ_MAX_LINES=250 分页,翻完一遍就要 9 次。
     结果模型在第 6 次被拦下,只好退回去 run_bash 切片、派子 agent —— **正是这条守卫
-    要治的那个行为,被这条守卫自己逼出来了。**"""
+    要治的那个行为,被这条守卫自己逼出来了。**
+
+    **分块读,不 `f.read()` 整个文件。** 原来那一版把整份文件吞进内存,而 `read_file` 拒绝
+    超过 `READ_MAX_BYTES` 的文件时,给的建议正是「用 run_bash 里的 more / findstr 截取」——
+    那条命令回头就落进 `_read_guard` → 这里。于是**这条路径专门服务于大文件**:实测一个
+    30MB 的日志,一次 `findstr` 就分配了 3100 万字节;2GB 的日志就是 MemoryError。
+    一道用来省 token 的闸,不该是全程序里内存峰值最高的地方。"""
     try:
         base = p if os.path.isabs(p) else os.path.join(WORKSPACE, p)
+        n, read = 0, 0
         with open(base, "rb") as f:
-            return max(1, -(-f.read().count(b"\n") // READ_MAX_LINES))
+            while chunk := f.read(1 << 20):          # 峰值 1MB,跟文件多大无关
+                n, read = n + chunk.count(b"\n"), read + len(chunk)
+                if read >= READ_MAX_BYTES:
+                    break                            # 比这还大的,read_file 本来就不给读
+        return max(1, -(-n // READ_MAX_LINES))
     except OSError:
         return 1
 
@@ -1503,7 +1527,11 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
     for key, p in sorted(first.items()):
         seen[key] = seen.get(key, 0) + 1
         # 整本翻两遍还没找到要的东西,那就不是在读,是在打转。
-        if seen[key] >= max(READ_LIMIT, 2 * _pages(p)) and seen[key] > n:
+        # `seen[key] >= READ_LIMIT` 这一半是白给的(右边的 max 至少是 READ_LIMIT),写出来
+        # 是为了**短路掉 `_pages`** —— 否则前五次每次都要把文件从头扫一遍,而这条守卫
+        # 恰恰是大文件才会走到的路。
+        if (seen[key] >= READ_LIMIT and seen[key] >= max(READ_LIMIT, 2 * _pages(p))
+                and seen[key] > n):
             hot, n = p, seen[key]
     if not hot:
         return out
@@ -1631,9 +1659,17 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
                 if view != "quiet":
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
             state["trace"].append({"tool": name, "error": is_error, "denied": not allowed})
-            messages.append({"role": "tool", "tool_call_id": c.id,
-                             "content": _read_guard(repeat, name, args,
-                                                    _repeat_guard(repeat, name, args, out))})
+            # 两条守卫是**省钱**的,不是干活的 —— 它们自己出问题,不该把整轮的活带走。
+            # `run_tool` 把工具抛的异常转成 `error:` 交回模型,而守卫跑在 `run_tool` **外面**,
+            # 所以它抛什么都直接冲出 `agent_turn`:实测一个路径里带 `\x00` 的 read_file 就够了 ——
+            # `os.stat`/`open` 抛的是 `ValueError` 而不是 `OSError`,`_read_key` 的 `except OSError`
+            # 接不住。与其去追每一种可能的异常类型,不如认下这件事:**守卫失败 = 不守,别拦活。**
+            try:
+                guarded = _read_guard(repeat, name, args,
+                                      _repeat_guard(repeat, name, args, out))
+            except Exception:
+                guarded = out
+            messages.append({"role": "tool", "tool_call_id": c.id, "content": guarded})
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
 # Both are just another agent_turn with a special prompt — so saving reuses the

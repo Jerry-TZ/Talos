@@ -682,3 +682,31 @@ def test_reading_the_projects_own_source_is_allowed_but_writing_it_is_not(ws, mo
             A._in_workspace(os.path.join(A.HOME, d, "x.py"), for_read=True)
     with pytest.raises(ValueError, match="越界"):                # 排除按路径分量,不按前缀
         A._in_workspace(os.path.join(A.HOME, "docs", ".talos", "x.json"), for_read=True)
+
+
+def test_the_stem_gate_guards_the_widened_read_not_the_workspace(ws, monkeypatch):
+    """词干闸是为「只读放开到 HOME」加的,可它被摆在 workspace 分支**之前** —— 于是它连写
+    都挡:`tokens.json` 在工作区里建不出来,而且 `archive_workspace()` 会**静默跳过**它,
+    备份里没有也不报错。当初注释里给误伤定的价是「一次读不了」,实际是文件建不出来 +
+    没有备份。**启发式只该管它被引入时要管的那一片。**"""
+    import agent as A, os, pytest
+    # ① 工作区里这些名字必须能写、能读回来 —— 它们是模型自己建的文件,不是谁的凭据
+    for name in ("tokens.json", "token_counts.txt", "secret_santa.md",
+                 "api_keys.py", "credentials_ui.md", "keystore_helper.py"):
+        p = os.path.join(A.WORKSPACE, name)
+        A.write_file(p, "x = 1\n")
+        assert A.read_file(p).strip() == "x = 1"
+    # ② 而且要进得了回收站。静默跳过备份是这条 bug 最贵的一半:文件被覆盖就没了
+    A.archive_workspace()
+    backed = {f.split("__")[0] for f in os.listdir(A.TRASH_DIR)} if os.path.isdir(A.TRASH_DIR) else set()
+    assert {"tokens.json", "api_keys.py"} <= backed, f"没进回收站: {backed}"
+    # ③ HOME 那一侧照旧挡住 —— 放开的是源码,不是 gcloud 的出厂文件
+    for bad in ("credentials.json", "token.json", "client_secret_9.json", "secrets.yml"):
+        with pytest.raises(ValueError, match="凭据"):
+            A._in_workspace(os.path.join(A.HOME, bad), for_read=True)
+    # ④ 严格闸(整名 + 目录)不分内外,工作区里也拦
+    for hard in (".env", "id_rsa", ".git-credentials"):
+        with pytest.raises(ValueError, match="凭据"):
+            A._in_workspace(os.path.join(A.WORKSPACE, hard))
+    with pytest.raises(ValueError, match="凭据"):
+        A._in_workspace(os.path.join(A.WORKSPACE, ".ssh", "cfg.txt"))
