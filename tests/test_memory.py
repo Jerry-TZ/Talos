@@ -614,9 +614,21 @@ def test_the_dont_use_clause_is_stripped_however_it_is_punctuated(ws):
     重新变成正关键词,分数从 0.00 回到 0.55(跟原始 bug 一模一样)。"""
     import recall as R
     os.makedirs(R.SKILLS_DIR, exist_ok=True)
-    for i, desc in enumerate(["用于:把几个 csv 合并成一张表;不用于:前端渲染 页面布局",
-                              "用于:把几个 csv 合并成一张表\n不用于:前端渲染 页面布局",
-                              "用于:把几个 csv 合并成一张表,不用于:前端渲染 页面布局"]):
+    # 后四种是补的。**改完要打一遍码点确认,别信眼睛。** 理由是现场教训:正则原来的字符类
+    # 看着像"半角+全角各一个",码点却是 `U+003B U+003B` / `U+003A U+003A` —— 半角写了两遍,
+    # 而它上面的注释写着"或者用中文逗号"。补这条测试时我照着敲全角,**敲出来的又是半角**,
+    # 一模一样的错犯了第二次(是打码点才发现的)。肉眼分不出 `;` 和 `;`,那就别靠肉眼。
+    # 最后一种不带冒号:`。不用于 X` 这种写法真实存在(本仓库自己的技能就是),负向意思一样成立。
+    _S = "用于:把几个 csv 合并成一张表"
+    _T = "不用于:前端渲染 页面布局"
+    for i, desc in enumerate([_S + ";" + _T,
+                              _S + "\n" + _T,
+                              _S + "," + _T,
+                              _S + "；" + _T,                       # 全角分号
+                              _S + "，" + _T,                       # 全角逗号
+                              _S + "、" + _T,                       # 顿号
+                              _S + "；不用于：前端渲染 页面布局",   # 全角冒号
+                              "用于 把几个 csv 合并成一张表。不用于 前端渲染 页面布局"]):
         for f in os.listdir(R.SKILLS_DIR):
             os.remove(os.path.join(R.SKILLS_DIR, f))
         with open(os.path.join(R.SKILLS_DIR, "m.md"), "w", encoding="utf-8") as fh:
