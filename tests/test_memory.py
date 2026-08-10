@@ -240,6 +240,31 @@ def test_recall_spreading_activation(ws):
     assert not any("图文" in t for t in texts)   # 不相关
     assert R.explain("今天天气怎么样") == []      # 完全无关 -> 空
 
+def test_duplicate_memories_do_not_amplify_each_other(ws):
+    """同一句话写 N 遍,不该变成 N 份独立证据。
+
+    边权是 `shared / max(|A|,|B|)`,所以关键词集合完全相同的两个节点边权是 1.0,
+    每跳把全部激活送给对方。不去重的话得分是 `(1 + DECAY·(N-1))^HOPS` —— 实测
+    1/2/4/8/16 份 = 1.00 / 2.56 / 7.84 / 27.04 / 100.00,而且跑出了 [0,1]。
+
+    这不是构造出来的场景:本机语料 109 个节点里量到 11 组 `w=1.00`,全是同一个任务
+    被重试五次留下的会话首句。重试、「继续」、`/compact` 之后接着做,都产生这个形状。
+    后果实测过:查询「给 agent_turn 画流程图」时 top-5 被四份同一条陈旧会话占满,
+    **两条正确的画图技能一条都没进**。"""
+    import recall as R
+    one = "扩散激活把重复的记忆当成独立证据互相抬轿\n"
+    scores = {}
+    for n in (1, 2, 4, 8):
+        with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+            f.write(("- " + one) * n)
+        rows = R.explain("扩散激活 重复 记忆", k=5)
+        assert rows, f"{n} 份时什么都没捞到"
+        scores[n] = rows[0][0]
+        assert len(rows) == 1, f"{n} 份相同内容应该只剩 1 个节点,实际 {len(rows)}"
+    assert len(set(scores.values())) == 1, f"份数改变了分数(不该): {scores}"
+    assert scores[8] <= 1.0, f"分数跑出 [0,1]: {scores[8]}"
+
+
 def test_recall_injects_skill_body(ws):
     """命中的技能要给正文 —— 关键字段名在正文里,只给一行描述等于没给。"""
     import recall as R
