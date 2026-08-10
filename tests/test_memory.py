@@ -265,6 +265,24 @@ def test_duplicate_memories_do_not_amplify_each_other(ws):
     assert scores[8] <= 1.0, f"分数跑出 [0,1]: {scores[8]}"
 
 
+def test_body_injection_does_not_depend_on_how_many_rows_we_show(ws, monkeypatch):
+    """「这条技能够不够可信」不能取决于「给模型看几条」。
+
+    落差判据(第一名甩开第二名 BODY_LEAD 倍)的全部价值在于它跟库大小、技能长短都无关。
+    原来竞争者集合是从 `ranked[:k]` 里取的,于是四条无关事实就能把真正的第二名技能挤出
+    竞争集合,`len(sk) < 2` 退化成 BODY_FLOOR 绝对门槛,正文照塞 —— **同一份排名、同一条
+    技能、同一个分数,只改展示条数,结论就翻转。**"""
+    import recall as R
+    nodes = [{"kind": "事实", "text": f"无关事实 {i}", "path": "", "body": ""} for i in range(4)]
+    nodes += [{"kind": "技能", "text": "技能A", "path": "A.md", "body": "AAA 正文"},
+              {"kind": "技能", "text": "技能B", "path": "B.md", "body": "BBB 正文"}]
+    ranked = [(0.9, 0), (0.8, 1), (0.7, 2), (0.65, 3), (0.60, 4), (0.59, 5)]
+    monkeypatch.setattr(R, "_rank", lambda *a, **kw: (nodes, ranked))
+    got = {k: ("技能正文" in R.recall("查询", k=k)) for k in (5, 6)}
+    assert got[5] == got[6], f"展示条数改变了正文注入: {got}"
+    assert not got[6], "0.60 vs 0.59 只有 1.02 倍落差,不该给正文"
+
+
 def test_recall_injects_skill_body(ws):
     """命中的技能要给正文 —— 关键字段名在正文里,只给一行描述等于没给。"""
     import recall as R
