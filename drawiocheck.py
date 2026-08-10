@@ -70,8 +70,16 @@ MAX_ASPECT = 2.0          # 高/宽上限 —— 再高就没有版面放得下
 # 冲着它报坐标的毛病,它做不了任何有效动作,只会掉头去读判官的源码找原因(实测:
 # 读了六七遍 drawiocheck.py、派了五个子 agent,一步没往前走)。
 # **一条对方无法执行的意见,不会让他改对,只会让他去查你为什么这么说。**
-_LAYOUT_OWNED = ("块重叠", "没对齐网格", "块宽有", "不是正交走线", "向上的边",
-                 "边太长", "断栏", "跳着栏连", "换栏边", "往下一栏拉了", "长宽比", "图宽")
+# 分拨靠**建的时候打标**,不靠事后拿关键词去猜整句。
+# 上一版是一张关键词表,拿去 `in` 匹配**已经把标签插进去的成品字符串** —— 于是块标签里
+# 只要出现「块重叠」「边太长」「长宽比」这类词,这个块**自己的**问题就被判成排版工具的事,
+# 顶着「改 JSON 没用,不用管」印在 stderr,退出码 0。实测:一个标签叫「检查块重叠」的
+# 孤立块,判官 stdout `[]`。而这条流水线画的就是检查逻辑本身的流程图 —— 靶子正中自己。
+# **判据不能建立在被判对象能控制的内容上。**
+# 刻意保持 `problems.append(LAY + f"…")` 这个形状,不抽成 `_lay(problems, …)` 帮手函数:
+# tests/test_mutation.py 靠「找出每一处 problems.append」来数规则,换个形状它就认不出来,
+# 于是十条规则的覆盖会**静默消失**,而扫描照样报全绿。改判据的形状之前先想想谁在数它。
+LAY = "[版面] "                      # 排版工具的事:改 JSON 动不了它
 
 # Wong 2011 色盲安全配色 + 中性色。大小写不敏感。
 PALETTE = {
@@ -142,18 +150,18 @@ def check(path, expected_width_mm=None):
             x1, y1, w1, h1 = geos[ids[a]]
             x2, y2, w2, h2 = geos[ids[b]]
             if x1 < x2 + w2 and x2 < x1 + w1 and y1 < y2 + h2 and y2 < y1 + h1:
-                problems.append(f"块重叠: {_label(boxes[ids[a]])!r} 与 {_label(boxes[ids[b]])!r} 包围盒相交")
+                problems.append(LAY + f"块重叠: {_label(boxes[ids[a]])!r} 与 {_label(boxes[ids[b]])!r} 包围盒相交")
 
     # 2. 对齐到网格
     for i in ids:
         for name, v in zip(("x", "y", "width", "height"), geos[i]):
             if v % GRID:
-                problems.append(f"没对齐网格: {_label(boxes[i])!r} 的 {name}={v} 不是 {GRID} 的整数倍")
+                problems.append(LAY + f"没对齐网格: {_label(boxes[i])!r} 的 {name}={v} 不是 {GRID} 的整数倍")
 
     # 3. 宽度档位数。只管宽 —— 见文件头那条注释,管死整个尺寸会逼出文字出框。
     widths = {g[2] for g in (geos[i] for i in ids)}
     if len(widths) > MAX_SIZES:
-        problems.append(f"块宽有 {len(widths)} 种(上限 {MAX_SIZES}): {sorted(widths)}")
+        problems.append(LAY + f"块宽有 {len(widths)} 种(上限 {MAX_SIZES}): {sorted(widths)}")
 
     # 4. 配色白名单  5. 字号  7a. 文字长度
     for i, c in boxes.items():
@@ -195,7 +203,9 @@ def check(path, expected_width_mm=None):
         for end in (s, t):
             if end not in boxes:
                 problems.append(f"悬空边 {e.get('id')}: 端点 {end} 不是图里的块")
-        linked.update((s, t))
+        if s != t:                  # 自环不算"连着"。一条从自己指回自己的边不把任何块
+            linked.update((s, t))   # 接到图上 —— 实测三个块各挂一条自环、彼此完全不相连,
+                                    # 判官返回 []。**连通性的判据是「和别人连着」,不是「有边」。**
     for i in boxes:
         if i not in linked:
             problems.append(f"孤立块(没有任何边连着): {_label(boxes[i])!r}")
@@ -203,7 +213,7 @@ def check(path, expected_width_mm=None):
     # 7b. 正交走线
     for e in edges:
         if _style(e).get("edgeStyle") != "orthogonalEdgeStyle":
-            problems.append(f"边 {e.get('id')} 不是正交走线(要 edgeStyle=orthogonalEdgeStyle)")
+            problems.append(LAY + f"边 {e.get('id')} 不是正交走线(要 edgeStyle=orthogonalEdgeStyle)")
 
     # 9~11. 正向要求 —— 上面 1~8 全是**禁令**,而禁令有一个平凡最优解:什么都别画。
     # 头一版只有禁令,结果拿回来的是 15 个一模一样的无填充灰框排成两列、20 条线对穿:
@@ -290,24 +300,24 @@ def check(path, expected_width_mm=None):
     # 换成两条站得住的:相邻栏之间不能断,而且不许跳着栏连。
     if len(cols) > 1:
         if missing := [k for k in range(len(cols) - 1) if not fold_pairs.get(k)]:
-            problems.append(f"第 {[k + 1 for k in missing]} 栏和下一栏之间没有连接 —— 断栏了,读者跳不过去")
+            problems.append(LAY + f"第 {[k + 1 for k in missing]} 栏和下一栏之间没有连接 —— 断栏了,读者跳不过去")
         if jumps:
-            problems.append(f"有 {len(jumps)} 条边跳着栏连(跨了不止一栏): {'; '.join(jumps[:3])}"
+            problems.append(LAY + f"有 {len(jumps)} 条边跳着栏连(跨了不止一栏): {'; '.join(jumps[:3])}"
                             f" —— 换栏只能连到紧邻的下一栏")
         # **上限在这儿。** 上一版写了「豁免要自带上限」的注释,配的却是「至少一条 + 不许
         # 跳栏」—— 两条都只管下界。审计当场造了一张两栏图,挂十条横穿全图的上行边,
         # 判官返回 []:9 和 10 被整个绕过去了。写了注释不等于加了上限。
         if over := [k for k, v in fold_pairs.items() if len(v) > MAX_FOLD_EDGES]:
-            problems.append(f"第 {[k + 1 for k in over]} 栏往下一栏拉了 "
+            problems.append(LAY + f"第 {[k + 1 for k in over]} 栏往下一栏拉了 "
                             f"{max(len(fold_pairs[k]) for k in over)} 条线(上限 {MAX_FOLD_EDGES})"
                             f" —— 换栏边免检长度和上行,这个免检不能变成藏线的地方")
     # 9. 往上走的边就是回边。流程图只该有回边一条往上;更多说明块的摆放没跟着流程走。
     if back > MAX_BACK_EDGES:
-        problems.append(f"向上的边有 {back} 条(上限 {MAX_BACK_EDGES})—— "
+        problems.append(LAY + f"向上的边有 {back} 条(上限 {MAX_BACK_EDGES})—— "
                         f"块的上下顺序没跟着流程走,读者得来回跳")
     # 10. 有边相连的块必须挨着。两列格子 + 长线对穿正是这条抓的。
     if longest:
-        problems.append(f"边太长({len(longest)} 条): {'; '.join(longest[:3])}"
+        problems.append(LAY + f"边太长({len(longest)} 条): {'; '.join(longest[:3])}"
                         f" —— 相连的块要挨着放,别让线横跨整张图")
     # 12. 菱形 = 判定,判定必须有分支。只有一条出边的菱形是把「顺序执行的一步」
     # 画成了问号 —— 读者会停下来找另一条路,而根本没有。形状是有语义的,不是装饰。
@@ -315,9 +325,12 @@ def check(path, expected_width_mm=None):
     # 却把「≥2 条出边」满足了 —— 实测真发生过:`_is_correction` 那个菱形拉了
     # 「是纠正」「非纠正」两条边,终点是同一个块。判定的意思是**分叉**,
     # 两条通往同一处的线不是分叉,是同一条线写了两个标签。
+    # 去处里也要把**自己**排除掉:一条真出边 + 一条自环 = 两个不同的 target,
+    # 「≥2 个去处」就满足了,而自环根本不通向任何地方。跟平行边是同一个洞的另一半。
     one_way = [_label(boxes[i]) for i in boxes
                if "rhombus" in (boxes[i].get("style") or "")
-               and len({e.get("target") for e in edges if e.get("source") == i}) < 2]
+               and len({e.get("target") for e in edges
+                        if e.get("source") == i and e.get("target") != i}) < 2]
     if one_way:
         problems.append(f"菱形只有一条出边({len(one_way)} 个): {'、'.join(x[:18] for x in one_way[:3])}"
                         f" —— 菱形是判定,不分支就该画成方框")
@@ -342,7 +355,7 @@ def check(path, expected_width_mm=None):
         left = min(geos[i][0] for i in ids)
         got = (right - left) * MM_PER_PX
         if abs(got - expected_width_mm) > 2.0:
-            problems.append(f"图宽 {got:.1f}mm 与期望 {expected_width_mm}mm 差 {abs(got - expected_width_mm):.1f}mm(容差 2mm)")
+            problems.append(LAY + f"图宽 {got:.1f}mm 与期望 {expected_width_mm}mm 差 {abs(got - expected_width_mm):.1f}mm(容差 2mm)")
 
     return problems
 
@@ -458,6 +471,29 @@ def _selfcheck():
             + _edge("e1", "a", "b") + _edge("e2", "b", "c") + _edge("e3", "b", "c")
             + _edge("e4", "c", "a") + "</root></mxGraphModel></diagram></mxfile>")
     assert any("菱形只有一条出边" in g for g in run(_par)), f"平行边骗过了菱形规则: {run(_par)}"
+    # 自环:三个块各挂一条指回自己的边,彼此完全不相连 —— 曾经返回 []。
+    # 「有边」不等于「连着」;菱形那条同理,一条真出边 + 一条自环凑不出分叉。
+    _self = ("<mxfile><diagram><mxGraphModel><root>"
+             '<mxCell id="0"/><mxCell id="1" parent="0"/>'
+             + _box("a", 40, 40, "#0072B2") + _box("b", 40, 160, "#0072B2")
+             + _box("c", 40, 280, "#E69F00")
+             + _edge("s1", "a", "a") + _edge("s2", "b", "b") + _edge("s3", "c", "c")
+             + "</root></mxGraphModel></diagram></mxfile>")
+    assert len([g for g in run(_self) if "孤立块" in g]) == 3, \
+        f"自环冒充了连接: {run(_self)}"
+    _rs = ("<mxfile><diagram><mxGraphModel><root>"
+           '<mxCell id="0"/><mxCell id="1" parent="0"/>'
+           + _box("a", 40, 40, "#0072B2")
+           + _box("b", 40, 160, "#0072B2").replace("rounded=1;", "rhombus;")
+           + _box("c", 40, 280, "#E69F00")
+           + _edge("e1", "a", "b") + _edge("e2", "b", "c") + _edge("e3", "b", "b")
+           + _edge("e4", "c", "a") + "</root></mxGraphModel></diagram></mxfile>")
+    assert any("菱形只有一条出边" in g for g in run(_rs)), f"自环冒充了第二个去处: {run(_rs)}"
+    # 分拨:块标签里出现版面词,不许把这个块**自己的**问题冲进「不用管」那一拨。
+    # 判据建立在被判对象能控制的内容上,就等于把判据交给了它。
+    _trap = _GOOD.replace("</root>", _box("检查块重叠", 40, 420, "#0072B2") + "</root>", 1)
+    assert any(g.startswith("孤立块") for g in run(_trap)), \
+        f"标签里的「块重叠」把孤立块冲进排版那一拨了: {run(_trap)}"
     for want, (old, new) in _BAD.items():
         assert old in _GOOD, f"自检样本对不上: {old!r}"          # 改坏之前先确认改的是真东西
         got = run(_GOOD.replace(old, new, 1))
@@ -501,8 +537,8 @@ if __name__ == "__main__":
     # **一条它无法执行的意见,不会让它改对,只会让它去查你为什么这么说。**
     #
     # 所以退出码只看「你能改的」那一拨。排版那拨照样打印 —— 给人看,不是给它看。
-    yours = [p for p in out if not any(k in p for k in _LAYOUT_OWNED)]
-    theirs = [p for p in out if p not in yours]
+    theirs = [p for p in out if p.startswith(LAY)]      # 建的时候就打好标了,不用猜
+    yours = [p for p in out if not p.startswith(LAY)]
     print(json.dumps(yours, ensure_ascii=False, indent=2))
     if theirs:
         print("\n[排版工具的事,改 JSON 没用,不用管]", file=sys.stderr)
