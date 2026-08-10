@@ -713,8 +713,11 @@ def test_stickiness_survives_quotes_spaces_and_path_spelling(ws):
     try:
         assert "Important Report" in A._targets('del "Important Report"'), "带空格的名字整个丢了"
         assert "Important Report" in A._targets("del 'Important Report'"), "单引号也要认"
-        # 三种拼法都得留下同一个可匹配的身份 —— 基名
-        for cmd in ("del Makefile", r"del .\Makefile",
+        # 三种拼法都得留下同一个可匹配的身份 —— 基名。
+        # **相对拼法必须用 os.path.join 生成,不能写死 `.\`** —— 反斜杠在 POSIX 上不是
+        # 分隔符,`basename(".\\Makefile")` 原样返回,断言在 Linux 上必红。
+        # 这条我在写「判据别烤进本机语义」那个 commit 的同时又犯了一次(CI ubuntu 两格红)。
+        for cmd in ("del Makefile", "del " + os.path.join(".", "Makefile"),
                     "del " + os.path.join(A.WORKSPACE, "Makefile")):
             assert "Makefile" in A._targets(cmd), f"{cmd!r} 没留下基名"
         # 长度下限:一个叫 a 的文件不能让此后每条命令都弹框
