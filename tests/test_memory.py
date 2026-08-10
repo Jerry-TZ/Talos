@@ -691,6 +691,39 @@ def test_a_file_without_an_extension_still_sticks(ws):
         os.chdir(cwd)
 
 
+def test_stickiness_survives_quotes_spaces_and_path_spelling(ws):
+    """拒绝要绑在**文件**上,不是绑在当时那串字符上。
+
+    粘性的判据是子串匹配(「这个串出现在新命令里」),而 denied 存的是 `_targets` 当时
+    返回的原始拼写。两个漏法都实测过:
+
+    · `del "Important Report"` —— `_TOKEN` 的字符类里没有空格,整条命令被拆成两个
+      不存在的词,`_targets` 返回**空集合**。拒绝了等于没记。
+    · `del .\\Makefile` —— 只记下带 `.\\` 的那一种,之后 `python cleanup.py Makefile`
+      不含这个子串,直接放行。
+
+    补法跟 `_read_key` 今天那条是同一个:**别按拼写记,按文件身份记。** 基名是所有写法的
+    公共子串,记住它,哪种写法都躲不开。"""
+    import os
+    import agent as A
+    for n in ("Important Report", "Makefile", "notes.txt"):
+        open(os.path.join(A.WORKSPACE, n), "w").close()
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        assert "Important Report" in A._targets('del "Important Report"'), "带空格的名字整个丢了"
+        assert "Important Report" in A._targets("del 'Important Report'"), "单引号也要认"
+        # 三种拼法都得留下同一个可匹配的身份 —— 基名
+        for cmd in ("del Makefile", r"del .\Makefile",
+                    "del " + os.path.join(A.WORKSPACE, "Makefile")):
+            assert "Makefile" in A._targets(cmd), f"{cmd!r} 没留下基名"
+        # 长度下限:一个叫 a 的文件不能让此后每条命令都弹框
+        open(os.path.join(A.WORKSPACE, "a"), "w").close()
+        assert "a" not in A._targets("del a"), "单字符基名会把 denied 变成万能匹配"
+    finally:
+        os.chdir(cwd)
+
+
 def test_case_only_rename_does_not_slip_past_the_stickiness(ws, monkeypatch):
     """Windows 上 Report.md 和 report.md 是同一个文件,而消费 denied 用的是区分大小写
     的 `in`。拒绝 `del Report.md` 之后,`del report.md` 直接放行 —— 改个大小写就绕过去了。"""

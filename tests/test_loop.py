@@ -556,7 +556,11 @@ def test_a_broken_guard_must_not_take_the_whole_turn_down(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())
     monkeypatch.setattr(A, "run_tool", lambda name, args: ("正常结果", False))
-    script = [_msg(tool_calls=[_tc("read_file", '{"path":"a\u0000b.py"}', cid="c0")]),
+    # NUL 要写成 **JSON 转义**(源码里两个反斜杠),不能是 Python 层面的裸 NUL:
+    # 裸的那种 `json.loads` 当场就拒(strict 模式不许字符串里有控制字符),args 退化成
+    # `{}`,**那个 NUL 根本到不了守卫** —— 这条断言一直靠 run_tool 被打桩才绿。
+    # 是「参数先验后问」那条改动把它暴露出来的:空 args 现在会被当成缺参报错。
+    script = [_msg(tool_calls=[_tc("read_file", '{"path":"a\\u0000b.py"}', cid="c0")]),
               _msg(content="done")]
     messages = [{"role": "user", "content": "读它"}]
     assert A.agent_turn(_Client(script), "m", messages,

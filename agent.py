@@ -996,6 +996,25 @@ def _schema_hint(name: str) -> str:
             + json.dumps({k: f"<{v.get('type', 'string')}>" for k, v in props.items()}, ensure_ascii=False)
             + (f",其中 {', '.join(required)} 必填。" if required else "。"))
 
+def _bad_args(name: str, args) -> str | None:
+    """这次调用**能不能执行**?能执行才值得为它弹权限框。返回错误说明,或 None 表示没问题。
+
+    单独抽出来是因为它必须跑在 `check_permission` **之前**。`run_tool` 里也留了同样的
+    检查(它是公开入口,别的调用方够得到),两处都要 —— 但真正堵住「无效调用换通行证」
+    那个洞的是 agent_turn 里的那次。"""
+    if name not in TOOLS:
+        return None                                  # 名字不认识,上面另有处理
+    if not isinstance(args, dict):
+        # 合法 JSON 但不是对象:`[]` / `null` / `"x"`。原来一路带到 `_policy` 的 `.get()`
+        # 才抛 AttributeError,而那里在 run_tool 的 try 外面 —— 抛出去是整轮没了。
+        return (f"调用 {name} 的 arguments 必须是一个 JSON 对象,收到的是 "
+                f"{type(args).__name__}。{_schema_hint(name)}")
+    missing = [k for k in TOOLS[name][2] if k not in args]
+    if missing:
+        return f"调用 {name} 少了必填参数 {missing}。{_schema_hint(name)}"
+    return None
+
+
 def run_tool(name: str, args: dict) -> tuple[str, bool]:
     name = (name or "").strip()
     if name not in TOOLS:                       # a bare KeyError told nobody anything
@@ -1222,6 +1241,10 @@ def _drain_stdin() -> None:
 
 _FILENAME = re.compile(r"[\w.\-]+\.\w{1,5}")
 _TOKEN = re.compile(r"[\w.\-\\/]{2,}")
+# 引号里的整段。`_TOKEN` 的字符类里没有空格,于是 `del "Important Report"` 被拆成两个
+# 都不存在的词,`_targets` 返回**空集合** —— 拒绝了等于没记,粘性对带空格的文件名从来
+# 没生效过。而带空格的文件名在 Windows 上遍地都是。**第四次补同一个机制了。**
+_QUOTED = re.compile(r'"([^"\n]{1,260})"' r"|'([^'\n]{1,260})'")
 
 def _targets(cmd: str) -> set:
     """命令里提到的文件。
@@ -1237,12 +1260,19 @@ def _targets(cmd: str) -> set:
     **多记的代价是多弹一次框,少记的代价是文件没了。** 所以一律往多了记。
     """
     out = set(_FILENAME.findall(cmd))          # 别改成 _targets —— 这就是 _targets
-    for tok in _TOKEN.findall(cmd):
+    cand = [t for t in _TOKEN.findall(cmd)]
+    cand += [g for m in _QUOTED.findall(cmd) for g in m if g]   # 引号里的整段(可能带空格)
+    for tok in cand:
         if tok.startswith("-"):
             continue                                  # 是开关不是文件
         if os.path.exists(tok) or os.path.exists(os.path.join(WORKSPACE, tok)):
             out.add(tok)
-    return {t for t in out if t}
+    # 连**基名**一起记。粘性的判据是"这个串出现在新命令里"(子串匹配),而同一个文件有
+    # 无数种写法:`Makefile` / `.\Makefile` / 绝对路径。只记下当时那一种,换个写法就绕过去了 ——
+    # 而 `_read_key` 那条守卫今天刚为同一个理由改成按解析后的真实路径计数,我没把它用到这里。
+    # 基名是所有写法的公共子串,记住它,哪种写法都躲不开。
+    # 长度下限 3:一个叫 `a` 的文件会让 denied 里躺进一个 "a",此后**每条命令**都要弹框。
+    return {t for t in out | {os.path.basename(t.rstrip("\\/")) for t in out} if len(t) >= 3}
 
 def _named_in_request(state: dict, args: dict) -> list:
     """Files this delete touches whose names the user typed.
@@ -1720,10 +1750,23 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
             # 二是未知名字被兜底归成 "bash",于是对着这个假名字按 [a] —— 那一下放行的
             # 是整个 bash 类,真正的 run_bash 从此不再问。批准的东西必须存在。
             cls = TOOLS[name][4] if name in TOOLS else None
-            # 名字不认识就别问权限 —— check_permission 会弹框,而框一弹就晚了。
-            allowed, reason = (False, "") if cls is None else check_permission(state, cls, name, args)
+            # 参数**先验后问**。原来顺序是反的:`check_permission` 先弹框拿到会话级授权,
+            # `run_tool` 才发现少了必填参数。于是一次**根本执行不了**的调用就能换一张长期
+            # 通行证 —— `run_bash {}` 弹出的框里参数是空的,人按 [a],这一下放行的是整个
+            # bash 类,下一条真命令直接不问了。跟上面那条「名字不认识就别问权限」是同一个
+            # 道理,同一个洞的另一半:**批准的东西不但要存在,还得是能执行的。**
+            # 顺带挡住非对象参数:`[]` 会让 `_policy` 的 `.get()` 抛 AttributeError,
+            # 而这里在 `run_tool` 的 try 外面,抛出去就是整轮没了。
+            bad = None if cls is None else _bad_args(name, args)
+            if bad is not None:
+                allowed, reason = False, ""
+            else:
+                # 名字不认识就别问权限 —— check_permission 会弹框,而框一弹就晚了。
+                allowed, reason = (False, "") if cls is None else check_permission(state, cls, name, args)
             if cls is None:
                 out, is_error = f"error: unknown tool {name}", True
+            elif bad is not None:
+                out, is_error = f"error: {bad}", True
             elif not allowed:
                 out, is_error = f"permission denied: {reason}", True
                 if view != "quiet":
