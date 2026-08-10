@@ -350,7 +350,15 @@ _SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".docker"}
 # 备份里没有,也不报错。我当初给误伤定的价是「一次读不了」,实际是**文件建不出来、
 # 而且没有备份**。词干匹配是启发式的,而启发式只该管它被引入时要管的那一片。
 _SECRET_STEMS = ("credential", "secret", "token", "client_secret", "service-account",
-                 "service_account", "serviceaccount", "apikey", "api_key", "keyfile", "keystore")
+                 "service_account", "serviceaccount", "apikey", "api_key", "keyfile", "keystore",
+                 # gcloud / Firebase 的另外几种出厂名字。`sa` 只做整名相等 —— 见下面的长度门槛,
+                 # 短词干套上"复数"规则会误伤(`sas` 会挡掉 `sass.py`)。
+                 "sa", "gcp-sa", "adminsdk", "firebase-adminsdk", "oauth", "refresh_token")
+# 只读放开那一侧额外挡掉的**目录名**。放在这儿而不是 `_SECRET_DIRS`,是 P0 学到的分寸:
+# `_SECRET_DIRS`(.ssh/.aws/.gnupg/.docker)含义没有歧义,全局挡;而 `secrets/`、
+# `credentials/` 是普通项目里也会有的名字(Rails 的 config/secrets、k8s 清单),
+# 全局挡就会重演「工作区里建不出文件、备份还静默跳过」那一出。
+_SECRET_DIRS_READ = {"secrets", "credentials", "gcloud", ".gcloud", ".kube", ".azure", "keys"}
 
 def _is_secret_path(full: str) -> bool:
     """严格闸:整名 + 目录名。**任何路径都要过这一道**,工作区里的也不例外。"""
@@ -362,9 +370,16 @@ def _is_secret_path(full: str) -> bool:
 
 def _looks_like_secret(full: str) -> bool:
     """词干闸:启发式,**只用在 HOME 下那条只读放开的支路上**。理由见上面那段注释。"""
-    stem = os.path.splitext(os.path.basename(full).lower())[0]
-    return any(stem == s or stem.startswith(s + "_") or stem.startswith(s + "-")
-               or stem.startswith(s + "s") for s in _SECRET_STEMS)
+    # 先脱掉开头的点:`splitext(".credentials.json")` 给的 stem 是 `.credentials`,
+    # 于是所有下划线/连字符/复数规则一条都不成立 —— **加一个点就绕过整道闸**。
+    stem = os.path.splitext(os.path.basename(full).lower())[0].lstrip(".")
+    if any(stem == s or stem.startswith(s + "_") or stem.startswith(s + "-")
+           # 复数规则只给长词干用。`sa` + `s` 会把 `sass.py` 一起挡掉,
+           # 而这道闸的误伤代价是"读不了",不该便宜到可以随便撒。
+           or (len(s) >= 4 and stem.startswith(s + "s")) for s in _SECRET_STEMS):
+        return True
+    parts = {p.lower() for p in full.replace("/", os.sep).split(os.sep)}
+    return bool(parts & _SECRET_DIRS_READ)
 
 def _strip_workspace_prefix(path: str) -> str:
     """`workspace/data/x.csv`, typed while already standing in workspace/.
@@ -1439,6 +1454,7 @@ _READISH = re.compile(r"findstr|\btype\b|\bcat\b|\bmore\b|\bhead\b|\btail\b|"
                       r"Get-Content|Select-String|open\s*\(|readlines|read_text", re.I)
 
 _SELF = os.path.normcase(os.path.realpath(sys.executable))   # 正在跑的解释器,不算"被读的文件"
+_LINESEP = re.compile(rb"\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e]")   # `str.splitlines()` 认的那些
 
 def _abs(p: str) -> str:
     """守卫看到的路径,必须和文件工具看到的是同一个。
@@ -1484,7 +1500,12 @@ def _pages(p: str) -> int:
         n, read = 0, 0
         with open(_abs(p), "rb") as f:
             while chunk := f.read(1 << 20):          # 峰值 1MB,跟文件多大无关
-                n, read = n + chunk.count(b"\n"), read + len(chunk)
+                # 分行符要跟 `read_file` 用的 `splitlines()` 一致 —— 只数 `\n` 的话,
+                # 一个 `\r` 结尾(老 Mac)或带换页符的文件会**少算四倍**,上限跟着缩水,
+                # 于是整本还没翻完一遍就被拦。`_pages` 存在的全部理由就是让上限跟着
+                # 分页的单位走,那它自己就不能用另一个单位。多数一点无害(上限宽一格)。
+                n = n + len(_LINESEP.findall(chunk))
+                read += len(chunk)
                 if read >= READ_MAX_BYTES:
                     break                            # 比这还大的,read_file 本来就不给读
         return max(1, -(-n // READ_MAX_LINES))
@@ -1618,6 +1639,16 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
     state.setdefault("trace", [])                 # every dispatched tool, in order (see _trace_summary)
     repeat: dict = {}                             # 本轮独有;绝不能挂在 state 上 —— 见 _repeat_guard
+    # 读预算跟 `repeat` 相反,**要跨子 agent 累计**。两条守卫看着像一对,守的其实不是
+    # 一回事:`_repeat_guard` 守的是「这一轮卡住了」——per-turn 才对;`_read_guard` 守的是
+    # **token 预算**,而子 agent 的 token 本来就滚进父的 `state["tok"]`(有测试断言这一条)。
+    # 不累计的话,父烧完 6 次读,派个子 agent 就又有 6 次,内容照样整份发回来 ——
+    # 而「守卫响了就绕路」是这个模型实测的行为(它写过三十个 extractN.py)。
+    # `_RUNTIME["depth"]` 是 spawn_subagent 已经在维护的嵌套深度,直接搭它的车:
+    # 只有最外层那一轮清空,子轮继承。
+    if not _RUNTIME.get("depth"):
+        _RUNTIME["reads"] = {}
+    reads: dict = _RUNTIME.setdefault("reads", {})
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -1714,7 +1745,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
             # `os.stat`/`open` 抛的是 `ValueError` 而不是 `OSError`,`_read_key` 的 `except OSError`
             # 接不住。与其去追每一种可能的异常类型,不如认下这件事:**守卫失败 = 不守,别拦活。**
             try:
-                guarded = _read_guard(repeat, name, args,
+                guarded = _read_guard(reads, name, args,
                                       _repeat_guard(repeat, name, args, out))
             except Exception:
                 guarded = out

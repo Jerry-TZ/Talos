@@ -710,3 +710,26 @@ def test_the_stem_gate_guards_the_widened_read_not_the_workspace(ws, monkeypatch
             A._in_workspace(os.path.join(A.WORKSPACE, hard))
     with pytest.raises(ValueError, match="凭据"):
         A._in_workspace(os.path.join(A.WORKSPACE, ".ssh", "cfg.txt"))
+
+
+def test_a_leading_dot_does_not_walk_past_the_credential_gate(ws, monkeypatch):
+    """`splitext(".credentials.json")` 给的 stem 是 `.credentials` —— 下划线/连字符/复数
+    三条规则一条都不成立,**加一个点就绕过整道闸**。目录名同理:`_SECRET_DIRS` 只有
+    .ssh/.aws/.gnupg/.docker,而 gcloud 的服务账号就躺在 `credentials/`、`secrets/` 里。"""
+    import agent as A, os, pytest
+    for bad in (".credentials.json", ".secrets.yml", "sa.json", "gcp-sa.json",
+                "firebase-adminsdk-abc123.json", "refresh_token.json",
+                os.path.join("config", "secrets", "db.yml"),
+                os.path.join("credentials", "prod.json"),
+                os.path.join(".kube", "config.yaml")):
+        with pytest.raises(ValueError, match="凭据"):
+            A._in_workspace(os.path.join(A.HOME, bad), for_read=True)
+    # 别撒得太宽:这几个是普通源码,只读侧也该放行
+    for ok in ("sass.py", "sample.md", "tokenizer_notes.md", "keyboard.py", "authors.md"):
+        assert not A._looks_like_secret(os.path.join(A.HOME, ok)), f"{ok} 被误伤了"
+    # 而且这条模糊判据只挂在 HOME 只读那一支上 —— 工作区里照旧写得进去(见 P0)
+    for name in ("sa.json", "secrets.yml", os.path.join("secrets", "x.json")):
+        p = os.path.join(A.WORKSPACE, name)
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        A.write_file(p, "x = 1\n")
+        assert A.read_file(p).strip() == "x = 1"

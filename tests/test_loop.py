@@ -674,3 +674,47 @@ def test_a_pure_write_command_is_not_counted_as_reading_its_own_output(ws, monke
         A._read_guard(seen2, "run_bash",
                       {"command": f"""{fake} -c "print(open('x{i}.txt').read())" """}, "输出")
     assert seen2 == {}, f"没有扩展名的解释器被记成了被读的文件: {seen2}"
+
+
+def test_the_read_budget_carries_into_subagents(ws, monkeypatch):
+    """两条守卫看着像一对,守的不是一回事:`_repeat_guard` 守「这一轮卡住了」,per-turn 才对;
+    `_read_guard` 守的是 **token 预算**,而子 agent 的 token 本来就滚进父的 state["tok"]。
+    不累计的话,父烧完 6 次读,派个子 agent 就又有 6 次,内容照样整份发回来 ——
+    而「守卫响了就绕路」是这个模型实测过的行为(它写过三十个 extractN.py)。"""
+    import agent as A, os
+    monkeypatch.setattr(A, "ui", _ui())
+    _real = A.run_tool          # 只把 read_file 换成桩,spawn_subagent 必须真跑
+    monkeypatch.setattr(A, "run_tool",
+                        lambda name, args: ("原始内容", False) if name == "read_file" else _real(name, args))
+    A._RUNTIME.pop("reads", None); A._RUNTIME.pop("depth", None)
+    rd = lambda i: _msg(tool_calls=[_tc("read_file", '{"path":"same.py","offset":%d}' % i, cid="c%d" % i)])
+    # 父读满 READ_LIMIT 次 → 派子 agent → 子 agent 再读同一个文件
+    script = ([rd(i) for i in range(A.READ_LIMIT)]
+              + [_msg(tool_calls=[_tc("spawn_subagent", '{"task":"接着读"}', cid="sp")])]
+              + [rd(100), _msg(content="子完成")]          # 子 agent 那一轮
+              + [_msg(content="done")])
+    messages = [{"role": "user", "content": "读它"}]
+    A.agent_turn(_Client(script), "m", messages, {"mode": "bypass", "allow": set()})
+    # 守卫的话进的是子 agent **内部**的消息,父只拿到最终答案 —— 所以断在计数器上:
+    # 接上了就是 READ_LIMIT+1,子轮自己从头数就是 1。这两个值差得足够远,判据不含糊。
+    cnt = A._RUNTIME["reads"].get(A._read_key("same.py"), (0, None))[0]
+    assert cnt == A.READ_LIMIT + 1, \
+        f"子 agent 里那次读没接着父的计数(现在 {cnt},接上了应该是 {A.READ_LIMIT + 1})"
+    # 而最外层重新起一轮必须清零 —— 否则预算跨任务累计,第二个任务一开局就被拦
+    A.agent_turn(_Client([_msg(content="下一轮")]), "m",
+                 [{"role": "user", "content": "新任务"}], {"mode": "bypass", "allow": set()})
+    assert A._RUNTIME["reads"] == {}, "最外层新起一轮没清空读预算"
+
+
+def test_pages_counts_lines_the_same_way_the_pager_splits_them(ws, monkeypatch):
+    """`read_file` 用 `splitlines()` 分页,`_pages` 只数 `\n` —— 单位不一样。
+    一个 `\r` 结尾(老 Mac)或带换页符的文件会**少算四倍**,上限跟着缩水,
+    整本还没翻完一遍就被拦。`_pages` 存在的全部理由就是让上限跟着分页的单位走。"""
+    import agent as A, os
+    for sep in (b"\r", b"\x0c", b"\r\n", b"\n"):
+        p = os.path.join(A.WORKSPACE, "sep.txt")
+        with open(p, "wb") as f:
+            f.write(sep.join(b"x" * 5 for _ in range(A.READ_MAX_LINES * 4)))
+        real = len(open(p, encoding="utf-8", errors="replace").read().splitlines())
+        want = max(1, -(-real // A.READ_MAX_LINES))
+        assert A._pages(p) == want, f"分隔符 {sep!r}: _pages={A._pages(p)} 而真实要翻 {want} 次"
