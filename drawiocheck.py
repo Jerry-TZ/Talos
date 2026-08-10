@@ -65,6 +65,8 @@ MIN_FILLS = 2             # 全图至少用到几种填充色
 MAX_FOLD_EDGES = 2        # 每对相邻栏之间最多几条换栏边 —— 豁免的上限
 COL_GAP_MIN = 100         # 块的 x 区间隔开这么多就算两栏(栏内块间距是 HGAP 量级)
 MAX_ASPECT = 2.0          # 高/宽上限 —— 再高就没有版面放得下
+PAGE_MM = 183.0           # 双栏排版的通栏宽度,用来把像素换算成印出来的实际尺寸
+MIN_BLOCK_MM = 12.0       # 缩到 PAGE_MM 之后,最窄的块不能比这还窄(再窄就读不出字)
 
 # 哪些问题**只有排版工具改得了**。画图的那个只交 JSON(块、边、kind、标签),坐标不归它;
 # 冲着它报坐标的毛病,它做不了任何有效动作,只会掉头去读判官的源码找原因(实测:
@@ -88,9 +90,13 @@ PALETTE = {
     "none", "default", "#ffffff", "#f5f5f5", "#ffffff00",
 }
 
-def _text_w(s):
-    """12px 下的文字宽度。中日韩全宽 12,拉丁 6.6 —— 粗但方向对。"""
-    return sum(12.0 if ord(ch) > 0x2E80 else 6.6 for ch in s)
+def _text_w(s, fontsize=12.0):
+    """文字宽度。中日韩全宽 12,拉丁 6.6(12px 下)—— 粗但方向对。
+
+    **必须跟着 fontSize 缩放。** 原来写死 12px:一个 fontSize=48 的块,17 个汉字实际
+    要 816px,判官算出 204px,于是「文字放不进形状」这一整类里最容易踩的一种
+    ——**把字号调大**——判官完全看不见。而字号只有下界检查,没有上界。"""
+    return sum(12.0 if ord(ch) > 0x2E80 else 6.6 for ch in s) * (fontsize / 12.0)
 
 
 _STYLE_KV = re.compile(r"([a-zA-Z]+)=([^;]*)")
@@ -130,6 +136,46 @@ def _cells(path):
     return cells
 
 
+def _seg_hits(p, q, box, pad=6):
+    """线段 p→q 是否穿过矩形 box(Liang–Barsky)。pad 让擦边和贴着走不算。"""
+    x, y, w, h = box
+    x0, y0, x1, y1 = x + pad, y + pad, x + w - pad, y + h - pad
+    if x1 <= x0 or y1 <= y0:
+        return False
+    dx, dy = q[0] - p[0], q[1] - p[1]
+    t0, t1 = 0.0, 1.0
+    for num, den in ((p[0] - x0, -dx), (x1 - p[0], dx), (p[1] - y0, -dy), (y1 - p[1], dy)):
+        if den == 0:
+            if num < 0:
+                return False
+            continue
+        r = num / den
+        if den < 0:
+            if r > t1:
+                return False
+            t0 = max(t0, r)
+        else:
+            if r < t0:
+                return False
+            t1 = min(t1, r)
+    return t0 <= t1
+
+
+def _points(e):
+    """边的显式转折点(`<Array as="points">`)。判官原来只看两端 —— 而 drawio_layout
+    给回边和换栏边发的正是这些点,于是**它绕没绕、绕对没绕,判官一个字都看不见**。
+    当初给这两类边开长度豁免的理由是「它们会绕开」,那条理由从来没被检查过。"""
+    out = []
+    for arr in e.iter("Array"):
+        if arr.get("as") == "points":
+            for pt in arr.iter("mxPoint"):
+                try:
+                    out.append((float(pt.get("x", 0) or 0), float(pt.get("y", 0) or 0)))
+                except ValueError:
+                    pass
+    return out
+
+
 def check(path, expected_width_mm=None):
     problems = []
     try:
@@ -145,6 +191,16 @@ def check(path, expected_width_mm=None):
     # 1. 两两不相交
     geos = {i: _geom(c) for i, c in boxes.items()}
     ids = [i for i, g in geos.items() if g and g[2] > 0 and g[3] > 0]
+    # 宽或高 <= 0 的块**先报出来再跳过**。原来只是静默跳过,于是一个 width="-500" 的块
+    # 一次性豁免了七条规则(重叠/网格/宽度档/配色/字号/文字放不下/文字过长):
+    # `ids` 把它滤掉,下面的循环又 `continue` 掉它。**一条规则在输入退化时静默消失,
+    # 比它不存在更糟** —— 不存在起码没人以为查过。
+    for i, g in geos.items():
+        if not g:
+            problems.append(f"块 {_label(boxes[i])!r} 没有 mxGeometry 或宽高不是数字")
+        elif g[2] <= 0 or g[3] <= 0:
+            problems.append(f"块 {_label(boxes[i])!r} 的宽高不是正数(width={g[2]} height={g[3]})"
+                            " —— 这样的块下面七条规则一条都查不了")
     for a in range(len(ids)):
         for b in range(a + 1, len(ids)):
             x1, y1, w1, h1 = geos[ids[a]]
@@ -181,13 +237,16 @@ def check(path, expected_width_mm=None):
         lab = _label(c)
         _x, _y, bw, bh = geos[i]
         if bw and bh and lab:
-            n_ln = max(1, math.ceil(_text_w(lab) / max(bw - PAD, 1)))
-            avail = bw * (1 - (n_ln - 1) * LINE_H / bh) if "rhombus" in (c.get("style") or "") else bw
-            if n_ln * LINE_H > bh - PAD:
-                problems.append(f"文字竖着放不下: {lab[:24]!r} 要 {n_ln} 行 = {n_ln * LINE_H}px,"
+            # 行宽和行高都跟着 fontSize 走。字号调大是「文字戳出框」最容易踩的一种,
+            # 而原来这里两个量都写死在 12px 上 —— 于是判官对它完全免疫。
+            tw, lh = _text_w(lab, fs), LINE_H * max(fs, 1.0) / 12.0
+            n_ln = max(1, math.ceil(tw / max(bw - PAD, 1)))
+            avail = bw * (1 - (n_ln - 1) * lh / bh) if "rhombus" in (c.get("style") or "") else bw
+            if n_ln * lh > bh - PAD:
+                problems.append(f"文字竖着放不下: {lab[:24]!r} 要 {n_ln} 行 = {n_ln * lh:.0f}px,"
                                 f"块只有 {bh:.0f}px 高 —— 把框加高或者把说明挪出去")
-            if _text_w(lab) / n_ln > avail - PAD:
-                problems.append(f"文字放不进形状: {lab[:24]!r} 每行要 {_text_w(lab) / n_ln:.0f}px,"
+            if tw / n_ln > avail - PAD:
+                problems.append(f"文字放不进形状: {lab[:24]!r} 每行要 {tw / n_ln:.0f}px,"
                                 f"这个形状只给得出 {avail - PAD:.0f}px —— 把框放宽或者把说明挪出去")
         if len(lab) > MAX_LABEL:
             problems.append(f"块里文字过长({len(lab)} > {MAX_LABEL}): {lab[:30]!r}… "
@@ -209,6 +268,26 @@ def check(path, expected_width_mm=None):
     for i in boxes:
         if i not in linked:
             problems.append(f"孤立块(没有任何边连着): {_label(boxes[i])!r}")
+
+    # 7c. 线不许穿过别的块。**这是最早那句「很多线都和框存在干涉」,而判官至今一条没查。**
+    # 走线按 折点(`<Array as="points">`)串成的折线算,两端取块心 —— 没有折点就是一条直线。
+    # 起点和终点那两个块当然要排除。pad 让擦边和贴着框走不算。
+    crossed = []
+    for e in edges:
+        s, t = e.get("source"), e.get("target")
+        if s not in geos or t not in geos or not geos[s] or not geos[t]:
+            continue
+        mid = lambda g: (g[0] + g[2] / 2, g[1] + g[3] / 2)
+        way = [mid(geos[s])] + _points(e) + [mid(geos[t])]
+        for i in ids:
+            if i in (s, t) or not geos[i]:
+                continue
+            if any(_seg_hits(way[k], way[k + 1], geos[i]) for k in range(len(way) - 1)):
+                crossed.append(f"{_label(boxes[s])!r}→{_label(boxes[t])!r} 压过了 {_label(boxes[i])!r}")
+                break
+    if crossed:
+        problems.append(LAY + f"线穿过块({len(crossed)} 条): {'; '.join(crossed[:3])}"
+                              " —— 走线要绕开别的块,不能从上面压过去")
 
     # 7b. 正交走线
     for e in edges:
@@ -285,7 +364,10 @@ def check(path, expected_width_mm=None):
         # 原来用欧氏距离 + 一个绝对上限,单位就错了:一个三岔判定,它最外侧那个分支
         # 天生就在斜下方老远 —— 那不是"隔着老远连",那是分岔本来的样子。
         # 换成两个各自有意义的量:纵向跨度按"层"算,横向跨度按"图宽"算。
-        if abs(y2 - y1) > 2 * (_bh + 60):
+        # 阈值是 1.5 层不是 2 层:**跨两层的边正好等于 2 层,`> 2 层` 差一点点就放过去了**,
+        # 而跨两层恰恰是最短的、必然穿过中间那个块的边 —— 这条规则最该抓的就是它。
+        # 相邻两层最多跨 `_bh + 60`,所以 1.5 倍既放过正常的、又抓得住跨两层的。
+        if abs(y2 - y1) > 1.5 * (_bh + 60):
             longest.append(f"{_label(boxes[s])!r}→{_label(boxes[t])!r} 纵向跨了 {abs(y2 - y1):.0f}px(超过两层)")
         # 横向的阈值要有个以块为单位的下限:一张只有两块宽的小图里,挪到隔壁那一格
         # 本身就占掉半张图宽 —— 没有这个下限,小图永远过不了。
@@ -348,6 +430,16 @@ def check(path, expected_width_mm=None):
         if w > 0 and h / w > MAX_ASPECT:
             problems.append(f"长宽比 1:{h / w:.1f} 超过 1:{MAX_ASPECT}({w:.0f}×{h:.0f}px)"
                             f" —— 版面放不下,砍掉次要的块或把并行的步骤并成一层")
+        # 13b. 太宽的那一侧。**不能用同一个 MAX_ASPECT 去挡** —— 折栏本来就是拿高度换宽度,
+        # 一张正常的三栏图就是 880×180(1:0.2)。真正的毛病不是"扁",是**印出来每个块有多宽**:
+        # 审计造的 32 块扇出图排到 7740px,判官 stdout / stderr 全是 [],而放进 183mm 的版面
+        # 每块只剩 1.7mm。判据就照着这个写 —— 缩到版面宽之后,最窄的块不能小于 MIN_BLOCK_MM。
+        if w > 0:
+            narrow = min(geos[i][2] for i in ids) / w * PAGE_MM
+            if narrow < MIN_BLOCK_MM:
+                problems.append(f"缩到 {PAGE_MM:.0f}mm 版面后最窄的块只有 {narrow:.1f}mm"
+                                f"(下限 {MIN_BLOCK_MM}mm,现在图宽 {w:.0f}px)"
+                                f" —— 一行摊开的块太多,拆成两段或者砍掉次要的块")
 
     # 8. 图宽(给了才查)
     if expected_width_mm is not None and ids:
@@ -374,7 +466,8 @@ _GOOD = """<mxfile><diagram><mxGraphModel><root>
 <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="b" target="c">
   <mxGeometry relative="1" as="geometry"/></mxCell>
 <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;" edge="1" parent="1" source="c" target="a">
-  <mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxGeometry relative="1" as="geometry"><Array as="points">
+    <mxPoint x="0" y="310"/><mxPoint x="0" y="70"/></Array></mxGeometry></mxCell>
 </root></mxGraphModel></diagram></mxfile>"""
 # 三个块一条链 + 一条回边 —— 这就是「向上的边只该有回边那一条」的合法形状,
 # 干净样本必须长成真流程图的样子,否则正向那三条根本没有能通过的基准。
@@ -494,6 +587,28 @@ def _selfcheck():
     _trap = _GOOD.replace("</root>", _box("检查块重叠", 40, 420, "#0072B2") + "</root>", 1)
     assert any(g.startswith("孤立块") for g in run(_trap)), \
         f"标签里的「块重叠」把孤立块冲进排版那一拨了: {run(_trap)}"
+    # 宽高 <= 0 / 没有几何:原来是**静默跳过**,一个 width="-500" 的块一次豁免七条规则。
+    _neg = _GOOD.replace('width="200" height="60"', 'width="-500" height="60"', 1)
+    assert any("宽高不是正数" in g for g in run(_neg)), f"负宽的块没报: {run(_neg)}"
+    _nog = _GOOD.replace('<mxGeometry x="40" y="40" width="200" height="60" as="geometry"/>', "", 1)
+    assert any("没有 mxGeometry" in g for g in run(_nog)), f"没有几何的块没报: {run(_nog)}"
+    # 线穿过块:把回边的绕行折点删掉,它就直接从中间那个块上压过去。
+    # **`drawio_layout` 给回边发折点的全部理由就是这个,而这条理由至今没被检查过。**
+    _straight = re.sub(r"<Array as=\"points\">.*?</Array>", "", _GOOD, flags=re.S)
+    assert any("线穿过块" in g for g in run(_straight)), f"回边直连压过中间的块却没报: {run(_straight)}"
+    # 跨两层的边正好等于两层高 —— 原来阈值写 `> 2 层`,差一点点就放过去了,
+    # 而跨两层恰恰是最短的、必然穿过中间块的那种边。
+    _skip2 = _GOOD.replace("</root>", _edge("ez", "a", "c") + "</root>", 1)
+    assert any("纵向跨了" in g for g in run(_skip2)), f"跨两层的边没报: {run(_skip2)}"
+    # 太扁:32 个块摊成一行,缩到版面宽之后每块只剩几毫米。用「印出来多宽」当判据,
+    # 不用长宽比 —— 折栏本来就是拿高度换宽度,一张正常的三栏图就是 1:0.2。
+    _wide = ("<mxfile><diagram><mxGraphModel><root>"
+             '<mxCell id="0"/><mxCell id="1" parent="0"/>'
+             + "".join(_box(f"n{k}", 40 + k * 340, 40, "#0072B2" if k % 2 else "#E69F00")
+                       for k in range(32))
+             + "".join(_edge(f"w{k}", f"n{k}", f"n{k + 1}") for k in range(31))
+             + "</root></mxGraphModel></diagram></mxfile>")
+    assert any("缩到" in g and "版面" in g for g in run(_wide)), f"摊成一行没报: {run(_wide)[:2]}"
     for want, (old, new) in _BAD.items():
         assert old in _GOOD, f"自检样本对不上: {old!r}"          # 改坏之前先确认改的是真东西
         got = run(_GOOD.replace(old, new, 1))

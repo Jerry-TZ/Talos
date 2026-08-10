@@ -23,6 +23,7 @@
 只是不再是模型的活。**
 """
 import json
+import re
 import sys
 from xml.sax.saxutils import escape, quoteattr
 
@@ -186,12 +187,35 @@ def _columns(ranks, row_h, col_w, rank, edges, back):
     return [ranks]
 
 
+# XML 1.0 里非法的控制字符。`quoteattr` 只管 & < > " 和空白,这些它照原样写出去,
+# 于是产出一个 **drawio 打不开、ET.parse 直接 ParseError** 的文件。而 JSON 里 ""
+# 完全合法 —— 模型从别处粘一段说明进来就可能带上。判官那时只能回一句
+# 「读不了 …: not well-formed」,连是哪个标签都指不出来。**在写出去之前就拦掉。**
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def build(graph):
+    if not isinstance(graph, dict) or "nodes" not in graph or "edges" not in graph:
+        # 整套设计的前提是「给模型一句它能照着改的话」。裸 KeyError 给的是调用栈。
+        raise ValueError("JSON 要有 nodes 和 edges 两个键:"
+                         '{"title": "…", "nodes": [{"id","label","kind"}], '
+                         '"edges": [{"source","target","label","kind"}]}')
+    for i, n in enumerate(graph["nodes"]):
+        if not isinstance(n, dict) or not n.get("id"):
+            raise ValueError(f"第 {i + 1} 个块没有 id —— 每个块都要有 id 和 label")
     nodes = [n["id"] for n in graph["nodes"]]
+    if len(set(nodes)) != len(nodes):
+        # 原来 meta 按 id 去重、nodes 不去重:重复 id 的块**静默丢掉一个的标签**,
+        # 而且产出两个同 id 同坐标的 mxCell —— mxGraphModel 的 id 是主键,那是个非法模型。
+        # 判官只看到一个块,返回 []。**丢东西的错误必须响。**
+        dup = sorted({i for i in nodes if nodes.count(i) > 1})
+        raise ValueError(f"块 id 重复: {dup} —— id 是主键,重了会有一个块被静默丢掉")
     meta = {n["id"]: n for n in graph["nodes"]}
     edges = graph["edges"]
-    for e in edges:
+    for i, e in enumerate(edges):
         for end in ("source", "target"):
+            if not isinstance(e, dict) or end not in e:
+                raise ValueError(f"第 {i + 1} 条边缺 {end} —— 每条边都要有 source 和 target")
             if e[end] not in meta:
                 raise ValueError(f"边指向不存在的块: {e[end]}")
 
@@ -200,6 +224,12 @@ def build(graph):
     for n in graph["nodes"]:
         if not n.get("label"):
             raise ValueError(f"块 {n.get('id')!r} 没有 label —— 每个块都要有字")
+        if _CTRL.search(str(n["label"])):
+            raise ValueError(f"块 {n['id']!r} 的标签里有控制字符(XML 1.0 不允许)—— "
+                             "产出的 .drawio 会打不开。把标签里的不可见字符清掉。")
+    for e in edges:
+        if _CTRL.search(str(e.get("label") or "")):
+            raise ValueError(f"边 {e['source']}→{e['target']} 的标签里有控制字符,同上")
     back = _back_edges(nodes, edges)
     rank = _ranks(nodes, edges, back)
     layers = _order(nodes, edges, back, rank)
@@ -376,6 +406,15 @@ if __name__ == "__main__":
         raise SystemExit(0)
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
-    graph = json.load(open(sys.argv[1], encoding="utf-8"))
-    open(sys.argv[2], "w", encoding="utf-8").write(build(graph))
+    # 拿到的是**一句能照着改的话**,不是调用栈。整套设计的前提就是这个:模型只会读
+    # 最后一行,而 `KeyError: 'edges'` 那一行既不说哪错了、也不说该怎么改。
+    try:
+        graph = json.load(open(sys.argv[1], encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"读不了 {sys.argv[1]}: {exc}")
+    try:
+        xml = build(graph)
+    except ValueError as exc:
+        raise SystemExit(str(exc))
+    open(sys.argv[2], "w", encoding="utf-8").write(xml)
     print(f"{len(graph['nodes'])} 块 {len(graph['edges'])} 边 -> {sys.argv[2]}")
