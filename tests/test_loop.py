@@ -544,7 +544,8 @@ def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
     for _ in range(A.READ_LIMIT - 1):
         assert A._read_guard(seen7, "run_bash", {"command": "type ./twice.py"}, "片段") == "片段"
     assert len(seen7) == 1, f"同一个文件被记成了 {len(seen7)} 个键"
-    assert sum(seen7.values()) == A.READ_LIMIT - 1, "一条命令把同一个文件数了不止一次"
+    # 值是 (次数, mtime) —— mtime 是为了让「文件没变」那句话变成真的,见 _read_guard
+    assert sum(v[0] for v in seen7.values()) == A.READ_LIMIT - 1, "一条命令把同一个文件数了不止一次"
 
 
 def test_a_broken_guard_must_not_take_the_whole_turn_down(ws, monkeypatch):
@@ -598,3 +599,78 @@ def test_pages_does_not_slurp_the_whole_file(ws, monkeypatch):
     for _ in range(A.READ_LIMIT - 1):
         A._read_guard(seen, "read_file", {"path": big}, "内容")
     assert calls == [], f"没到上限就扫了 {len(calls)} 遍文件"
+
+
+def test_the_guard_and_the_file_tools_must_resolve_paths_the_same_way(ws, monkeypatch):
+    """`v.py` 和 `workspace/v.py` 是同一个文件,守卫却把它们记在两个计数器上 ——
+    因为 `_in_workspace` 先走 `_strip_workspace_prefix`,而守卫没走。后果有两个:
+    预算凭空翻倍,以及 `write_file("workspace/v.py")` 清了个不存在的键,于是
+    边写边看的循环照样在第 6 轮断掉。**而那个函数的文档字符串写的就是
+    「模型会照抄 workspace/ 这个前缀」。** 上一轮我收敛了三个拼法,正好停在第四个之前。"""
+    import agent as A, os
+    monkeypatch.setattr(A, "ui", _ui())
+    # `_strip_workspace_prefix` 脱的是**工作区自己的名字**,所以工作区必须真叫 workspace ——
+    # ws 夹具给的是 tmp_path,名字是随机的,拿它测这条等于没测。
+    real = os.path.join(A.WORKSPACE, "workspace")
+    os.makedirs(real, exist_ok=True)
+    monkeypatch.setattr(A, "WORKSPACE", os.path.realpath(real))
+    p = os.path.join(A.WORKSPACE, "v.py")
+    open(p, "w", encoding="utf-8").write("x = 1\n")
+    spells = ("v.py", "./v.py", "workspace/v.py", p)
+    assert len({A._read_key(s) for s in spells}) == 1, \
+        "同一个文件的四种拼法没落在一个键上:" + repr({s: A._read_key(s)[1] for s in spells})
+    seen = {}
+    for i in range(A.READ_LIMIT):
+        last = A._read_guard(seen, "read_file", {"path": spells[i % 4]}, "内容")
+    assert "别再一段一段翻" in last and len(seen) == 1
+    # 写入清零也得认这个拼法
+    A._read_guard(seen, "write_file", {"path": "workspace/v.py"}, "wrote")
+    assert seen == {}, f"用 workspace/ 前缀写入之后没清零: {seen}"
+
+
+def test_a_file_that_actually_changed_is_not_refused(ws, monkeypatch):
+    """守卫的说辞是「文件没变,再读一遍不会读出新东西」—— 那句话原来是猜的:
+    只有 write_file / edit_file 清零,而 `run_bash` 是第三个写入者(脚本原地覆写、
+    重定向、模型自己 open(o,'w'))。于是刚被重新生成的文件在第 6 次被拒,
+    还附赠一句每轮都为假的话。改成问 mtime —— **问文件系统,别在正则上加分支。**"""
+    import agent as A, os, time
+    monkeypatch.setattr(A, "ui", _ui())
+    out = os.path.join(A.WORKSPACE, "gen.txt")
+    seen = {}
+    for i in range(A.READ_LIMIT * 3):
+        open(out, "w", encoding="utf-8").write(f"第 {i} 版\n")     # 脚本重新生成了它
+        os.utime(out, (1e9 + i, 1e9 + i))                          # mtime 分辨率不背这个锅
+        assert A._read_guard(seen, "read_file", {"path": out}, f"第 {i} 版") == f"第 {i} 版", \
+            f"第 {i} 轮:文件真的变了,却被当成打转拦下"
+    # 没变的时候照拦 —— 别把守卫治没了
+    for _ in range(A.READ_LIMIT * 2):
+        last = A._read_guard(seen, "read_file", {"path": out}, "内容")
+    assert "别再一段一段翻" in last, "文件不变时守卫失效了"
+
+
+def test_a_pure_write_command_is_not_counted_as_reading_its_own_output(ws, monkeypatch):
+    """`_READISH` 里有 `open\s*\(`,于是 `python -c "open(o,'w').write(x)"` 被算成
+    读它自己的输出:六次之后模型被告知「别再翻页」,而它翻的是自己正在写的文件。"""
+    import agent as A, os
+    monkeypatch.setattr(A, "ui", _ui())
+    o = os.path.join(A.WORKSPACE, "o.txt")
+    seen = {}
+    for i in range(A.READ_LIMIT * 3):
+        open(o, "w", encoding="utf-8").write(f"{i}\n")
+        os.utime(o, (1e9 + i, 1e9 + i))
+        cmd = {"command": f"""{A.sys.executable} -c "open('{o}','w').write('{i}')" """}
+        assert A._read_guard(seen, "run_bash", cmd, "写完了") == "写完了", f"第 {i} 次写被当成读拦下"
+    # 解释器自己永远不算被读的文件 —— POSIX 上它叫 `bin/python`,**没有扩展名**,
+    # 按扩展名挡的那道闸在那边整个失效,而它就在每条命令的开头。
+    assert A._SELF not in {k[1] for k in seen}, "解释器被记成了被读的文件"
+    # 上面那条在 Windows 上判不到:`.exe` 那道过滤先把它接住了,所以拆掉身份判据它照样绿
+    # —— **判据写在 python.exe 这个名字上,Linux 的两格 CI 就永远红不了。**
+    # 用一个没有扩展名的假解释器,两个平台都能红。
+    fake = os.path.join(A.WORKSPACE, "python")            # 没有扩展名,跟 POSIX 上一样
+    open(fake, "w", encoding="utf-8").write("")
+    monkeypatch.setattr(A, "_SELF", os.path.normcase(os.path.realpath(fake)))
+    seen2 = {}
+    for i in range(A.READ_LIMIT * 2):
+        A._read_guard(seen2, "run_bash",
+                      {"command": f"""{fake} -c "print(open('x{i}.txt').read())" """}, "输出")
+    assert seen2 == {}, f"没有扩展名的解释器被记成了被读的文件: {seen2}"

@@ -1438,6 +1438,36 @@ READ_LIMIT = 6       # 一轮里同一个文件读到第这么多次,就不再�
 _READISH = re.compile(r"findstr|\btype\b|\bcat\b|\bmore\b|\bhead\b|\btail\b|"
                       r"Get-Content|Select-String|open\s*\(|readlines|read_text", re.I)
 
+_SELF = os.path.normcase(os.path.realpath(sys.executable))   # 正在跑的解释器,不算"被读的文件"
+
+def _abs(p: str) -> str:
+    """守卫看到的路径,必须和文件工具看到的是同一个。
+
+    少一步 `_strip_workspace_prefix` 就差一个拼法:`v.py` 和 `workspace/v.py` 指同一个
+    文件,却落在两个计数器上(后者解成 `workspace/workspace/v.py`)—— 预算凭空翻倍,
+    而且 `write_file("workspace/v.py")` 清的是个不存在的键,写完再读照样在第 6 次被拦。
+    **而 `_strip_workspace_prefix` 的文档字符串写的就是「模型会照抄 workspace/ 这个前缀」。**
+    上一轮我把三个拼法收敛到了一个键(v.py / ./v.py / 绝对路径),**正好停在第四个之前**。"""
+    p = _strip_workspace_prefix(p)
+    cand = p if os.path.isabs(p) else os.path.join(WORKSPACE, p)
+    if not os.path.exists(cand):
+        # `_TOKEN` 的字符类里没有 `:`,于是 `C:\a\o.txt` 被切成 `\a\o.txt`。py3.10 认为它
+        # 是绝对路径 → 解析到**当前盘**(一个不存在的位置);而上面那道存在性过滤用的是
+        # `os.path.join(WORKSPACE, p)`,ntpath 会保留 WORKSPACE 的盘符 → 它存在,于是过滤放行。
+        # 两边对同一个字符串给出不同的路径,多出来的那个永远 `_mtime=None`,「文件变没变」
+        # 就永远是 None == None。**过滤和解析必须用同一套解法**,否则过滤放进来的东西
+        # 解析这边接不住 —— 今天这个盘符坑的第三种形态了。
+        alt = os.path.join(WORKSPACE, p)
+        if os.path.exists(alt):
+            return alt
+    return cand
+
+def _mtime(p: str):
+    try:
+        return os.path.getmtime(_abs(p))
+    except OSError:
+        return None
+
 def _pages(p: str) -> int:
     """整本翻一遍要几次 read_file。上限必须跟着文件长度走 —— 定死 6 次是我自己给自己
     挖的坑:同一天里我先把 `read_file` 放开到能读 `agent.py`(2118 行),又用一个
@@ -1451,9 +1481,8 @@ def _pages(p: str) -> int:
     30MB 的日志,一次 `findstr` 就分配了 3100 万字节;2GB 的日志就是 MemoryError。
     一道用来省 token 的闸,不该是全程序里内存峰值最高的地方。"""
     try:
-        base = p if os.path.isabs(p) else os.path.join(WORKSPACE, p)
         n, read = 0, 0
-        with open(base, "rb") as f:
+        with open(_abs(p), "rb") as f:
             while chunk := f.read(1 << 20):          # 峰值 1MB,跟文件多大无关
                 n, read = n + chunk.count(b"\n"), read + len(chunk)
                 if read >= READ_MAX_BYTES:
@@ -1467,9 +1496,8 @@ def _read_key(p: str):
     就又能读了 —— 而守卫的提示语本身就在叫模型换个写法,等于自己给自己发了钥匙。"""
     try:
         # 相对路径按 **WORKSPACE** 解,不按进程 cwd —— 文件工具就是这么解的,
-        # 而这个函数拿到的是没解析过的原始参数。
-        base = p if os.path.isabs(p) else os.path.join(WORKSPACE, p)
-        return ("read", os.path.normcase(os.path.realpath(base)))
+        # 而这个函数拿到的是没解析过的原始参数。见 `_abs`:还要脱掉 `workspace/` 前缀。
+        return ("read", os.path.normcase(os.path.realpath(_abs(p))))
     except OSError:
         return ("read", os.path.normcase(p))
 
@@ -1506,8 +1534,13 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
         #    `findstr /n "os.path" a.py` 里被记下的是**搜索词**,六个不同文件也能把它记满。
         # ② 滤掉可执行文件。每条命令开头都是那个 venv 的 python.exe,不滤就是解释器
         #    自己先撞上限,把正常命令的输出拦掉。**这条守卫误伤的第一个受害者是它自己。**
+        #    按扩展名挡只在 Windows 成立:POSIX 上 venv 的解释器叫 `bin/python`,**没有扩展名**,
+        #    而 `_env_block` 把 `sys.executable` 印给模型看、它就放在每条命令的开头。
+        #    所以再按**身份**挡一道:realpath 等于正在跑的这个解释器,那就不是"被读的文件"。
+        #    按拼写挡的判据,换个平台就漏 —— 这道闸今天已经因为拼写漏过一次了。
         paths = {p for p in _targets(args.get("command", ""))
                  if not p.lower().endswith((".exe", ".bat", ".cmd", ".com"))
+                 and os.path.normcase(os.path.realpath(_abs(p))) != _SELF
                  and (os.path.exists(p) or os.path.exists(os.path.join(WORKSPACE, p)))}
     else:
         return out                     # 跑脚本、写文件、编辑 —— 都不是"读同一个文件"
@@ -1525,14 +1558,30 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
         first.setdefault(_read_key(p), p)
     hot, n = "", 0
     for key, p in sorted(first.items()):
-        seen[key] = seen.get(key, 0) + 1
+        # 文件在这一轮里被改过就重新计数。守卫的说辞是「文件没变,再读一遍不会读出新东西」——
+        # 那句话原来是**猜的**:只有 write_file / edit_file 会清零,而 `run_bash` 是第三个
+        # 写入者(`python fix.py` 原地覆写、重定向、模型自己 `open(o,'w')`)。于是一个刚被
+        # 脚本重新生成的文件在第 6 次被拒,附赠一句每轮都为假的话。
+        # 顺带治了另一条:`_READISH` 里的 `open\s*\(` 会把**纯写入**命令算成读它自己的输出,
+        # 六次之后模型被告知「别再翻页」——它翻的是自己正在写的文件。改 mtime 之后这条
+        # 自然不成立了,因为每写一次 mtime 就变一次。**问文件系统,别在正则上加分支。**
+        # 用**键里解析好的真实路径**问文件系统,不用模型写的那个拼法。`_targets` 给回来的
+        # 代表拼法可能根本解析不了 —— `_TOKEN` 的字符类没有 `:`,`C:\a\o.txt` 被切成
+        # `\a\o.txt`,而 sorted 之后偏偏是它排在前面当了代表。`_mtime` 对它返回 None,
+        # 于是"变没变"永远是 None == None,重算一次都不会发生。
+        # **键是对的,代表是错的** —— 上一次是反过来(代表对、键分裂),同一个地方两种错法。
+        stamp = _mtime(key[1])
+        cnt, was = seen.get(key, (0, stamp))
+        if was != stamp:
+            cnt = 0
+        cnt += 1
+        seen[key] = (cnt, stamp)
         # 整本翻两遍还没找到要的东西,那就不是在读,是在打转。
         # `seen[key] >= READ_LIMIT` 这一半是白给的(右边的 max 至少是 READ_LIMIT),写出来
         # 是为了**短路掉 `_pages`** —— 否则前五次每次都要把文件从头扫一遍,而这条守卫
         # 恰恰是大文件才会走到的路。
-        if (seen[key] >= READ_LIMIT and seen[key] >= max(READ_LIMIT, 2 * _pages(p))
-                and seen[key] > n):
-            hot, n = p, seen[key]
+        if cnt >= READ_LIMIT and cnt >= max(READ_LIMIT, 2 * _pages(key[1])) and cnt > n:
+            hot, n = p, cnt            # p 只用来给人看名字,判据一律走 key[1]
     if not hot:
         return out
     if ui is not None:
