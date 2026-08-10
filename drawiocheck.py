@@ -410,6 +410,14 @@ _BAD = {
     # 文字放不进形状:同一段字,换成菱形就该红(圆角矩形放得下,菱形放不下)
     "文字放不进形状": ('value="干活" style="rounded=1;',
                        'value="check_permission(state, cls, name, args)" style="rhombus;'),
+    # ↓ 下面三条是变异扫描(tests/test_mutation.py)指出来的:规则一直在,case 一直没有。
+    # 32 个汉字 = 384px,200 宽的框里要 3 行 = 48px,而框只有 60-16=44px 可用。
+    # 32 < MAX_LABEL,所以红的只会是「竖着放不下」,不是「文字过长」。
+    "文字竖着放不下": ('value="干活"', 'value="' + "换行压不住" * 6 + '两字"'),
+    "悬空边": ('target="b"', 'target="根本没有这个块"'),
+    # 孤立块要**加**一个块,不是改一个 —— 这正是它一直没 case 的原因:_BAD 全是原地替换,
+    # 而「少一条边」「多一个块」这类结构性坏法,替换表天然表达不了。
+    "孤立块": ("</root>", _box("孤零零", 40, 420, "#0072B2") + "</root>"),
 }
 
 
@@ -430,6 +438,15 @@ def _selfcheck():
     assert any("断栏" in g for g in run(_TWOCOL.replace(_FOLD_EDGE, "", 1))), "删掉换栏边却没报断栏"
     assert any("跳着栏连" in g for g in run(_TWOCOL.replace("</root>", _JUMP_EDGE, 1))), \
         "跨两栏直连却没报"
+    # MAX_FOLD_EDGES:一对栏之间最多两条接续。这条检查是**上一轮外部审计发现洞之后当场补的,
+    # 但没补 case** —— 于是它可以原样烂回去而没人知道,直到变异扫描把它点出来。
+    # 「补了检查没补 case」是这个仓库里第二次出现,所以现在有 tests/test_mutation.py 盯着。
+    _fold3 = _TWOCOL.replace("</root>", _edge("x1", "a", "c") + _edge("x2", "a", "d") + "</root>", 1)
+    assert any("往下一栏拉了" in g for g in run(_fold3)), f"三条换栏边却没报: {run(_fold3)}"
+    # 图宽只在**给了期望值**时才查,而自检从来没给过 —— 所以它从上线起一次都没执行。
+    open(p, "w", encoding="utf-8").write(_GOOD)
+    assert any("图宽" in g for g in check(p, expected_width_mm=183.0)), "图宽对不上却没报"
+    assert not any("图宽" in g for g in check(p)), "没给期望宽度就不该查这一条"
     # 菱形拉两条平行边到同一个块 —— 图上重合成一条,肉眼看不见,却把「≥2 条出边」
     # 满足了。真发生过:`_is_correction` 那个菱形的「是纠正」「非纠正」终点是同一个块,
     # 判官返回 []。所以数的是**不同的去处**,不是边的条数。
