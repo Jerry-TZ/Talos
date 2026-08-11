@@ -516,6 +516,53 @@ def test_an_unrunnable_call_never_reaches_the_permission_box(ws, monkeypatch):
     assert "JSON 对象" in tools[1] and "list" in tools[1]        # 说清楚收到的是什么
 
 
+def test_a_required_parameter_with_no_value_is_not_runnable_either(ws, monkeypatch):
+    """键存在 ≠ 能执行。上一版 `_bad_args` 只数键,于是两种调用照样换到权限框:
+
+    · `{"command": null}` —— 过了键检查,然后在 check_permission 里拿 None 去
+      `os.path.normcase`,抛 TypeError。那行在 run_tool 的 try **外面**,整轮当场没了 ——
+      而这正是 `_bad_args` 号称堵上的那个洞,它只堵了非对象那一半。
+    · `{"command": ""}` —— 不崩,弹出一个**空的**权限框。人按 [a](框里没东西可看,
+      更不会犹豫),放行的是整个 bash 类。
+
+    空串不能一刀切:`write_file{content:""}` 是建空文件,`edit_file{new:""}` 是删掉一段,
+    两者都合法。所以判据默认拒绝、例外写明(`_MAY_BE_BLANK`),而不是反过来。"""
+    import agent as A
+    # 不能执行的:
+    for args, why in ((None, "null 值"), ("", "空串"), ("   ", "纯空白"), (12, "类型不对")):
+        assert A._bad_args("run_bash", {"command": args}) is not None, f"{why} 被放行了"
+    assert A._bad_args("edit_file", {"path": "a.py", "old": "", "new": "y"}) is not None
+    assert A._bad_args("spawn_subagent", {"task": " \n "}) is not None
+    # 合法的空,一个都不能误伤:
+    assert A._bad_args("write_file", {"path": "a.txt", "content": ""}) is None, "写空文件是合法的"
+    assert A._bad_args("edit_file", {"path": "a.py", "old": "x", "new": ""}) is None, "删掉一段是合法的"
+    assert A._bad_args("read_file", {"path": "a.py", "offset": "abc"}) is None, \
+        "可选参数写错是一次能执行、会干净失败的调用,不该在权限之前拦"
+
+    # run_tool 复用同一个判据。原来那份「同样的检查」只查键存在 —— 一个 required=[]
+    # 的自建工具,`run_tool(name, [])` 会把列表一路交到工具函数手里。
+    A.TOOLS["_probe_norequired"] = (lambda a: f"got-{type(a).__name__}", {}, [], "probe", "read")
+    try:
+        out, is_err = A.run_tool("_probe_norequired", [])
+        assert is_err and "JSON 对象" in out, f"非对象参数直接进了工具函数:{out!r}"
+    finally:
+        del A.TOOLS["_probe_norequired"]
+
+    # 接线:空值的调用同样不许弹框、不许换授权,而且不许把整轮带走。
+    boxes = []
+    ui = _ui()
+    ui.preview = lambda name, args: boxes.append(name)
+    ui.ask, ui.ask_again = (lambda: "a"), (lambda ans: "a")
+    monkeypatch.setattr(A, "ui", ui)
+    script = [_msg(tool_calls=[_tc("run_bash", '{"command": null}')]),
+              _msg(tool_calls=[_tc("run_bash", '{"command": "  "}', "c2")]),
+              _msg(content="done")]
+    messages = [{"role": "user", "content": "hi"}]
+    state = {"mode": "default", "allow": set()}
+    assert A.agent_turn(_Client(script), "m", messages, state) == "done", "整轮被守卫带走了"
+    assert boxes == [] and state["allow"] == set()
+
+
 def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
     """真实一轮:模型三十几次 run_bash 打印 agent.py 的不同片段,一次 read_file 都没用 ——
     上一版守卫按**工具名**计数,于是一次都没触发。文件工具关在 workspace 里,读上一级的

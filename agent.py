@@ -996,22 +996,50 @@ def _schema_hint(name: str) -> str:
             + json.dumps({k: f"<{v.get('type', 'string')}>" for k, v in props.items()}, ensure_ascii=False)
             + (f",其中 {', '.join(required)} 必填。" if required else "。"))
 
+# 空串是**合法内容**的两处:写一个空文件、把一段文字删掉(`new: ""` 就是删除)。
+# 其余必填串为空都意味着这次调用没有内容 —— 而权限框里显示的正是这些值,空值等于
+# 请人对着一个空框做决定。这不是「把发现的那条路径列出来」,是把合法的例外列出来:
+# 判据默认拒绝,例外要写明理由。
+_MAY_BE_BLANK = {("write_file", "content"), ("edit_file", "new")}
+
 def _bad_args(name: str, args) -> str | None:
     """这次调用**能不能执行**?能执行才值得为它弹权限框。返回错误说明,或 None 表示没问题。
 
-    单独抽出来是因为它必须跑在 `check_permission` **之前**。`run_tool` 里也留了同样的
-    检查(它是公开入口,别的调用方够得到),两处都要 —— 但真正堵住「无效调用换通行证」
-    那个洞的是 agent_turn 里的那次。"""
+    单独抽出来是因为它必须跑在 `check_permission` **之前**。`run_tool` 直接复用它 ——
+    原来那边是另写的一份「同样的检查」,而两份实现只是看着一样:它只查键存在,于是
+    一个 `required=[]` 的自建工具用 `run_tool(name, [])` 调进去,列表会一路交到工具函数
+    手里。同一个判据写两遍,迟早只修好其中一遍。
+
+    **只查必填参数的值。** 可选参数写错(`offset: "abc"`)是一次能执行、会干净失败的
+    调用,`run_tool` 的 try 会把错误交回模型 —— 那条路是通的,不该在这里拦。"""
     if name not in TOOLS:
         return None                                  # 名字不认识,上面另有处理
     if not isinstance(args, dict):
-        # 合法 JSON 但不是对象:`[]` / `null` / `"x"`。原来一路带到 `_policy` 的 `.get()`
-        # 才抛 AttributeError,而那里在 run_tool 的 try 外面 —— 抛出去是整轮没了。
+        # 合法 JSON 但不是对象:`[]` / `null` / `"x"`。原来一路带到 `check_permission`
+        # 的 `args.get()` 才抛 AttributeError,而那里在 run_tool 的 try 外面 ——
+        # 抛出去是整轮没了。
         return (f"调用 {name} 的 arguments 必须是一个 JSON 对象,收到的是 "
                 f"{type(args).__name__}。{_schema_hint(name)}")
-    missing = [k for k in TOOLS[name][2] if k not in args]
+    _fn, props, required, _desc, _cls = TOOLS[name]
+    missing = [k for k in required if k not in args]
     if missing:
         return f"调用 {name} 少了必填参数 {missing}。{_schema_hint(name)}"
+    # 键存在不等于能执行。`{"command": null}` 过了上面两关,然后在 check_permission 里
+    # 拿 None 去 `os.path.normcase` —— 那行在 run_tool 的 try 外面,整轮当场没了。
+    # `{"command": ""}` 更糟:它不崩,它弹出一个**空的**权限框,人按 [a],放行的是
+    # 整个 bash 类。批准的东西不但要存在、要能执行,还得是人在框里看得见的东西。
+    for k in required:
+        v = args[k]
+        spec = props.get(k)
+        want = spec.get("type", "string") if isinstance(spec, dict) else "string"
+        if v is None:
+            return f"调用 {name} 的必填参数 {k} 是 null,没有值就没法执行。{_schema_hint(name)}"
+        if want == "string" and not isinstance(v, str):
+            return (f"调用 {name} 的参数 {k} 必须是字符串,收到的是 "
+                    f"{type(v).__name__}。{_schema_hint(name)}")
+        if isinstance(v, str) and not v.strip() and (name, k) not in _MAY_BE_BLANK:
+            return (f"调用 {name} 的必填参数 {k} 是空的。这次调用没有内容可执行,"
+                    f"也没有内容可以让用户在权限提示里看见。{_schema_hint(name)}")
     return None
 
 
@@ -1022,9 +1050,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         # than echoing the garbage back, or the next attempt is just a different guess.
         return (f"error: 没有名叫 {name!r} 的工具。工具名必须是纯名字,参数要放在 arguments 的 "
                 f"JSON 里,不能写进名字。现有工具:{', '.join(sorted(TOOLS))}"), True
-    missing = [k for k in TOOLS[name][2] if k not in (args or {})]
-    if missing:
-        return f"error: 调用 {name} 少了必填参数 {missing}。{_schema_hint(name)}", True
+    bad = _bad_args(name, args)                 # 同一个判据,不是「同样的检查」的第二份实现
+    if bad is not None:
+        return f"error: {bad}", True
     try:
         out = TOOLS[name][0](args)
         if inspect.iscoroutine(out):            # a self-written tool may use an async lib (playwright, httpx)
