@@ -296,6 +296,50 @@ def test_merging_by_keywords_must_not_swallow_a_different_fact(ws):
     assert R.recall("trusts Alice Bob", k=5).count("Alice trusts Bob") == 1
 
 
+@pytest.mark.xfail(strict=True, reason="_activate 不做质量守恒 —— 已知缺陷,改它要连门槛一起重配,见 recall._activate")
+def test_nodes_that_share_nothing_with_the_query_must_not_change_the_answer(ws):
+    """**没有标注也能判的一条:与查询零交集的节点,不该改变任何结果。**
+
+    这是不变性,不是排序质量 —— 它不需要冻结验证集,所以「没有数据不能调参」拦不住它。
+
+    现状是红的。加入 N 条与查询**零交集**、只彼此共享两个桥接词的近重复事实:
+
+        零交集节点数    技能分   全场最高   技能进 top5
+             0         0.20     0.20        是
+            20         0.32     0.33        否      <- 结果已经变了
+            60         0.55     0.88        否
+
+    注意最高分**一直没到 1.0**。`_activate` 的注释里原来写着「哪天量到分数普遍越过 1,
+    那时候必须归一化」—— 那个触发条件晚了:top-5 身份在 0.33 就翻了。
+
+    去重(`_dedupe`)够不着这里:每条多一个 nonce,关键词集合就不相等。这是
+    `_activate` 送出去的总量随邻居数增长的一般形态,重复只是它最扎眼的那个特例。
+
+    量过归一化(按出边权重和,即随机游走):这条不变性**完美成立**,五档全是 0.20。
+    但真实语料 5 个查询里 4 个 top-5 身份变了,而且分数整体缩水 —— 有个查询的三条技能
+    掉到只剩一条(两条跌破 `THRESH`)。所以那不是一行改动,是「换模型 + 重配绝对门槛」,
+    而重配需要冻结验证集(未参与调参的真实查询只有 4 条,需要 32)。
+
+    `strict=True`:哪天真修了,这条会因为「意外通过」而红,逼着把挂账一起结掉。"""
+    import recall as R
+    def run(n):
+        with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+            f.write("".join(f"- bridgeone bridgetwo n{i:03d}\n" for i in range(n)))
+        os.makedirs(R.SKILLS_DIR, exist_ok=True)
+        with open(os.path.join(R.SKILLS_DIR, "s.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: t\ndescription: alpha handling bridgeone bridgetwo\n---\n"
+                    + "note " * 40)
+        rows = R.explain("alpha bravo charlie delta echo", k=5)
+        skill = next((a for a, kind, _t in rows if kind == "技能"), None)
+        return skill, [kind for _a, kind, _t in rows]
+    base_score, base_kinds = run(0)
+    assert base_score is not None
+    for n in (20, 60):
+        score, kinds = run(n)
+        assert score == base_score, f"{n} 条零交集节点把技能分从 {base_score} 抬到了 {score}"
+        assert kinds == base_kinds, f"{n} 条零交集节点改变了 top-5 的构成"
+
+
 def test_body_injection_does_not_depend_on_how_many_rows_we_show(ws, monkeypatch):
     """「这条技能够不够可信」不能取决于「给模型看几条」。
 
