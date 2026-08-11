@@ -1114,10 +1114,12 @@ def scan_skills() -> dict:
 
     Walks subdirectories and non-markdown files: a downloaded skill is a package, and the
     payload lives in the script it ships, not in the prose that describes it."""
-    flagged = {}
+    flagged, mds = {}, []
     for root, _dirs, files in os.walk(SKILLS_DIR):
         for fn in sorted(files):
             path = os.path.join(root, fn)
+            if fn.lower().endswith(".md"):
+                mds.append(path)
             if not fn.lower().endswith(_SCAN_EXT):
                 flagged.setdefault(path, []).append("非文本文件(自己看)")
                 continue
@@ -1134,6 +1136,31 @@ def scan_skills() -> dict:
                 why.append("可执行脚本(技能包的载荷通常在这里)")
             if why:
                 flagged[path] = why
+    # **被标红的载荷要连累指着它的那份说明。** 实测:`deploy-helper.py` 三条红旗全中
+    # (读凭据 / 外发数据 / 可执行脚本),而 `deploy-helper.md` —— 正文写着「read_file 看
+    # 用法,然后 run_bash 执行它」—— 照样在常驻清单里,检索也照样捞得到 0.60。
+    # 旗子插在**没人看的文件**上,把模型引过去的那份说明一个字没动。
+    # 扫描范围上一版已经扩到子目录和非 md 了,**但隔离范围没跟着扩** —— 又一次
+    # 「只补了被发现的那条路径」:补的是"看得见载荷",没补"看见了要怎么办"。
+    #
+    # 连累的判据两条,都限定**同一个目录**(别让 skills/pkg/ 里的脚本连累顶层的技能):
+    # 同名(`x.py` ↔ `x.md`,技能包最常见的形状),或者说明正文里点名提到它。
+    # 点名用 `_mentions` —— 跟 denied 粘性同一个函数,认名字边界,不是裸子串。
+    payloads = sorted(p for p in flagged if not p.lower().endswith(".md"))
+    for path in mds:
+        if path in flagged:
+            continue                              # 它自己已经标红了,不用再说一遍
+        try:
+            body = _read_full(path)
+        except Exception:
+            continue                              # 读不了的上一轮已经标红
+        stem = os.path.splitext(os.path.basename(path))[0]
+        for pay in payloads:
+            base = os.path.basename(pay)
+            if os.path.dirname(pay) != os.path.dirname(path):
+                continue
+            if os.path.splitext(base)[0] == stem or _mentions(body, base):
+                flagged.setdefault(path, []).append(f"随包带的 {base} 被标红,而这份说明指着它")
     return flagged
 
 def retrieve() -> str:
