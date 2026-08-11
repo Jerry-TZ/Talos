@@ -41,7 +41,19 @@ class Session:
 
     @classmethod
     def new(cls) -> "Session":
-        return cls(time.strftime("%Y%m%d-%H%M%S"))
+        """秒级时间戳**不保证唯一**,而这里的 id 是会话的全部身份。
+
+        同一秒起两个会话就是同一个 sid。两个文件都写得出来(slug 不同),
+        `list_sessions()` 里两条都看得见 —— 但 `_path_for` 是前缀匹配、只返回排序第一个,
+        于是 **`/resume` 谁都只能回到第一个,第二个会话永远打不开**。它没丢,是够不着。
+        撞了就往后加序号;顺带 `_path_for` 改成优先精确匹配,否则 `-2` 会排在 `__` 前面,
+        拿完整 sid 去找反而找到那个带序号的。"""
+        base = sid = time.strftime("%Y%m%d-%H%M%S")
+        n = 1
+        while _path_for(sid) is not None:
+            n += 1
+            sid = f"{base}-{n}"
+        return cls(sid)
 
     @property
     def path(self) -> str:
@@ -49,15 +61,31 @@ class Session:
         return os.path.join(SESS_DIR, name + ".jsonl")
 
     def save(self, messages: list) -> None:
+        """先写临时文件再原子替换,**最后**才删旧的。
+
+        上一版的顺序是「先 `os.remove(old)`,再 `open(new, "w")`」—— 中间任何一次失败
+        (磁盘满、权限、被占用)都是**两个文件都没有**,整个会话没了。而且 `"w"` 是
+        先截断再写,写到一半崩掉留下的是半截文件:`load()` 会跳过坏行,所以它不报错,
+        它只是**安静地少了后半段**。删除是这个项目里唯一没有撤销的动作,顺序不能反。"""
         old = self.path
         if not self.slug:                                  # 首次保存 → 用第一句 prompt 起名
             self.slug = _slug(_first_user(messages))
         os.makedirs(SESS_DIR, exist_ok=True)
-        if old != self.path and os.path.exists(old):       # 起名后文件名变了,清掉旧的(含旧格式迁移)
+        tmp = self.path + ".tmp"                           # 不以 .jsonl 结尾,不会被任何 glob 捡走
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                for m in messages:
+                    f.write(json.dumps(m, ensure_ascii=False) + "\n")
+            os.replace(tmp, self.path)                     # 原子:要么旧的完整,要么新的完整
+        except BaseException:
+            # 半成品自己收走。save() 每轮都跑,一个稳定复现的序列化失败会把目录堆满。
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+        if old != self.path and os.path.exists(old):       # 起名后文件名变了(含旧格式迁移)
             os.remove(old)
-        with open(self.path, "w", encoding="utf-8") as f:
-            for m in messages:
-                f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
     def load(self) -> list:
         # A single corrupt line must not brick a resume — skip it, don't crash the whole session.
@@ -80,7 +108,11 @@ class Session:
 def _path_for(sid: str) -> str | None:
     # escape: a sid of "*" would otherwise match every session and pick an arbitrary one.
     hits = sorted(glob.glob(os.path.join(SESS_DIR, glob.escape(sid) + "*.jsonl")))
-    return hits[0] if hits else None
+    # 精确的 sid 优先于前缀命中。前缀匹配是给用户敲一半 id 用的,可它同时让**完整**的
+    # sid 也变成前缀:`20260811-120000` 会命中 `20260811-120000-2__x.jsonl`,而 `-`(0x2D)
+    # 排在 `_`(0x5F)前面 —— 拿完整 id 去找,`sorted()[0]` 给回来的是那个带序号的别人。
+    exact = [p for p in hits if _parse_name(p)[0] == sid]
+    return (exact or hits or [None])[0]
 
 def open_session(sid: str) -> "Session | None":
     """Bind to an existing session (recovering its slug from the filename)."""
@@ -95,17 +127,26 @@ def list_sessions() -> list:
     for path in glob.glob(os.path.join(SESS_DIR, "*.jsonl")):
         sid, slug = _parse_name(path)
         first, n = "", 0
+        # 坏行**跳过**,不是就此不数。上一版把 `json.loads` 放在 `try` 里、`except` 在整个
+        # 循环外面:第 3 行坏掉,后面 96 行一条都不数,`/history` 报 3 条而 `load()` 读回 99 条。
+        # 同一个文件在两个地方给出两个数,而这里没有任何报错 —— 它只是**默默少数**。
+        # 判据(能不能读)和读法必须跟 `load()` 一致:那边跳过坏行,这边也跳过。
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
                 for ln in f:
                     if not ln.strip():
                         continue
+                    try:
+                        m = json.loads(ln)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(m, dict) or not isinstance(m.get("role"), str):
+                        continue
                     n += 1
-                    m = json.loads(ln)
-                    if not first and m.get("role") == "user" and isinstance(m.get("content"), str):
+                    if not first and m["role"] == "user" and isinstance(m.get("content"), str):
                         first = m["content"]
-        except Exception:
-            pass
+        except OSError:
+            pass                                    # 文件读不了:这一条仍然列出来,只是没有摘要
         rows.append((sid, os.path.getmtime(path), first or slug, n))
     return sorted(rows, key=lambda r: r[1], reverse=True)
 
