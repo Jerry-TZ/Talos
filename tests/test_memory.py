@@ -712,6 +712,10 @@ def test_the_dont_use_clause_is_stripped_however_it_is_punctuated(ws):
     # 而它上面的注释写着"或者用中文逗号"。补这条测试时我照着敲全角,**敲出来的又是半角**,
     # 一模一样的错犯了第二次(是打码点才发现的)。肉眼分不出 `;` 和 `;`,那就别靠肉眼。
     # 最后一种不带冒号:`。不用于 X` 这种写法真实存在(本仓库自己的技能就是),负向意思一样成立。
+    # **别再一个一个数标点了。** 补完全角之后审计又量出 `!` `！` `?` `？` `.` 五个还漏着 ——
+    # 判据是「这几个字符」而写法是无穷的,枚举永远落后一步。正则改成 `[^\w]`(非词字符
+    # 即子句开头),下面这串枚举因此不再是判据本身,只是**样本**:真正的判据是
+    # 「随便挑一个标点都得成立」,所以顺手把 ASCII 标点全扫一遍。
     _S = "用于:把几个 csv 合并成一张表"
     _T = "不用于:前端渲染 页面布局"
     for i, desc in enumerate([_S + ";" + _T,
@@ -721,6 +725,9 @@ def test_the_dont_use_clause_is_stripped_however_it_is_punctuated(ws):
                               _S + "，" + _T,                       # 全角逗号
                               _S + "、" + _T,                       # 顿号
                               _S + "；不用于：前端渲染 页面布局",   # 全角冒号
+                              _S + "!" + _T, _S + "！" + _T,        # 感叹号(半角/全角)
+                              _S + "?" + _T, _S + "？" + _T,        # 问号(半角/全角)
+                              _S + "." + _T, _S + " " + _T,         # 句点、空格
                               "用于 把几个 csv 合并成一张表。不用于 前端渲染 页面布局"]):
         for f in os.listdir(R.SKILLS_DIR):
             os.remove(os.path.join(R.SKILLS_DIR, f))
@@ -728,6 +735,13 @@ def test_the_dont_use_clause_is_stripped_however_it_is_punctuated(ws):
             fh.write("---\nname: merge\ndescription: %s\n---\n把多个 csv 按主键合并。\n" % desc)
         assert not R.explain("帮我做前端渲染的页面布局"), f"第 {i} 种写法没被摘掉: {desc[:30]}"
         assert R.explain("把几个 csv 合并成一张表"), f"第 {i} 种写法把该捞的也摘没了"
+    # 判据不是那张枚举表:随便挑一个 ASCII 标点都得成立,一个都不许漏。
+    import string
+    for p in string.punctuation:
+        assert "前端" not in R._keywords(R._drop_dont_use(_S + p + _T)), \
+            f"分隔符 {p!r}(U+{ord(p):04X})没被认成子句开头"
+    # 反方向:紧贴汉字的写法**不**摘 —— 跟上一版一致,往「少摘」那边倒是安全方向
+    assert "前端" in R._keywords(R._drop_dont_use("这条技能不用于前端渲染"))
 
 
 def test_a_refusal_survives_the_subagent_boundary(ws, monkeypatch):
