@@ -480,6 +480,42 @@ def test_the_read_guard_is_actually_wired_into_the_loop(ws, monkeypatch):
     tools = [m["content"] for m in messages if m.get("role") == "tool"]
     assert tools[0] == "原始内容" and "别再一段一段翻" in tools[-1]
 
+def test_an_unrunnable_call_never_reaches_the_permission_box(ws, monkeypatch):
+    """参数**先验后问**这条接线,自己一直没人测。
+
+    `_bad_args` 上线时我在 commit 里写了「反向验证:退回旧实现当场红」—— 那句验的是
+    同一条 commit 里的 `_targets`,不是这个。全仓库 `grep -rn _bad_args tests/` 零命中,
+    把 agent_turn 里那两行删掉,153 条测试照样全绿。**判据存在 ≠ 判据在被执行**,
+    这是今天第三次撞上同一个形状,而这次是在我自己刚写完那条 commit 之后。
+
+    要守的不变量:一次**根本执行不了**的调用不配弹权限框。反过来的代价是真实的 ——
+    `run_bash {}` 弹出的框里参数是空的,人按 [a](反射性答案),这一下放行的是整个
+    bash 类,下一条真命令直接不问了。
+
+    所以这条从 agent_turn 走真实分发,只断言外部可见的三件事:框没弹、会话授权没变、
+    模型收到的是能照着改的说明。故意用 `mode="default"` + `ask -> "a"`:退回旧实现时,
+    第一条就会把 run_bash 加进 allow。"""
+    import agent as A
+    boxes = []
+    ui = _ui()
+    ui.preview = lambda name, args: boxes.append(name)
+    ui.ask = lambda: "a"                      # 人几乎总是按 a —— 这正是它危险的原因
+    ui.ask_again = lambda ans: "a"
+    monkeypatch.setattr(A, "ui", ui)
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("ran", False))
+    script = [_msg(tool_calls=[_tc("run_bash", "{}")]),              # 少必填参数
+              _msg(tool_calls=[_tc("run_bash", "[]", "c2")]),        # 合法 JSON 但不是对象
+              _msg(content="done")]
+    messages = [{"role": "user", "content": "hi"}]
+    state = {"mode": "default", "allow": set()}
+    assert A.agent_turn(_Client(script), "m", messages, state) == "done"
+    assert boxes == [], f"为一次执行不了的调用弹了权限框:{boxes}"
+    assert state["allow"] == set(), "一次执行不了的调用换到了整个会话的 run_bash 授权"
+    tools = [m["content"] for m in messages if m.get("role") == "tool"]
+    assert "必填参数" in tools[0] and "command" in tools[0]      # 说清楚缺什么
+    assert "JSON 对象" in tools[1] and "list" in tools[1]        # 说清楚收到的是什么
+
+
 def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
     """真实一轮:模型三十几次 run_bash 打印 agent.py 的不同片段,一次 read_file 都没用 ——
     上一版守卫按**工具名**计数,于是一次都没触发。文件工具关在 workspace 里,读上一级的
