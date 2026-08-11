@@ -265,6 +265,37 @@ def test_duplicate_memories_do_not_amplify_each_other(ws):
     assert scores[8] <= 1.0, f"分数跑出 [0,1]: {scores[8]}"
 
 
+def test_merging_by_keywords_must_not_swallow_a_different_fact(ws):
+    """关键词集合相同 ≠ 说的是同一件事。
+
+        - Alice trusts Bob
+        - Bob trusts Alice
+
+    两行的 kw 都是 `{alice, bob, trusts}`,方向正好相反。上一版按集合**删除**重复,
+    实测只剩后一条,前一条连同来源被彻底删掉 —— 而那条注释写的理由是「留一个不丢
+    任何可检索的信息」:分辨不了的是**排名**,不是**内容**,后半句当时想错了。
+
+    合并之后:图上仍然算一个节点(这是去重要解决的放大问题),但两条原文都得交付到,
+    命中也要记到被合并的那条头上,否则 `dead()` 数不到它,遗忘那条路把它当不存在。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- Alice trusts Bob\n- Bob trusts Alice\n")
+    rows = R.explain("trusts Alice Bob", k=5)
+    assert len(rows) == 1, f"图上该合成一个节点,实际 {len(rows)} 个 —— 放大又回来了"
+    assert rows[0][0] <= 1.0
+    body = R.recall("trusts Alice Bob", k=5)
+    for want in ("Alice trusts Bob", "Bob trusts Alice"):
+        assert want in body, f"{want!r} 被合并的时候丢了"
+    # 两条都要计入使用统计,不然被合并的那条永远不涨 seen
+    hits = R._load_hits()
+    for want in ("Alice trusts Bob", "Bob trusts Alice"):
+        assert hits.get("事实:" + want, [0])[0] >= 1, f"{want!r} 没被计入 seen"
+    # 一字不差的重复仍然只留一条 —— 合并不是「什么都留下」
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- Alice trusts Bob\n" * 4)
+    assert R.recall("trusts Alice Bob", k=5).count("Alice trusts Bob") == 1
+
+
 def test_body_injection_does_not_depend_on_how_many_rows_we_show(ws, monkeypatch):
     """「这条技能够不够可信」不能取决于「给模型看几条」。
 
