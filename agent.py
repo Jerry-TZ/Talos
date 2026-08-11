@@ -1176,7 +1176,11 @@ def retrieve() -> str:
         except Exception:
             continue                              # unreadable => stays out, never aborts the turn
         name = meta.get("name") or os.path.splitext(os.path.basename(path))[0]
-        lines.append(f"- {name} — {meta.get('description', '')}  (需要时 read_file `{path}` 看步骤)")
+        # 走 recall 那个共享的带上限函数。`SKILL_MAX` 管不到这里 —— 它只在写入闸上生效,
+        # 而 clone/下载/手工放进 skills/ 的技能一个字都没过闸,description 却每一轮都进
+        # system prompt。检索那条路也用同一个函数,「要么两条路都加,要么都不加」。
+        lines.append(f"- {recall_mod().skill_label(name, meta.get('description', ''))}"
+                     f"  (需要时 read_file `{path}` 看步骤)")
     if lines:
         parts.append("# 可用技能 (skills/) — 相关时才读正文\n" + "\n".join(lines))
     return "\n\n".join(parts)

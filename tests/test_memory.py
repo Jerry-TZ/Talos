@@ -617,6 +617,44 @@ def test_reflection_sees_the_skills_it_already_has(ws):
     assert "rust-build" not in block                 # 不相关的不摆 —— 摆多了等于没摆
     assert "什么都不写" in block                      # NOOP 这个档位存在了
 
+def test_an_oversized_skill_description_cannot_flood_the_system_prompt(ws):
+    """`SKILL_MAX` 管不到外来技能。它只在 write_file/edit_file 的闸上生效,也就是只管
+    Talos 自己写的;clone 来的、下载来的、手工放进 `skills/` 的,一个字都没过闸,
+    而它的 `description` 会**每一轮**进 system prompt。
+
+    一行 50KB 的描述不需要藏任何指令就够难看:它把别的技能、把记忆、把任务本身挤出去。
+
+    **两条注入路都要堵**:agent.py 的常驻技能清单,和 recall 的检索结果(后者同时喂给
+    `_known_skills`)。`_load_nodes` 的注释写着「任何后加的过滤要么两条路都加,要么都不加」
+    —— 所以这条测试两条都断言,少堵一条就红。"""
+    import agent as A
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    flood = "csv 合并 " * 6000                      # ~48000 字符,一行
+    with open(os.path.join(R.SKILLS_DIR, "big.md"), "w", encoding="utf-8") as f:
+        # description 写在前面:打分读的是 `body[:SKILL_BODY_MAX]`,超长的 name 排在前面
+        # 会把关键词整段挤出这 1200 字符,检索就一条都捞不到 —— 那样测的就不是上限了。
+        f.write("---\ndescription: %s\nname: %s\n---\n正文\n" % (flood, "n" * 5000))
+    cap = R.DESC_MAX + R.NAME_MAX + 200            # 加上截断说明和分隔符的余量
+    # ① 常驻清单
+    idx = A.retrieve()
+    assert "big.md" in idx or "nnn" in idx, "技能压根没进清单,这条测试就白测了"
+    line = next(l for l in idx.splitlines() if "big.md" in l or l.startswith("- nnn"))
+    assert len(line) < cap, f"常驻技能清单那行 {len(line)} 字符,没有上限"
+    # ② 检索路(同时是 _known_skills 的来源)
+    rows = R.explain("把几个 csv 合并", k=5)
+    assert rows, "检索什么都没捞到,这条测试就白测了"
+    assert all(len(t) < cap for _s, _k, t in rows), \
+        f"检索注入的技能行最长 {max(len(t) for _s, _k, t in rows)} 字符,没有上限"
+    assert "已截断" in R.explain("把几个 csv 合并", k=5)[0][2], "截了却不说,读起来跟完整的一样"
+    # 上限是量出来的,不是拍的:本机 17 条 description 最长 302、name 最长 27,
+    # 取 400/60 是为了**现有的一条都不被截**。把上限调小到会误伤真实技能,这里必须红 ——
+    # 少了这条断言,DESC_MAX 改成 20 都没人管(变异体第一次跑就是这么绿的)。
+    real_max_desc, real_max_name = "描" * 302, "n" * 27
+    assert "已截断" not in R.skill_label(real_max_name, real_max_desc), \
+        f"上限 {R.DESC_MAX}/{R.NAME_MAX} 会截掉本机现有的技能描述(实测最长 302 / 27)"
+
+
 def test_reflection_prompt_is_unchanged_when_there_is_nothing_to_dedupe(ws):
     """一条技能都没有(或都不沾边)时,一个字都别加 —— 空表格只会教它去改不存在的文件。"""
     import agent as A

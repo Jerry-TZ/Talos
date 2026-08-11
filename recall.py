@@ -53,6 +53,38 @@ def _keywords(text: str) -> set:
             kw.add(run)
     return kw - _STOP
 
+# 索引行的长度上限。**`SKILL_MAX` 管不到这里** —— 它只在 write_file/edit_file 的闸上生效
+# (agent.py:578),也就是只管 Talos 自己写的技能。clone 来的、下载来的、别人放进 skills/ 的,
+# 一个字都没过闸,而它的 `description` 会**每一轮**进 system prompt。一行 50KB 的描述
+# 不需要藏任何指令就够难看了:它把别的技能、把记忆、把任务本身全挤出去。
+# 本机 17 条实测 description 最长 302、中位 123,name 最长 27 —— 上限取 400/60,
+# 现有的一条都不会被截,而注入面从"无界"变成"有界"。
+#
+# **只截,不隔离。** 隔离(像 scan_skills 那样标红)会让一条仅仅是啰嗦的技能整个消失,
+# 那比截断更糟。截断解决的是"无界"这一件事;描述里藏指令是另一件事,归 skill_risks 管,
+# 而那道闸自己就是一张关键词黑名单(见 agent.py 里那句警告),截断既不加强它也不削弱它。
+NAME_MAX, DESC_MAX = 60, 400
+
+def skill_label(name: str, desc: str) -> str:
+    """技能索引行里那句 `name — description`,带长度上限。
+
+    **两条注入路都必须走这里。** 一条是 agent.py 的常驻技能清单,一条是这里的
+    `_frontmatter_desc` → `recall()` / `_known_skills`。`_load_nodes` 的注释写着
+    「任何后加的过滤要么两条路都加,要么都不加」—— 上一次漏掉一条路是被审计逮到的,
+    这次做成一个函数,想只补一条都补不了。
+
+    顺手把空白折成单空格:frontmatter 是逐行 `key: value` 解析的,换行进不来,
+    但制表符能 —— 它在索引里能伪造出缩进结构。"""
+    name = " ".join(str(name).split())
+    desc = " ".join(str(desc).split())
+    if len(name) > NAME_MAX:
+        name = name[:NAME_MAX] + "…"
+    if len(desc) > DESC_MAX:
+        # 截了要说出来。不说的话被截的描述读起来跟完整的一模一样,而模型看不出区别 ——
+        # 「一个失败长得像成功」这个形状在这个仓库里已经吃过三次亏了。
+        desc = desc[:DESC_MAX] + f"…(描述超过 {DESC_MAX} 字符,已截断)"
+    return (name + " — " + desc).strip(" —")
+
 def _frontmatter_desc(txt: str) -> str:
     name = desc = ""
     if txt.startswith("---"):
@@ -63,7 +95,7 @@ def _frontmatter_desc(txt: str) -> str:
                     name = line[5:].strip()
                 elif line.startswith("description:"):
                     desc = line[12:].strip()
-    return (name + " — " + desc).strip(" —") or txt[:60]
+    return skill_label(name, desc) or txt[:60]
 
 # 来源标记:复盘写的行会被打上 `<!-- reflect YYYY-MM-DD -->`(由代码补,不指望模型自觉)。
 # 没有标记 = 你手写的 = 更可信,dead() 永远不会提议删它。
