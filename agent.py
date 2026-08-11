@@ -1268,7 +1268,11 @@ def _drain_stdin() -> None:
         pass                            # failing to drain must never block the prompt
 
 _FILENAME = re.compile(r"[\w.\-]+\.\w{1,5}")
-_TOKEN = re.compile(r"[\w.\-\\/]{2,}")
+# `{2,}` 会让**单字符文件名**永远不成为候选 —— 拒绝 `del a` 之后 denied 是空的。
+# 上一版看不出来,因为 `_targets` 末尾还有个 `len >= 3` 的下限把它一起盖住了;
+# 下限一撤,这条才露出来。放宽到 `+` 不会变吵:findall 取的是最长连续段,`del a`
+# 切出来还是 `['del', 'a']`,而每个候选都要过一次 `os.path.exists` 才会被记下。
+_TOKEN = re.compile(r"[\w.\-\\/]+")
 # 引号里的整段。`_TOKEN` 的字符类里没有空格,于是 `del "Important Report"` 被拆成两个
 # 都不存在的词,`_targets` 返回**空集合** —— 拒绝了等于没记,粘性对带空格的文件名从来
 # 没生效过。而带空格的文件名在 Windows 上遍地都是。**第四次补同一个机制了。**
@@ -1295,12 +1299,31 @@ def _targets(cmd: str) -> set:
             continue                                  # 是开关不是文件
         if os.path.exists(tok) or os.path.exists(os.path.join(WORKSPACE, tok)):
             out.add(tok)
-    # 连**基名**一起记。粘性的判据是"这个串出现在新命令里"(子串匹配),而同一个文件有
-    # 无数种写法:`Makefile` / `.\Makefile` / 绝对路径。只记下当时那一种,换个写法就绕过去了 ——
-    # 而 `_read_key` 那条守卫今天刚为同一个理由改成按解析后的真实路径计数,我没把它用到这里。
-    # 基名是所有写法的公共子串,记住它,哪种写法都躲不开。
-    # 长度下限 3:一个叫 `a` 的文件会让 denied 里躺进一个 "a",此后**每条命令**都要弹框。
-    return {t for t in out | {os.path.basename(t.rstrip("\\/")) for t in out} if len(t) >= 3}
+    # 连**基名**一起记。同一个文件有无数种写法:`Makefile` / `.\Makefile` / 绝对路径。
+    # 只记下当时那一种,换个写法就绕过去了 —— 而 `_read_key` 那条守卫今天刚为同一个理由
+    # 改成按解析后的真实路径计数,我没把它用到这里。基名是所有写法的公共子串。
+    #
+    # **这里不再设长度下限。** 上一版是 `len(t) >= 3`,理由写的是「一个叫 `a` 的文件会让
+    # denied 变成万能匹配」—— 那是拿**记录端**去补**匹配端**的毛病。代价是叫 `ab`、`日志`、
+    # `src` 的目标一个都记不下来:实测拒绝 `del ab` 之后 denied 是空集合,下一条
+    # `python cleanup.py ab` 连框都不弹。而这段注释上面三行就写着「少记的代价是文件没了」。
+    # 真正该改的是匹配:见 `_mentions`。
+    return {t for t in out | {os.path.basename(t.rstrip("\\/")) for t in out} if t}
+
+
+# 名字必须被当成**一个独立的名字**提到,不是随便出现在某个更长的词里面。
+# 上一版消费 `denied` 用的是裸子串 `f in cmd`,于是拒过 `rmdir log` 之后,一条无害的
+# `python catalog.py` 也要弹框 —— 而人一旦再拒一次,`catalog.py` 又进了 denied,
+# **误命中会把 denied 自己撑大**,越用越爱弹框。
+#
+# 边界字符类只取 ASCII 文件名字符,**故意不含 CJK**:中文没有词边界,`日志` 出现在
+# `日志表` 里区分不了。含 CJK 的话「把log删了」这种自然语句也会漏掉。所以这里往**宽**了
+# 判 —— 多弹一次框,而不是漏掉一个文件。两个消费方向正好都吃这个偏向:闸门宁可多问,
+# 提示行多列一个名字只是噪声。
+_NAMECHAR = r"[A-Za-z0-9_.\-]"
+
+def _mentions(text: str, name: str) -> bool:
+    return re.search(f"(?<!{_NAMECHAR}){re.escape(name)}(?!{_NAMECHAR})", text) is not None
 
 def _named_in_request(state: dict, args: dict) -> list:
     """Files this delete touches whose names the user typed.
@@ -1315,7 +1338,7 @@ def _named_in_request(state: dict, args: dict) -> list:
     if not _DESTRUCTIVE.search(cmd):
         return []
     asked = state.get("asked", "")
-    return sorted({f for f in _targets(cmd) if f and f in asked})
+    return sorted({f for f in _targets(cmd) if f and _mentions(asked, f)})
 
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
@@ -1330,7 +1353,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # Windows 上 Report.md 和 report.md 是同一个文件,而 `in` 是区分大小写的 ——
         # 拒绝 `del Report.md` 之后,`del report.md` 直接放行。normcase 在 Windows 上
         # 折大小写、在 POSIX 上原样返回,正好就是各自文件系统的语义。
-        if any(os.path.normcase(f) in cmd_nc for f in state.get("denied", ())):
+        if any(_mentions(cmd_nc, os.path.normcase(f)) for f in state.get("denied", ())):
             decision = "ask"
     if decision == "allow":
         return True, ""

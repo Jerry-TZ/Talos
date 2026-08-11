@@ -720,9 +720,66 @@ def test_stickiness_survives_quotes_spaces_and_path_spelling(ws):
         for cmd in ("del Makefile", "del " + os.path.join(".", "Makefile"),
                     "del " + os.path.join(A.WORKSPACE, "Makefile")):
             assert "Makefile" in A._targets(cmd), f"{cmd!r} 没留下基名"
-        # 长度下限:一个叫 a 的文件不能让此后每条命令都弹框
-        open(os.path.join(A.WORKSPACE, "a"), "w").close()
-        assert "a" not in A._targets("del a"), "单字符基名会把 denied 变成万能匹配"
+        # 短名字也必须记下来。上一版在这里设了 `len >= 3`,拿**记录端**去补**匹配端**的
+        # 毛病:代价是 ab / 日志 / src 这些目标一个都记不下来,而这个函数的注释自己写着
+        # 「少记的代价是文件没了」。真正该收窄的是消费 denied 时的裸子串匹配(见 _mentions)。
+        for n in ("a", "ab", "日志"):
+            open(os.path.join(A.WORKSPACE, n), "w").close()
+            assert n in A._targets("del " + n), f"{n!r} 没被记下来 —— 短名字失去了拒绝粘性"
+    finally:
+        os.chdir(cwd)
+
+
+def test_a_denied_name_must_be_mentioned_as_a_name_not_as_a_substring(ws, monkeypatch):
+    """粘性靠子串匹配,而子串匹配不认边界:拒过 `rmdir log` 之后,一条无害的
+    `python catalog.py` 也弹框 —— 人再拒一次,`catalog.py` 又进了 denied,
+    **误命中会把 denied 自己撑大**,越用越爱弹框。实测过这个滚雪球。
+
+    往回收窄不能靠「短名字干脆别记」(那是 `_targets` 上一版的做法,代价是文件没了),
+    要靠匹配时认名字边界。边界类**故意只含 ASCII**:中文没有词边界,`日志` 和 `日志表`
+    分不开 —— 分不开时往**多弹一次框**那边倒,不往漏掉文件那边倒。"""
+    import os
+    import types
+    import agent as A
+    boxes = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: boxes.append(a[0]), ask=lambda: "n", note=lambda *a: None))
+    os.mkdir(os.path.join(A.WORKSPACE, "log"))
+    for n in ("catalog.py", "ab", "cleanup.py"):
+        open(os.path.join(A.WORKSPACE, n), "w").close()
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        st = {"mode": "default", "allow": {"run_bash"}, "asked": "", "denied": set()}
+        A.check_permission(st, "bash", "run_bash", {"command": "rmdir log"})
+        assert "log" in st["denied"]
+        boxes.clear()
+        ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python catalog.py"})
+        assert ok and boxes == [], "denied 里的 log 命中了 catalog.py —— denied 会自己撑大"
+        assert st["denied"] == {"log"}, "误命中之后 denied 长大了"
+        # 真提到就必须再问,哪种写法都一样
+        for cmd in ("rm -rf log", "rm -rf ." + os.sep + "log", 'python -c "shutil.rmtree(\'log\')"'):
+            boxes.clear()
+            A.check_permission(st, "bash", "run_bash", {"command": cmd})
+            assert boxes == ["run_bash"], f"{cmd!r} 提到了 log,却没再问"
+        # 两字符的名字现在也有粘性了(上一版 len>=3 把它整个丢掉)
+        st2 = {"mode": "default", "allow": {"run_bash"}, "asked": "", "denied": set()}
+        A.check_permission(st2, "bash", "run_bash", {"command": "del ab"})
+        assert "ab" in st2["denied"]
+        boxes.clear()
+        A.check_permission(st2, "bash", "run_bash", {"command": "python cleanup.py ab"})
+        assert boxes == ["run_bash"], "两字符的目标拒过之后,换条命令直接放行了"
+
+        # 同一个判据的**另一个消费方**:删除提示里那行「你在请求里点名要过它」。
+        # 这里也是裸子串,同样会误命中 —— 而它误命中的代价是警告被噪声稀释,
+        # 一行到处都在的警告等于没有警告。
+        # (这条是变异体测出来的:我改了 `_named_in_request` 却没配判据,摘掉改动 156 条全绿。)
+        rm = {"command": "rmdir log"}
+        assert A._named_in_request({"asked": "顺手把 catalog.py 的输出整理一下"}, rm) == [], \
+            "请求里根本没提 log,却因为 catalog.py 含 log 而报警"
+        # 中文没有词边界,所以边界类里**不含** CJK —— 紧贴汉字的名字必须照样认出来
+        assert A._named_in_request({"asked": "把log目录删了"}, rm) == ["log"], \
+            "请求里点名要过 log,提示行却没列出来"
     finally:
         os.chdir(cwd)
 
