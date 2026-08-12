@@ -1110,9 +1110,17 @@ _SKILL_RED_FLAGS = [
     (r"curl[^\n|]*\|\s*(ba)?sh|wget[^\n|]*\|\s*(ba)?sh|iwr[^\n|]*\|\s*iex|Invoke-Expression", "下载即执行"),
     (r"base64\s+-d|FromBase64String|certutil\s+-decode", "解码后执行(藏命令)"),
     # 读凭据要看"动作",不是看提到没提到 —— 「不需要 API key」是说明,`type .env` 才是行为
+    # 最后那一段本来是冲着**环境变量式的密钥名**(`API_KEY` / `SECRET_TOKEN`)去的,
+    # 可 `skill_risks` 给整条正则加了 `re.I` —— 于是它把每一个 `xxx_key` 都当成密钥。
+    # 实测代价:今天新写的 `mutation-testing.md` 因为正文里一句 `natural_key 的数字转 int`
+    # 被整条隔离,**在常驻清单和检索里都消失了,而没有任何地方会说一声**。
+    # `sort_key` / `primary_key` / `api_key` 同理 —— 这些词在讲代码的技能里遍地都是。
+    # 用 `(?-i:...)` 把这一段单独关掉忽略大小写:大小写在这里**就是判据本身**。
+    # 顺带字符类补上 `_`:原来是 `[A-Z0-9]*`,连 `AWS_SECRET_ACCESS_KEY` 都匹配不到 ——
+    # 一条既误伤又漏网的规则,两头都是同一个原因:没人拿真样本试过它。
     (r"\.ssh[/\\]|id_rsa|\.aws[/\\]credentials|Login Data|Cookies\b"
      r"|(?:type|cat|copy|more|Get-Content|open\(|read_file)[^\n]{0,24}\.env\b"
-     r"|\b[A-Z][A-Z0-9]*_(?:KEY|TOKEN|SECRET|PASSWORD)\b", "读凭据/密钥"),
+     r"|(?-i:\b[A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|PASSWORD)\b)", "读凭据/密钥"),
     (r"requests\.post|urlopen\([^)]*http|Invoke-RestMethod[^\n]*-Method\s+Post", "外发数据"),
     (r"schtasks|reg\s+add|New-ItemProperty[^\n]*Run\b|启动项", "写持久化"),
     (r"del\s+/[sq]|rmdir\s+/s|rm\s+-rf\s+/|format\s+[a-z]:", "批量删除"),

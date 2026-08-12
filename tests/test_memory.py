@@ -66,6 +66,25 @@ def test_hostile_skill_is_flagged_and_never_advertised(ws):
     injected = A.retrieve()
     assert "deploy-helper" not in injected and "csv-stats" in injected
 
+def test_the_credential_flag_reads_case_as_the_signal_not_as_noise(ws):
+    """`API_KEY` 是密钥,`natural_key` 是个变量名 —— 区别只有大小写,而 `skill_risks`
+    给整条正则加了 `re.I`,把这个区别抹掉了。
+
+    这不是假想:**本仓库真实的 `mutation-testing.md` 就因为正文里一句
+    `natural_key 的数字转 int` 被整条隔离**,在常驻清单和检索里同时消失,
+    而没有任何地方会说一声。`sort_key` / `primary_key` / `api_key` 在讲代码的技能里遍地都是。
+
+    反方向也一起钉住:原来的字符类是 `[A-Z0-9]*`,连 `AWS_SECRET_ACCESS_KEY` 都匹配不到。
+    **一条既误伤又漏网的规则,两头是同一个原因 —— 没人拿真样本试过它。**"""
+    import agent as A
+    for s in ("natural_key 的数字转 int", "sort_key=lambda r: r[0]",
+              "primary_key 用自增 id", "api_key 这个字段名"):
+        assert "读凭据/密钥" not in A.skill_risks(s), f"{s!r} 被当成了密钥"
+    for s in ("API_KEY=sk-xxx", "export SECRET_TOKEN=1", "AWS_SECRET_ACCESS_KEY",
+              "DB_PASSWORD 写在这里"):
+        assert "读凭据/密钥" in A.skill_risks(s), f"{s!r} 是真密钥,没拦住"
+
+
 def test_quarantined_skill_cannot_come_back_via_recall(ws):
     """隔离要在每条通往 system prompt 的路上都成立 —— recall 是独立索引,曾经漏了。"""
     import agent as A
