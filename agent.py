@@ -1008,9 +1008,14 @@ _MAY_BE_BLANK = {("write_file", "content"), ("edit_file", "new")}
 _JSON_TYPES = {"string": str, "integer": int, "number": (int, float),
                "boolean": bool, "array": list, "object": dict}
 
-def _type_ok(v, want: str) -> bool:
+def _type_ok(v, want) -> bool:
     """值配不配得上 schema 里声明的 type。"""
-    if want not in _JSON_TYPES:
+    # `want` 不一定是字符串:`"type": ["string", "null"]` 是合法 JSON Schema,而
+    # `create_tool` 的 parameters 是模型写的。拿列表去查字典 → TypeError: unhashable,
+    # 而 `_bad_args` 在 run_tool 的 try **外面** —— 这道「防止整轮没了」的闸自己把整轮
+    # 带走了。又是从一个正确的例子归纳出一个错误的全称:内置工具的 type 全是字符串
+    # 是真的,JSON Schema 的 type 全是字符串是假的。
+    if not isinstance(want, str) or want not in _JSON_TYPES:
         return True                    # 没声明、或声明了不认识的 type:那是"没声明",
                                        # 不是"声明了别的",拦它属于自己发明规矩
     if isinstance(v, bool) and want != "boolean":

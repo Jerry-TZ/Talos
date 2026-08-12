@@ -556,6 +556,12 @@ def test_a_required_parameter_with_no_value_is_not_runnable_either(ws, monkeypat
             assert A._bad_args("_probe_types", {**ok, k: bad}) is not None, why
         # 声明了不认识的 type 就别管 —— 那是"没声明",拦它属于自己发明规矩
         assert A._bad_args("_probe_types", {**ok, "who": 123}) is None
+        # 但 null 例外,而这一条上面那行**盖不住**:审计说 `v is None` 那两行是冗余的
+        # (`_type_ok(None, "string")` 本来就是 False),摘掉全绿 —— 全绿是因为没人测
+        # 不认识的 type。声明了 `"type": "nope"` 时 `_type_ok` 一律放行,这两行就是
+        # 拦住 null 的唯一一道。**「摘掉没测试红」有两种解释,这次是第二种。**
+        assert A._bad_args("_probe_types", {**ok, "who": None}) is not None, \
+            "type 不认识时 null 一路放行了 —— 它会带着 None 走到 check_permission"
     finally:
         del A.TOOLS["_probe_types"]
 
@@ -581,6 +587,53 @@ def test_a_required_parameter_with_no_value_is_not_runnable_either(ws, monkeypat
     state = {"mode": "default", "allow": set()}
     assert A.agent_turn(_Client(script), "m", messages, state) == "done", "整轮被守卫带走了"
     assert boxes == [] and state["allow"] == set()
+
+
+def test_a_schema_that_declares_two_types_must_not_take_the_turn_down(ws, monkeypatch):
+    """`"type": ["string", "null"]` 是合法 JSON Schema,而 `create_tool` 的 parameters
+    是模型自己写的。上一版 `_type_ok` 里那句 `want not in _JSON_TYPES` 拿列表去查字典 ——
+    `TypeError: unhashable type: 'list'`。
+
+    要命的是它抛在哪:`_bad_args` 跑在 `check_permission` 之前、在 `run_tool` 的 try
+    **外面**(agent.py 那段注释写的就是「抛出去是整轮没了」)。于是**这道防止整轮没了
+    的闸,自己把整轮带走了** —— 而且是模型给自己写工具时踩,不是敌手构造的输入。
+
+    所以这条断言的不是"拦住"也不是"放过",是**别崩**:union type 按"没声明"处理
+    (跟 `"type": "nope"` 同一条规矩,不自己发明),但 null 仍然要拦住。"""
+    import agent as A
+    A.TOOLS["_probe_union"] = (lambda a: "ok", {"u": {"type": ["string", "null"]}},
+                               ["u"], "probe", "bash")
+    try:
+        assert A._bad_args("_probe_union", {"u": "x"}) is None
+        assert A._bad_args("_probe_union", {"u": 123}) is None, "union 当没声明处理,不该拦"
+        assert A._bad_args("_probe_union", {"u": None}) is not None, "null 还是不能执行"
+    finally:
+        del A.TOOLS["_probe_union"]
+
+
+def test_the_error_a_model_gets_back_must_name_the_parameters_it_has_to_supply(ws):
+    """`_schema_hint` 是错误信息里唯一**可执行**的部分 —— 「少了必填参数 ['names']」只说了
+    哪儿错了,照着它改不出下一次调用;后面那句「应该是 {"names": "<array>"},其中 names
+    必填」才是模型能照着改的。而把 `_schema_hint` 整个打桩成 `''`,172 条全绿:所有断言
+    都只查前半句。
+
+    这在自建工具上最要紧:内置工具的 schema 模型见过很多遍,自己刚写的那个没见过,
+    只有这句提示能告诉它参数长什么样。所以断言绑在**工具自己的 schema** 上 —— 名字、
+    类型、哪些必填都得从 TOOLS 里读出来,写死一句"应该是 JSON 对象"过不了。"""
+    import agent as A
+    A.TOOLS["_probe_hint"] = (lambda a: "ok",
+                              {"quokka": {"type": "array"}, "wombat": {"type": "integer"}},
+                              ["quokka"], "probe", "bash")
+    try:
+        for args in ({}, [], {"quokka": None}, {"quokka": "不是数组"}):
+            msg = A._bad_args("_probe_hint", args)
+            assert msg is not None
+            for want in ("quokka", "array", "wombat", "integer"):
+                assert want in msg, f"{args!r} 的报错里没有 {want} —— 模型照着它改不出来:{msg}"
+            assert "必填" in msg and "wombat" not in msg.split("其中")[-1], \
+                f"没说清哪些必填,可选的 wombat 会被当成必填补上:{msg}"
+    finally:
+        del A.TOOLS["_probe_hint"]
 
 
 def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
@@ -756,7 +809,7 @@ def test_a_file_that_actually_changed_is_not_refused(ws, monkeypatch):
 
 
 def test_a_pure_write_command_is_not_counted_as_reading_its_own_output(ws, monkeypatch):
-    """`_READISH` 里有 `open\s*\(`,于是 `python -c "open(o,'w').write(x)"` 被算成
+    r"""`_READISH` 里有 `open\s*\(`,于是 `python -c "open(o,'w').write(x)"` 被算成
     读它自己的输出:六次之后模型被告知「别再翻页」,而它翻的是自己正在写的文件。"""
     import agent as A, os
     monkeypatch.setattr(A, "ui", _ui())
