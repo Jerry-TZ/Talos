@@ -1,5 +1,9 @@
 """会话存储:自动起名 / 往返 / 编号+前缀解析 / 删除 / 旧格式迁移。"""
+import contextlib
 import os
+import sys
+
+import pytest
 
 def test_roundtrip_and_autotitle(ws):
     import session as S
@@ -68,6 +72,77 @@ def test_two_sessions_in_the_same_second_are_both_reachable(ws, monkeypatch):
     assert S._path_for(a.sid) == a.path
     assert len({r[0] for r in S.list_sessions()}) == 2
 
+def test_two_sessions_that_have_not_been_saved_yet_still_get_different_ids(ws, monkeypatch):
+    """上一条测试是 new→save→new,**证明不了并发**:它只覆盖了「撞号检查看得见对方的文件」。
+
+    `new()` 从不落盘,而上一版的检查只看已落盘的文件 —— 两个都还没 `save()` 的会话拿到
+    同一个 sid,save 完 `/resume` 谁都只能回到第一个,第二个会话永远打不开。并发起会话、
+    或者起了会话半天不说话(延迟落盘),长的都是这个样子。
+    占位符是**盘上的文件**不是内存里的表,所以这一条同时也是跨进程的判据。
+    时钟冻住测:靠"跑得够快所以同一秒"是把本机时序烤进判据。"""
+    import session as S
+    monkeypatch.setattr(S.time, "strftime", lambda *a: "20260811-120000")
+    a = S.Session.new()
+    b = S.Session.new()                                    # 两个都还没落盘
+    assert a.sid != b.sid, "两个都还没 save() 的会话拿到了同一个 id"
+    a.save([{"role": "user", "content": "第一个会话"}])
+    b.save([{"role": "user", "content": "第二个会话"}])
+    assert S.open_session(a.sid).load()[0]["content"] == "第一个会话"
+    assert S.open_session(b.sid).load()[0]["content"] == "第二个会话"
+    # 敲全的 id 不许被更长的兄弟抢走:`20260811-120000` 也是 `20260811-120000-2` 的前缀,
+    # 而 `resolve` 按 mtime 排 —— 后写的 b 排在最前面,`/resume <a 的完整 id>` 会打开 b。
+    assert S.resolve(a.sid) == a.sid and S.resolve(b.sid) == b.sid
+    S.Session.new()                                        # 占住号,但一直不 save
+    assert len(S.list_sessions()) == 2, f"占位的空会话冒出来了:{S.list_sessions()}"
+
+def test_a_locked_old_file_must_not_hijack_the_new_one(ws, monkeypatch):
+    """改名时 `os.remove(old)` 在 try 外面 —— 而它跑在 `os.replace` **之后**。
+
+    旧文件删不掉(Windows 上一个不带 delete-sharing 的句柄就够了),`save()` 就整个抛出去:
+    调用方看到「保存失败」,可磁盘上新文件已经完整落盘了,只是旁边还留着旧的那个。两个文件
+    的**精确 sid 相同**,而 `.`(0x2E)排在 `_`(0x5F)前面,`_path_for` 按名字排恰好挑中
+    旧格式那个 —— `/resume` 读回旧内容:**这一轮的对话存下来了,却看不见。**
+
+    造法用 monkeypatch 让 `os.remove` 抛 `PermissionError`:ubuntu 和 windows 跑的是同一条
+    代码路径,不是 skip。Windows 上再拿一个**真句柄**复跑一遍 —— CPython 的 `open()` 不带
+    FILE_SHARE_DELETE,`os.remove` 会真的抛,用来验证上面那个模拟没有在测一件不存在的事。"""
+    import session as S
+
+    @contextlib.contextmanager
+    def refused(legacy):
+        """两个平台同一条路径:只对这个文件抛,别的 remove(比如清 .tmp)照常放过去。
+
+        `normcase` 不是为了迁就 Windows —— 它在 POSIX 上是恒等函数,两边都是**正确的**
+        同一个文件判断,而不是"在 Linux 上跳过"。"""
+        real = os.remove
+        def blocked(path, *a, **kw):
+            if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(legacy)):
+                raise PermissionError(13, "旧文件被占用(模拟)")
+            return real(path, *a, **kw)
+        with monkeypatch.context() as m:
+            m.setattr(S.os, "remove", blocked)
+            yield
+
+    def migrate(sid, blocker):
+        os.makedirs(S.SESS_DIR, exist_ok=True)
+        legacy = os.path.join(S.SESS_DIR, sid + ".jsonl")
+        with open(legacy, "w", encoding="utf-8") as f:
+            f.write('{"role": "user", "content": "旧内容"}\n')
+        og = S.open_session(sid)
+        assert og.slug == ""                    # 旧格式:这次 save 才会改名,才走得到 os.remove(old)
+        with blocker(legacy):
+            with pytest.warns(UserWarning):     # 删不掉可以,无声无息不行
+                og.save([{"role": "user", "content": "旧内容"},
+                         {"role": "assistant", "content": "新内容"}])   # 抛出去 = 这条红
+        assert os.path.exists(legacy), "这条测试要靠一次真的删不掉,而它删掉了"
+        assert os.path.exists(og.path), "新文件没落盘"
+        assert [m["content"] for m in S.open_session(sid).load()] == ["旧内容", "新内容"], \
+            "/resume 读回了那个没删掉的旧文件 —— 这一轮存下来了却看不见"
+
+    migrate("20200303-000000", refused)
+    if sys.platform == "win32":                 # 附加:同一条断言,换成真的被占用的句柄
+        migrate("20200304-000000", lambda legacy: open(legacy, "r", encoding="utf-8"))
+
 def test_a_failed_save_must_not_destroy_the_previous_one(ws):
     """上一版顺序是「先删旧的,再打开新的写」—— 中间任何一次失败都是两个文件都没有。
 
@@ -128,6 +203,38 @@ def test_history_counts_the_same_messages_resume_loads(ws):
     loaded = S.open_session("20990102-000000").load()
     assert row[3] == len(loaded) == 4, f"/history 数出 {row[3]} 条,/resume 读回 {len(loaded)} 条"
     assert row[2] == "第一句", "坏行把标题也带没了"
+
+def test_delete_removes_every_file_that_is_this_session(ws):
+    """删完还能 resume 回来 —— 这是「说删了却没删」,比删多了更糟。
+
+    旧文件删不掉那次(见 `save()` 尾巴)盘上留了两个**精确同 sid** 的文件。上一版
+    `delete` 只删 `_path_for` 挑中的那一个(新格式那份),旧格式的残留还在,于是
+    `/delete` 印「deleted」,`/resume` 照样读回旧内容 —— 实测过。
+
+    只删**精确**命中:前缀命中是另一个会话的 id,不是这个会话的副本,一根手指都不能碰。"""
+    import session as S
+    os.makedirs(S.SESS_DIR, exist_ok=True)
+    W = lambda n, c: open(os.path.join(S.SESS_DIR, n), "w", encoding="utf-8").write(
+        '{"role":"user","content":"%s"}\n' % c)
+    W("20200101-000000.jsonl", "旧格式残留")               # 同一个 sid 的两份
+    W("20200101-000000__新标题.jsonl", "新写好的")
+    W("20200101-000000-2__另一个会话.jsonl", "别人")       # 前缀命中,但**不是**同一个 sid
+    assert S.delete("20200101-000000") is True
+    assert S._exact("20200101-000000") == [], "旧格式那份残留还在 —— resume 能把它救回来"
+    assert S.open_session("20200101-000000-2").load()[0]["content"] == "别人", \
+        "把前缀命中的另一个会话也删了"
+    # 注意这里**不能**断言 open_session 返回 None:删干净之后它命中的是 `-2` 那条,
+    # 那是既有的「敲一半 id」前缀行为,不是残留。我第一版就断言错了这一条。
+    # 删不干净就不许报成功
+    W("20200101-000000__回来了.jsonl", "又出现了")
+    real = os.remove
+    try:
+        os.remove = lambda p, *a, **k: (_ for _ in ()).throw(PermissionError("占用"))
+        with pytest.warns(UserWarning):
+            assert S.delete("20200101-000000") is False, "一个都没删掉,却报了成功"
+    finally:
+        os.remove = real
+
 
 def test_old_format_migration(ws):
     import session as S
