@@ -143,6 +143,33 @@ def test_a_locked_old_file_must_not_hijack_the_new_one(ws, monkeypatch):
     if sys.platform == "win32":                 # 附加:同一条断言,换成真的被占用的句柄
         migrate("20200304-000000", lambda legacy: open(legacy, "r", encoding="utf-8"))
 
+def test_abandoned_claims_do_not_pile_up_forever(ws, monkeypatch):
+    """占位符只在**那一秒**有意义,而遗弃它不罕见:每一次没产生对话就结束的启动都留一个
+    (敲错命令、看一眼就退、CLI 参数打错)。实测就是这么撞见的 —— 一条 `--history`
+    (它其实不是 CLI 参数,是 REPL 里的 `/history`)启动了 REPL 又退出,当场留下一个。
+
+    判据是精确的、不是启发式的:`20260812-143138.claim` 只可能挡住那一秒的会话,
+    而那一秒永远不会再来。所以「不是当前这一秒的占位符」= 对谁都不再有意义,可以删。
+    不需要 atexit,也不需要赌进程能正常收尾。"""
+    import session as S
+    clock = {"t": "20260101-000000"}
+    monkeypatch.setattr(S.time, "strftime", lambda *a: clock["t"])
+    for _ in range(3):                                # 三个起了就扔的会话
+        S.Session.new()
+    claims = lambda: sorted(f for f in os.listdir(S.SESS_DIR) if f.endswith(".claim"))
+    assert len(claims()) == 3, f"同一秒的三个占位符该都留着:{claims()}"
+    clock["t"] = "20260101-000005"                    # 时间往前走 5 秒
+    live = S.Session.new()
+    assert claims() == [live.sid + ".claim"], f"上一秒的垃圾没清掉:{claims()}"
+    # 同一秒的别人不许被清掉 —— 那是活的占位符,清了就撞号
+    other = S.Session.new()
+    assert set(claims()) == {live.sid + ".claim", other.sid + ".claim"}, \
+        "把同一秒里别人正占着的号清掉了"
+    # 真会话文件一根手指都不许碰
+    live.save([{"role": "user", "content": "真会话"}])
+    assert S.open_session(live.sid).load()[0]["content"] == "真会话"
+
+
 def test_a_failed_save_must_not_destroy_the_previous_one(ws):
     """上一版顺序是「先删旧的,再打开新的写」—— 中间任何一次失败都是两个文件都没有。
 
