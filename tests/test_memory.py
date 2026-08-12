@@ -440,47 +440,59 @@ def test_a_merged_fact_can_still_be_forgotten(ws):
 
 
 @pytest.mark.xfail(strict=True, reason="_activate 不做质量守恒 —— 已知缺陷,改它要连门槛一起重配,见 recall._activate")
-def test_nodes_that_share_nothing_with_the_query_must_not_change_the_answer(ws):
-    """**没有标注也能判的一条:与查询零交集的节点,不该改变任何结果。**
+def test_copying_a_bridge_node_must_not_scale_its_pull(ws):
+    """**没有标注也能判的一条:同一条内容复制 N 份,不该顶 N 份用。**
 
-    这是不变性,不是排序质量 —— 它不需要冻结验证集,所以「没有数据不能调参」拦不住它。
+    这是不变性,不是排序质量 —— 不需要冻结验证集,所以「没有数据不能调参」拦不住它。
 
-    现状是红的。加入 N 条与查询**零交集**、只彼此共享两个桥接词的近重复事实:
+    **这条判据上一版写错了,而且错得很典型。** 原来写的是「与查询零交集的节点不该改变
+    任何结果」,拿 N=0 和 N>0 比。那句话跟同一个文件里的
+    `test_recall_spreading_activation` **正面冲突** —— 那条断言要求一个跟查询零交集的
+    事实(靠共享关键词搭桥)**必须**被捞出来,而那正是扩散激活存在的理由。
+    两条断言互为反面,只因为这条挂着 xfail 才同时"通过"。
+    **我记的不是一个缺陷,是我自己跟这个设计的冲突。** 是外部审计指出来的。
 
-        零交集节点数    技能分   全场最高   技能进 top5
-             0         0.20     0.20        是
-            20         0.32     0.33        否      <- 结果已经变了
-            60         0.55     0.88        否
+    正确的判据是比 **N=1 和 N=20/60**:第一份的贡献是该有的,第 2..N 份是同一条内容,
+    不该各加一次。实测(每份只多一个 nonce,所以 `_dedupe` 够不着):
 
-    注意最高分**一直没到 1.0**。`_activate` 的注释里原来写着「哪天量到分数普遍越过 1,
-    那时候必须归一化」—— 那个触发条件晚了:top-5 身份在 0.33 就翻了。
+        近重复份数     技能分   top-5 构成
+             1        0.21    [技能, 事实]
+            20        0.32    [事实 ×5]        <- 技能被挤出去了
+            60        0.55    [事实 ×5]
 
-    去重(`_dedupe`)够不着这里:每条多一个 nonce,关键词集合就不相等。这是
-    `_activate` 送出去的总量随邻居数增长的一般形态,重复只是它最扎眼的那个特例。
+    分数涨了 2.6 倍,而这些复制品跟查询**零交集**。注意全场最高分一直没到 1.0 ——
+    `_activate` 上一版写的触发条件「等分数普遍越过 1」比失真晚得多。
 
-    量过归一化(按出边权重和,即随机游走):这条不变性**完美成立**,五档全是 0.20。
-    但真实语料 5 个查询里 4 个 top-5 身份变了,而且分数整体缩水 —— 有个查询的三条技能
-    掉到只剩一条(两条跌破 `THRESH`)。所以那不是一行改动,是「换模型 + 重配绝对门槛」,
-    而重配需要冻结验证集(未参与调参的真实查询只有 4 条,需要 32)。
+    量过归一化(按出边权重和,即随机游走):0.27 → 0.22 → 0.21 → 0.20 → 0.20,
+    单调不增、收敛,技能一直留在 top-5 —— 两条断言都成立。
+    但它撞红了一条**有人标注**的测试(`test_reflection_sees_the_skills_it_already_has`:
+    查「合并 csv」时 `rust-build` 被捞进复盘提示),真实语料 5 个查询里 4 个 top-5 身份变了。
+    所以那不是一行改动,是「换模型 + 重配两个绝对门槛」,而重配要消融,消融卡在
+    冻结验证集(未参与调参的真实查询只有 4 条,需要 32)。
 
     `strict=True`:哪天真修了,这条会因为「意外通过」而红,逼着把挂账一起结掉。"""
     import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "s.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: t\ndescription: alpha handling bridgeone bridgetwo\n---\n"
+                + "note " * 40)
+
     def run(n):
-        with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:   # 每份只多一个 nonce
             f.write("".join(f"- bridgeone bridgetwo n{i:03d}\n" for i in range(n)))
-        os.makedirs(R.SKILLS_DIR, exist_ok=True)
-        with open(os.path.join(R.SKILLS_DIR, "s.md"), "w", encoding="utf-8") as f:
-            f.write("---\nname: t\ndescription: alpha handling bridgeone bridgetwo\n---\n"
-                    + "note " * 40)
         rows = R.explain("alpha bravo charlie delta echo", k=5)
         skill = next((a for a, kind, _t in rows if kind == "技能"), None)
         return skill, [kind for _a, kind, _t in rows]
-    base_score, base_kinds = run(0)
-    assert base_score is not None
+
+    one, one_kinds = run(1)
+    assert one is not None and "技能" in one_kinds, "N=1 就捞不到技能,这条测试白测了"
     for n in (20, 60):
         score, kinds = run(n)
-        assert score == base_score, f"{n} 条零交集节点把技能分从 {base_score} 抬到了 {score}"
-        assert kinds == base_kinds, f"{n} 条零交集节点改变了 top-5 的构成"
+        # ① 复制不许把分数抬上去。允许它降(归一化就是降的),不许涨。
+        assert score is not None and score <= one, \
+            f"{n} 份近重复把技能分从 {one} 抬到了 {score} —— 复制顶了 {n} 份用"
+        # ② 更要命的一条:跟查询零交集的复制品,不许把技能挤出 top-5
+        assert "技能" in kinds, f"{n} 份零交集的复制品把技能挤出了 top-5:{kinds}"
 
 
 def test_body_injection_does_not_depend_on_how_many_rows_we_show(ws, monkeypatch):
