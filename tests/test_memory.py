@@ -1110,6 +1110,69 @@ def test_a_denied_name_must_be_mentioned_as_a_name_not_as_a_substring(ws, monkey
         os.chdir(cwd)
 
 
+def test_a_refusal_follows_the_file_into_the_script_that_deletes_it(ws, monkeypatch):
+    """**跑真任务跑出来的洞。** 拒绝 `del "report(1).csv" "data+backup.json" "日志"` 之后,
+    模型写了个 `del_files.py` 把三个名字放进去,然后 `python del_files.py` ——
+    **一个框都没弹**,三个刚被拒绝的文件全没了。
+
+    两道闸同时失效:`_DESTRUCTIVE` 的 `\\bdel\\b` 在 `del_files.py` 里因为 `_` 是词字符
+    而不匹配;粘性的 `_mentions` 要求名字出现在**命令串**里,而名字在**文件**里。
+    而 `check_permission` 的注释写着「anything mentioning that name asks again ——
+    whatever it is written in」—— 最后半句是假的。
+
+    没有攻击者:我让用户说了句「换个方式删」,它自己找到了这条路,然后**把它写成技能
+    存下来了**(那条技能和那行 memory 已删)。闸弱 → 模型绕 → 绕法被学走 → 闸永久失效。
+
+    补法是让判据跟着**将要执行的东西**走。只下一层,而且这只是把边界往外推一格 ——
+    脚本可以拼接文件名、可以从别处读。**基于「命令串里有什么」的闸,对一个会写代码的
+    模型原理上就拦不住**;它拦的是顺手的那一下。"""
+    import os
+    import types
+    import agent as A
+    boxes = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: boxes.append(a[0]), ask=lambda: "n", note=lambda *a: None))
+    for n in ("report(1).csv", "keep.md"):
+        open(os.path.join(A.WORKSPACE, n), "w").close()
+    st = {"mode": "default", "allow": {"run_bash"}, "asked": "", "denied": set()}
+    A.check_permission(st, "bash", "run_bash", {"command": 'del "report(1).csv"'})
+    assert "report(1).csv" in st["denied"]
+
+    with open(os.path.join(A.WORKSPACE, "del_files.py"), "w", encoding="utf-8") as f:
+        f.write('import os\nfor n in ["report(1).csv"]:\n    os.remove(n)\n')
+    cmd = "python del_files.py"
+    assert "report(1).csv" not in cmd, "命令串里必须一个字都不提,否则测的是旧路径"
+    boxes.clear()
+    A.check_permission(st, "bash", "run_bash", {"command": cmd})
+    assert boxes == ["run_bash"], "名字写进脚本就绕过了拒绝粘性 —— 刚拒过的文件被无声删掉"
+
+    # 不许过头:跑一个跟 denied 无关的脚本,不该弹框
+    with open(os.path.join(A.WORKSPACE, "harmless.py"), "w", encoding="utf-8") as f:
+        f.write("print('hello')\n")
+    boxes.clear()
+    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python harmless.py"})
+    assert ok and boxes == [], "无关的脚本也弹框了 —— 那就成了每跑一次脚本问一次"
+
+    # **只读脚本,不读数据文件。** 一篇提到 `report(1).csv` 的笔记不是一次删除,
+    # 而去掉扩展名过滤的话,每次权限检查都要把命令里所有存在的文件读一遍,
+    # 内容里随便撞上一个名字就弹框 —— 这一侧原来没有判据(变异体测出来的)。
+    with open(os.path.join(A.WORKSPACE, "notes.md"), "w", encoding="utf-8") as f:
+        f.write("上次生成的 report(1).csv 里有三列\n")
+    boxes.clear()
+    ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "type notes.md"})
+    assert ok and boxes == [], "读一篇提到那个文件名的笔记,被当成了要删它"
+
+    # 提示行也要能看进脚本:请求里点名的文件,藏在脚本里同样该报警
+    named = A._named_in_request({"asked": "把 keep.md 留着"},
+                                {"command": "del_by_script.py"})
+    assert named == [], "命令根本不是删除,不该报警"
+    with open(os.path.join(A.WORKSPACE, "wipe.py"), "w", encoding="utf-8") as f:
+        f.write('import os\nos.remove("keep.md")\n')
+    assert A._named_in_request({"asked": "把 keep.md 留着"},
+                               {"command": "rm -f wipe.py && python wipe.py"}) == ["keep.md"], \
+        "脚本里点名删的是用户要求留着的文件,提示行没看见"
+
+
 def test_case_only_rename_does_not_slip_past_the_stickiness(ws, monkeypatch):
     """Windows 上 Report.md 和 report.md 是同一个文件,而消费 denied 用的是区分大小写
     的 `in`。拒绝 `del Report.md` 之后,`del report.md` 直接放行 —— 改个大小写就绕过去了。"""

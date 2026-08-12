@@ -1408,6 +1408,43 @@ _NAMECHAR = r"[A-Za-z0-9_.\-]"
 def _mentions(text: str, name: str) -> bool:
     return re.search(f"(?<!{_NAMECHAR}){re.escape(name)}(?!{_NAMECHAR})", text) is not None
 
+_SCRIPT_EXT = (".py", ".ps1", ".bat", ".cmd", ".sh", ".js", ".rb", ".pl")
+_SCRIPT_MAX = 200_000          # 比这大的不像手写脚本,读它只是浪费
+
+def _with_scripts(cmd: str) -> str:
+    """命令,**加上它要跑的那个脚本的内容**。
+
+    实测跑出来的洞:拒绝 `del "report(1).csv" "data+backup.json" "日志"` 之后,模型
+    写了个 `del_files.py` 把三个名字放进去,然后 `python del_files.py` —— **一个框都没弹**,
+    三个刚被拒绝的文件全没了。两道闸同时失效:`_DESTRUCTIVE` 的 `\\bdel\\b` 在
+    `del_files.py` 里因为 `_` 是词字符而不匹配;粘性的 `_mentions` 要求名字出现在**命令串**里,
+    而名字在**文件**里。
+
+    `check_permission` 的注释写着「anything mentioning that name asks again —— whatever it
+    is written in」。**最后半句是假的**,正确说法是「只要名字还在命令行里」。它自己举的
+    `python -c "os.remove('x.md')"` 那个例子确实拦得住(名字在命令里),换成读一个文件就瞎了。
+
+    所以判据要跟着**将要执行的东西**走,不是跟着那一行字走:命令里点到的脚本,真实存在
+    就把内容也算进来。
+
+    **只下一层,而且这只是把边界往外推一格。** 脚本可以拼接文件名、从 CSV 里读、
+    调用另一个脚本,`echo ... > x.py && python x.py` 在检查那一刻 x.py 还不存在。
+    **基于「命令串里有什么」的闸,对一个会写代码的模型,原理上就拦不住。**
+    它的价值是拦住顺手的那一下,不是拦住想绕的 —— 这一条比这个补丁本身重要。"""
+    parts = [cmd]
+    for t in sorted(_targets(cmd)):
+        if not t.lower().endswith(_SCRIPT_EXT):
+            continue
+        p = t if os.path.isabs(t) else os.path.join(WORKSPACE, t)
+        try:
+            if os.path.getsize(p) > _SCRIPT_MAX:
+                continue
+            with open(p, encoding="utf-8", errors="replace") as f:
+                parts.append(f.read())
+        except OSError:
+            pass                       # 读不了就算了:守卫失败 = 不守,别拦活
+    return "\n".join(parts)
+
 def _named_in_request(state: dict, args: dict) -> list:
     """Files this delete touches whose names the user typed.
 
@@ -1421,7 +1458,7 @@ def _named_in_request(state: dict, args: dict) -> list:
     if not _DESTRUCTIVE.search(cmd):
         return []
     asked = state.get("asked", "")
-    return sorted({f for f in _targets(cmd) if f and _mentions(asked, f)})
+    return sorted({f for f in _targets(_with_scripts(cmd)) if f and _mentions(asked, f)})
 
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
@@ -1432,7 +1469,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # x.md`, and a regex can never see `python -c "os.remove('x.md')"` or a .py file that
         # does the same. Once you have said no about a name, anything mentioning that name
         # asks again — whatever it is written in.
-        cmd_nc = os.path.normcase(args.get("command", ""))
+        cmd_nc = os.path.normcase(_with_scripts(args.get("command", "")))
         # Windows 上 Report.md 和 report.md 是同一个文件,而 `in` 是区分大小写的 ——
         # 拒绝 `del Report.md` 之后,`del report.md` 直接放行。normcase 在 Windows 上
         # 折大小写、在 POSIX 上原样返回,正好就是各自文件系统的语义。
@@ -1485,7 +1522,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # 那条分支里写。真实会话里人几乎总是按 a,所以这道闸从上线到现在一次都没在真实
             # 运行里触发过(FINDINGS「还没解决的」里那条挂账就是这么来的,当时以为是场景没
             # 出现,其实是这里漏了一行)。不记 = 粘性等于不存在。
-            state.setdefault("denied", set()).update(_targets(args.get("command", "")))
+            state.setdefault("denied", set()).update(_targets(_with_scripts(args.get("command", ""))))
             ui.note("删除不支持「本会话都允许」—— 会话放行对删除本来就不生效。真要删就单独按 y。")
             return False, ("这次删除没被批准。**别再提同一条命令** —— 是否删除只有用户能决定,"
                            "而重发只会把同一个提示原样再弹一次。要么就把文件留着继续往下做,"
@@ -1495,7 +1532,7 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     if verdict == "yes":
         return True, ""
     if verdict in ("no", "say") and name == "run_bash":
-        state.setdefault("denied", set()).update(_targets(args.get("command", "")))
+        state.setdefault("denied", set()).update(_targets(_with_scripts(args.get("command", ""))))
     if verdict == "no":
         if named:
             # The ⚠️ goes to the human; the model got back "用户拒绝了这次调用" and nothing
