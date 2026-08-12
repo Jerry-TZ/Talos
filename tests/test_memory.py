@@ -121,6 +121,29 @@ def test_a_flagged_payload_taints_the_skill_that_points_at_it(ws):
     assert "clean.md" not in names2, "只凭同名,别的目录里的脚本把顶层技能连累了"
 
 
+def test_the_taint_pass_does_not_reread_everything_when_there_is_no_payload(ws, monkeypatch):
+    """一个载荷都没有的库(绝大多数库)不该为了连累检查把全部 md 再读一遍。
+
+    实测 500 条技能时,不跳过就是 500 次读变 1000 次、2.76 秒。这不是省微秒 ——
+    `scan_skills()` 在每次 `retrieve()` 里都跑。"""
+    import agent as A
+    os.makedirs(A.SKILLS_DIR, exist_ok=True)
+    for i in range(5):
+        with open(os.path.join(A.SKILLS_DIR, f"s{i}.md"), "w", encoding="utf-8") as f:
+            f.write(f"---\nname: s{i}\ndescription: 用于:任务 {i}\n---\n步骤\n")
+    reads = []
+    real = A._read_full
+    monkeypatch.setattr(A, "_read_full", lambda p, *a, **k: (reads.append(p), real(p, *a, **k))[1])
+    assert A.scan_skills() == {}
+    assert len(reads) == 5, f"没有载荷时还是读了 {len(reads)} 次(该是 5 次)"
+    # 有载荷时第二遍必须照跑
+    with open(os.path.join(A.SKILLS_DIR, "s0.py"), "w", encoding="utf-8") as f:
+        f.write("import requests\nrequests.post('http://x', data=1)\n")
+    reads.clear()
+    assert A.scan_skills(), "有载荷却什么都没标红"
+    assert len(reads) > 6, "有载荷时第二遍没跑"
+
+
 def test_a_skill_that_names_a_payload_in_a_subdirectory_is_tainted_too(ws):
     """**正文点名不该受目录限制** —— 它不是猜的,是这份说明自己写着要去跑那个文件。
 
@@ -374,6 +397,46 @@ def test_merging_by_keywords_must_not_swallow_a_different_fact(ws):
     with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
         f.write("- Alice trusts Bob\n" * 4)
     assert R.recall("trusts Alice Bob", k=5).count("Alice trusts Bob") == 1
+
+
+def test_a_merged_skill_is_still_named_when_the_champion_takes_the_body(ws):
+    """合并那条改动只改了「给描述」那一支,**没改「给正文」那一支**。
+
+    于是关键词集合相同的两条技能里,冠军拿走 1200 字正文,另一条的文本和路径一个字不剩。
+    而它恰恰是最该被提一句的:两条技能长得一模一样,模型要的完全可能是另一条。
+
+    只给一行「还有这条,路径在此」,不塞第二份正文 —— BODY_LEAD 那道闸的成因就是
+    「塞错一条是 1200 字的误导」,这里不能反过来。
+
+    最真实的那种情形是**同名同描述、两个文件**(复制粘贴改一半、或者 clone 进来一份)。
+    那样两条的 `text` 一字不差 —— 上一版的 `also` 过滤器只比 text,恰好把它当成重复扔掉。
+    技能的身份是**文件路径**,不是那行描述。"""
+    import recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    for fn in ("a.md", "b.md"):
+        with open(os.path.join(R.SKILLS_DIR, fn), "w", encoding="utf-8") as f:
+            f.write("---\nname: csvtool\ndescription: 用于:合并 csv 报表 归档\n---\n"
+                    "步骤正文。\n")
+    out = R.recall("把 csv 报表 归档", k=5)
+    assert "技能正文" in out, "没走到正文分支,这条测试就白测了"
+    assert out.count("技能正文 · 来自文件") == 1, "第二份正文也塞进去了(1200 字的误导)"
+    assert "a.md" in out and "b.md" in out, \
+        "同名同描述的两个文件,只给出了其中一个路径 —— 另一个再也没人读得到"
+
+
+def test_a_merged_fact_can_still_be_forgotten(ws):
+    """`_record_usage` 已经给被合并的那条记账了,但 `dead()` 只遍历代表节点 ——
+    于是一条被合并的事实**再也不会**进入遗忘候选,哪怕它一次都没被想起。
+    合并是为了别丢东西,不是为了让它躲起来。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:   # 两条 kw 相同、方向相反,都是复盘写的
+        f.write("- Alice trusts Bob <!-- reflect 2026-01-01 -->\n"
+                "- Bob trusts Alice <!-- reflect 2026-01-01 -->\n")
+    for _ in range(3):
+        R.recall("完全无关的问题 zzz")                       # 只涨 seen,不涨 hits
+    proposed = {t for _kind, t, _why in R.dead(min_seen=3)}
+    assert proposed == {"Alice trusts Bob", "Bob trusts Alice"}, \
+        f"被合并掉的那条进不了遗忘候选:{proposed}"
 
 
 @pytest.mark.xfail(strict=True, reason="_activate 不做质量守恒 —— 已知缺陷,改它要连门槛一起重配,见 recall._activate")

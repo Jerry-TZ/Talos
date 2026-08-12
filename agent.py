@@ -1002,6 +1002,22 @@ def _schema_hint(name: str) -> str:
 # 判据默认拒绝,例外要写明理由。
 _MAY_BE_BLANK = {("write_file", "content"), ("edit_file", "new")}
 
+# 上一版只校验了 `string`,理由是「内置工具的必填字段全是 string」—— 那是拿**当前的
+# 工具表**当判据。`create_tool` 的 `meta.get("required", [])` 和 `parameters` 是模型写的,
+# 一个必填 integer 的自建工具,`{"n": "not-an-integer"}` 就能一路走到权限框、换走会话授权。
+_JSON_TYPES = {"string": str, "integer": int, "number": (int, float),
+               "boolean": bool, "array": list, "object": dict}
+
+def _type_ok(v, want: str) -> bool:
+    """值配不配得上 schema 里声明的 type。"""
+    if want not in _JSON_TYPES:
+        return True                    # 没声明、或声明了不认识的 type:那是"没声明",
+                                       # 不是"声明了别的",拦它属于自己发明规矩
+    if isinstance(v, bool) and want != "boolean":
+        return False                   # Python 里 `isinstance(True, int)` 为真 ——
+                                       # 不单挡一下,`{"n": true}` 会被当成合法整数放过去
+    return isinstance(v, _JSON_TYPES[want])
+
 def _bad_args(name: str, args) -> str | None:
     """这次调用**能不能执行**?能执行才值得为它弹权限框。返回错误说明,或 None 表示没问题。
 
@@ -1034,8 +1050,8 @@ def _bad_args(name: str, args) -> str | None:
         want = spec.get("type", "string") if isinstance(spec, dict) else "string"
         if v is None:
             return f"调用 {name} 的必填参数 {k} 是 null,没有值就没法执行。{_schema_hint(name)}"
-        if want == "string" and not isinstance(v, str):
-            return (f"调用 {name} 的参数 {k} 必须是字符串,收到的是 "
+        if not _type_ok(v, want):
+            return (f"调用 {name} 的参数 {k} 必须是 {want},收到的是 "
                     f"{type(v).__name__}。{_schema_hint(name)}")
         if isinstance(v, str) and not v.strip() and (name, k) not in _MAY_BE_BLANK:
             return (f"调用 {name} 的必填参数 {k} 是空的。这次调用没有内容可执行,"
@@ -1163,6 +1179,11 @@ def scan_skills() -> dict:
     # 多隔离一条的代价是人去看一眼,少隔离一条的代价是模型照着说明把载荷跑了。
     # 而 skills/ 里本来就不该有 .py(工具在 tools/),真出现了基本就是包。
     payloads = sorted(p for p in flagged if not p.lower().endswith(".md"))
+    if not payloads:
+        return flagged                            # 没有载荷就没什么可连累的:第二遍整个跳过。
+                                                  # 不跳的话每次都白读一遍全部 md —— 实测 500 条
+                                                  # 技能时 scan_skills 从 500 次读变成 1000 次、
+                                                  # 2.76 秒,而绝大多数库里一个载荷都没有。
     for path in mds:
         if path in flagged:
             continue                              # 它自己已经标红了,不用再说一遍

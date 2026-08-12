@@ -539,6 +539,26 @@ def test_a_required_parameter_with_no_value_is_not_runnable_either(ws, monkeypat
     assert A._bad_args("read_file", {"path": "a.py", "offset": "abc"}) is None, \
         "可选参数写错是一次能执行、会干净失败的调用,不该在权限之前拦"
 
+    # **schema 里声明的每种 type 都要校验,不只是 string。** 上一版只校验 string,
+    # 理由是「内置工具的必填字段全是 string」—— 那是拿当前的工具表当判据,而
+    # `create_tool` 的 parameters/required 是模型自己写的。
+    A.TOOLS["_probe_types"] = (lambda a: "ok",
+                               {"n": {"type": "integer"}, "flag": {"type": "boolean"},
+                                "xs": {"type": "array"}, "who": {"type": "nope"}},
+                               ["n", "flag", "xs", "who"], "probe", "bash")
+    try:
+        ok = {"n": 1, "flag": True, "xs": [1], "who": "随便"}
+        assert A._bad_args("_probe_types", ok) is None, "全对的一组被拦下来了"
+        for k, bad, why in ((("n"), "not-an-integer", "整数收了字符串"),
+                            ("n", True, "isinstance(True, int) 为真,bool 混进整数了"),
+                            ("flag", 1, "布尔收了整数"),
+                            ("xs", {"a": 1}, "数组收了对象")):
+            assert A._bad_args("_probe_types", {**ok, k: bad}) is not None, why
+        # 声明了不认识的 type 就别管 —— 那是"没声明",拦它属于自己发明规矩
+        assert A._bad_args("_probe_types", {**ok, "who": 123}) is None
+    finally:
+        del A.TOOLS["_probe_types"]
+
     # run_tool 复用同一个判据。原来那份「同样的检查」只查键存在 —— 一个 required=[]
     # 的自建工具,`run_tool(name, [])` 会把列表一路交到工具函数手里。
     A.TOOLS["_probe_norequired"] = (lambda a: f"got-{type(a).__name__}", {}, [], "probe", "read")
