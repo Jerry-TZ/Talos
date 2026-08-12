@@ -1301,6 +1301,12 @@ def _policy(mode: str, cls: str, name: str, allow: set, args: dict | None = None
     if mode == "plan":                              return "deny"    # read-only
     cmd = (args or {}).get("command", "") if name == "run_bash" else ""
     risky = _DESTRUCTIVE.search(cmd) or _EXFIL.search(cmd)
+    # bypass 是「全放行」,唯独这一件不行。下面那条注释说的理由是「会话授权绑不住代码」——
+    # 而 bypass 正是**根本没有人在看**的那个模式(`once()` 默认就是它,理由写着"没人在
+    # 键盘前回答权限框")。同一个理由在无人值守时更强,不是更弱:`talos.bat -p "写个工具…"`
+    # 会把模型刚写的 Python 在**本进程里** exec(),零弹框、零人。
+    # 返回 deny 而不是 ask:没人能回答的框,弹出来只会卡在读键盘上。
+    if name == "create_tool" and mode == "bypass":  return "deny"
     if mode == "bypass":                            return "allow"   # yolo
     if mode == "acceptEdits" and cls == "edit":     return "allow"   # auto-accept file edits
     if risky:                                       return "ask"     # always confirm, grant or not
@@ -1483,6 +1489,12 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     if decision == "allow":
         return True, ""
     if decision == "deny":
+        # 拒绝也要能照着走下一步。"bypass 模式禁止 bash 操作"对 create_tool 是**假话**
+        # (bypass 不禁 bash),模型读了只会重试同一个调用。
+        if name == "create_tool" and state["mode"] == "bypass":
+            return False, ("无人值守时不造工具:create_tool 会在本进程里 exec() 这段代码,"
+                           "而这个模式下没有人能先看一眼。这次直接用 run_bash 把事做完;"
+                           "要把这个工具长期留下,换交互模式再跑一遍。")
         return False, f"{state['mode']} 模式禁止 {cls} 操作"
     # decision == "ask"
     _drain_stdin()                      # before preview: the wait that filled the buffer is over

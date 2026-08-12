@@ -651,6 +651,32 @@ def test_create_tool_grant_is_not_delegable(ws):
     assert A._policy("default", "bash", "create_tool", {"create_tool"}, {}) == "ask"
     assert A._policy("default", "bash", "run_bash", {"run_bash"}, {"command": "dir"}) == "allow"
 
+
+def test_nobody_is_watching_is_the_reason_to_gate_create_tool_harder(ws):
+    """上面那条的理由是「会话授权绑不住代码」,而 `_policy` 里 `mode == "bypass"` 那行排在
+    `name == "create_tool"` **上面** —— 于是 `talos.bat -p "写个工具…"` 会把模型刚写的
+    Python 在本进程里 exec(),零弹框、零人。`once()` 的默认档位就是 bypass,注释写的理由
+    正是"没人在键盘前回答权限框"。**同一个理由被用来论证放行,而它论证的是拦住。**
+
+    发现方式值得记:我在给 DEVELOPMENT §7 写冒烟步骤,要写「create_tool 在 -p 下必须拒绝」,
+    去查了一下,发现不是。**准备写进文档的那句断言,自己就是一条没人查过的判据。**
+
+    deny 而不是 ask:无人值守时弹框只会卡在读键盘上。而 deny 的说明必须是真话 ——
+    "bypass 模式禁止 bash 操作"对 create_tool 是假的(bypass 不禁 bash),模型读了会重试。"""
+    import agent as A
+    assert A._policy("bypass", "bash", "create_tool", set(), {}) == "deny"
+    # bypass 的其余语义一点不动 —— 这不是把 bypass 改成 default
+    for n, c in (("run_bash", "bash"), ("write_file", "edit"), ("spawn_subagent", "bash")):
+        assert A._policy("bypass", c, n, set(), {"command": "rm -rf /"}) == "allow", n
+    # 有人在场时照旧是问,不是拒:交互模式下造工具仍然走得通
+    assert A._policy("default", "bash", "create_tool", set(), {}) == "ask"
+
+    # deny 这条路不碰 ui —— 它在弹框之前就返回了,所以这里不需要打桩
+    ok, why = A.check_permission({"mode": "bypass", "allow": set()}, "bash", "create_tool", {})
+    assert not ok
+    assert "run_bash" in why and "交互" in why, f"拒绝了却没说下一步怎么走:{why}"
+    assert "禁止 bash" not in why, f"这句话是假的,bypass 不禁 bash:{why}"
+
 def test_unreadable_skill_is_quarantined_not_fatal(ws):
     """分类不了就隔离。以前是漏网 + retrieve 无保护重读 -> 每轮任务都崩。"""
     import agent as A
