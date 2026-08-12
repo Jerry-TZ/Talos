@@ -1143,23 +1143,39 @@ def scan_skills() -> dict:
     # 扫描范围上一版已经扩到子目录和非 md 了,**但隔离范围没跟着扩** —— 又一次
     # 「只补了被发现的那条路径」:补的是"看得见载荷",没补"看见了要怎么办"。
     #
-    # 连累的判据两条,都限定**同一个目录**(别让 skills/pkg/ 里的脚本连累顶层的技能):
-    # 同名(`x.py` ↔ `x.md`,技能包最常见的形状),或者说明正文里点名提到它。
-    # 点名用 `_mentions` —— 跟 denied 粘性同一个函数,认名字边界,不是裸子串。
+    # 连累的判据两条,**作用范围不一样**:
+    #
+    #   同名推断(`x.py` ↔ `x.md`) —— 限**同一个目录**。它是猜的:名字像而已,
+    #       让 `skills/pkg/deploy.py` 去连累顶层的 `deploy.md` 是过头。
+    #   正文点名 —— **不限目录**。它不是猜的,是这份说明自己写着要去跑那个文件。
+    #       上一版把目录限制也套在了这一条上,于是最常见的包结构直接漏掉:
+    #           skills/deploy.md        正文写着 run scripts/payload.py
+    #           skills/scripts/payload.py   命中外发数据红旗
+    #       载荷标红了,`deploy.md` 没标红,还留在常驻清单里。**同一个限制套在
+    #       「猜的」和「写明的」两条判据上,是把它们当成了一种东西。**
+    #
+    # 大小写跟着**文件系统**走,不跟着这台机器走:Windows 上 `Case.md` 和 `case.py`
+    # 是同一个名字,而 `==` 和 `_mentions` 都区分大小写 —— 上一版在这儿漏了。
+    # `normcase` 在 Windows 折大小写、在 POSIX 原样返回,正好是各自文件系统的语义
+    # (跟 denied 粘性那条用的是同一个函数,同一个理由)。
+    #
+    # 会不会误伤:一份写着「别运行 bad.py」的正常说明也会被连累。方向是安全的那边 ——
+    # 多隔离一条的代价是人去看一眼,少隔离一条的代价是模型照着说明把载荷跑了。
+    # 而 skills/ 里本来就不该有 .py(工具在 tools/),真出现了基本就是包。
     payloads = sorted(p for p in flagged if not p.lower().endswith(".md"))
     for path in mds:
         if path in flagged:
             continue                              # 它自己已经标红了,不用再说一遍
         try:
-            body = _read_full(path)
+            body = os.path.normcase(_read_full(path))
         except Exception:
             continue                              # 读不了的上一轮已经标红
-        stem = os.path.splitext(os.path.basename(path))[0]
+        stem = os.path.normcase(os.path.splitext(os.path.basename(path))[0])
         for pay in payloads:
             base = os.path.basename(pay)
-            if os.path.dirname(pay) != os.path.dirname(path):
-                continue
-            if os.path.splitext(base)[0] == stem or _mentions(body, base):
+            same_dir = os.path.dirname(pay) == os.path.dirname(path)
+            if ((same_dir and os.path.normcase(os.path.splitext(base)[0]) == stem)
+                    or _mentions(body, os.path.normcase(base))):
                 flagged.setdefault(path, []).append(f"随包带的 {base} 被标红,而这份说明指着它")
     return flagged
 
@@ -1299,11 +1315,18 @@ def _drain_stdin() -> None:
         pass                            # failing to drain must never block the prompt
 
 _FILENAME = re.compile(r"[\w.\-]+\.\w{1,5}")
-# `{2,}` 会让**单字符文件名**永远不成为候选 —— 拒绝 `del a` 之后 denied 是空的。
-# 上一版看不出来,因为 `_targets` 末尾还有个 `len >= 3` 的下限把它一起盖住了;
-# 下限一撤,这条才露出来。放宽到 `+` 不会变吵:findall 取的是最长连续段,`del a`
-# 切出来还是 `['del', 'a']`,而每个候选都要过一次 `os.path.exists` 才会被记下。
-_TOKEN = re.compile(r"[\w.\-\\/]+")
+# **别再枚举允许的字符了 —— 改成排除 shell 的分隔符。** 上一版是 `[\w.\-\\/]+`,
+# 一张白名单,于是审计一试就是一片:`a+b` `a@b` `a~b` `a(1).py` `a&b` `a=b` `a#b` `a$b`
+# 全部 `_targets -> set()`,拒了等于没记,下一条命令直接放行。加一个字符补一次,
+# 跟「不用于」那处数标点是同一个毛病 —— **枚举合法的东西永远落后一步,枚举非法的才收敛。**
+#
+# 文件名可以是几乎任何字符;真正切开命令里两个词的只有空白和 shell 的引号/重定向符。
+# 顺带把 `:` 收进来了(白名单里没有):`C:\a\b.py` 上一版被切成 `\a\b.py`,
+# 而 py3.10 的 `ntpath.isabs` 认为单反斜杠开头也算绝对路径,于是它被解析到**当前盘**——
+# 那正是 CI 上 py3.13 两格红、本机 py3.10 侥幸绿的那条(见 `_read_key`)。整条留着才对。
+#
+# 多记的代价仍然只是多弹一次框:每个候选都要过 `os.path.exists` 才会被记下。
+_TOKEN = re.compile(r"""[^\s"'|<>]+""")
 # 引号里的整段。`_TOKEN` 的字符类里没有空格,于是 `del "Important Report"` 被拆成两个
 # 都不存在的词,`_targets` 返回**空集合** —— 拒绝了等于没记,粘性对带空格的文件名从来
 # 没生效过。而带空格的文件名在 Windows 上遍地都是。**第四次补同一个机制了。**
