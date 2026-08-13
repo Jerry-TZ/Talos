@@ -1354,7 +1354,18 @@ def _drain_stdin() -> None:
     except Exception:                   # no tty, redirected stdin, exotic terminal —
         pass                            # failing to drain must never block the prompt
 
-_FILENAME = re.compile(r"[\w.\-]+\.\w{1,5}")
+# 两侧的边界不是装饰,是这条正则**唯一**的安全性质:它不过存在性检查(下面 `_targets`
+# 里其余来源都过),所以它抓到什么就直接进 `denied`。没有边界时字符类 `[\w.\-]` 把 `+`
+# 当分隔符,于是 `data+backup.json` 切出一个**磁盘上从来不存在的** `backup.json` ——
+# 而 `_mentions` 又拿 `+` 当词边界,这个幽灵从此在任何提到真名字的文本里都命中:
+# 真实一轮里 `del del_scratch.py` 被拒,理由是「backup.json 是你点名要的产出」。
+# **这句话是假的,模型照着它改不出任何东西**,于是它换成 `python -c` ——
+# 闸没拦住它,只是把它推向了更难看见的写法。
+#
+# 所以这一条的取舍跟 `_targets` 那句「一律往多了记」相反,而且不矛盾:碎片不是「记多了」,
+# 是**记错了**。记多一个真名字,代价是多弹一次框;记下一个不存在的名字,代价是一句假话。
+# 漏掉的那些(`--out=build.log` 这种带 `=` 的)本来就该由下面问文件系统那条兜住。
+_FILENAME = re.compile(r"""(?<![^\s"'|<>/\\])[\w.\-]+\.\w{1,5}(?![^\s"'|<>/\\])""")
 # **别再枚举允许的字符了 —— 改成排除 shell 的分隔符。** 上一版是 `[\w.\-\\/]+`,
 # 一张白名单,于是审计一试就是一片:`a+b` `a@b` `a~b` `a(1).py` `a&b` `a=b` `a#b` `a$b`
 # 全部 `_targets -> set()`,拒了等于没记,下一条命令直接放行。加一个字符补一次,

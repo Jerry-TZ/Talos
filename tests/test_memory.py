@@ -1082,6 +1082,60 @@ def test_stickiness_survives_quotes_spaces_and_path_spelling(ws):
         os.chdir(cwd)
 
 
+def test_a_name_that_never_existed_must_not_get_stickiness(ws):
+    """上一条查的是「真名字有没有被记下」,这一条查反面:**记下的是不是真名字。**
+
+    冒烟测试跑出来的:`del "report(1).csv" "data+backup.json" "日志"` 之后,`_targets`
+    里多出一个 `backup.json` —— 磁盘上从来没有这个文件。`_FILENAME` 的字符类 `[\\w.\\-]`
+    不含 `+`,于是把 `+` 当分隔符,从一个真名字的中间切了一段出来。而 `_FILENAME` 是
+    `_targets` 里**唯一不过存在性检查**的来源,碎片直接进 `denied`。
+
+    然后 `_mentions` 也拿 `+` 当词边界,幽灵在任何提到真名字的文本里都命中:真实一轮里
+    `del del_scratch.py` 被拒,理由是「backup.json 是你点名要的产出」——
+    **这句话是假的**,模型照着它改不出东西,于是它换成 `python -c "os.remove(...)"`,
+    那条因为字符串里不含真名字而通过。**闸没拦住它,只是把它推向了更难看见的写法。**
+
+    所以这条的取舍跟上一条相反,而且不矛盾:记多一个**真**名字,代价是多弹一次框;
+    记下一个**不存在**的名字,代价是一句模型没法执行的假话。碎片不是记多了,是记错了。
+
+    形状:`_TOKEN` 早就从白名单改成了排除表,教训就写在 `_FILENAME` 的**下一行**注释里
+    (「枚举合法的永远落后一步」)—— 而 `_FILENAME` 自己没改。同一个教训只学了一半。"""
+    import os
+    import agent as A
+    real = ("report(1).csv", "data+backup.json", "日志")
+    for n in real:
+        open(os.path.join(A.WORKSPACE, n), "w", encoding="utf-8").close()
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        got = A._targets('del "report(1).csv" "data+backup.json" "日志"')
+        for n in real:
+            assert n in got, f"{n!r} 没被记下 —— 修碎片不许把真名字也修没了"
+        for ghost in got:
+            assert os.path.exists(ghost) or ghost in {os.path.basename(n) for n in real}, \
+                f"记下了一个磁盘上不存在的名字 {ghost!r} —— 它会变成一条假的拒绝理由"
+        assert "backup.json" not in got, "又从 data+backup.json 中间切出了 backup.json"
+
+        # 幽灵真正伤人的地方是**说给用户和模型听的那句话**。真实一轮里权限框上打的是
+        # 「⚠️ backup.json、data+backup.json、report(1).csv、日志 —— 你在请求里点名要过它」,
+        # 而用户的原话里根本没有 backup.json 这个词。点名清单必须只含用户真写过的名字。
+        state = {"asked": "workspace 里 report(1).csv、data+backup.json 和 日志 这三个我不要了,"
+                          "out 和 draft.md 留着", "denied": set()}
+        named = A._named_in_request(state, {"command": 'del "report(1).csv" '
+                                                       '"data+backup.json" "日志"'})
+        for n in named:
+            assert n in state["asked"], f"提示里点名了 {n!r},而用户从没写过这个名字"
+
+        # 反向:别为了防碎片把正常的抽取弄坏。这几条都不存在于磁盘,
+        # 走的正是 `_FILENAME` 那条不查存在性的路 —— 它们必须还在。
+        for cmd, want in (("python " + os.path.join("build", "gen.py"), "gen.py"),
+                          ("cat notes.md", "notes.md"),
+                          ("mv a.txt b.txt", "b.txt")):
+            assert want in A._targets(cmd), f"{cmd!r} 不再抽得出 {want} —— 修过头了"
+    finally:
+        os.chdir(cwd)
+
+
 def test_a_denied_name_must_be_mentioned_as_a_name_not_as_a_substring(ws, monkeypatch):
     """粘性靠子串匹配,而子串匹配不认边界:拒过 `rmdir log` 之后,一条无害的
     `python catalog.py` 也弹框 —— 人再拒一次,`catalog.py` 又进了 denied,
