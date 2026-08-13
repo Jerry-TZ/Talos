@@ -1413,7 +1413,14 @@ def _targets(cmd: str) -> set:
     # `src` 的目标一个都记不下来:实测拒绝 `del ab` 之后 denied 是空集合,下一条
     # `python cleanup.py ab` 连框都不弹。而这段注释上面三行就写着「少记的代价是文件没了」。
     # 真正该改的是匹配:见 `_mentions`。
-    return {t for t in out | {os.path.basename(t.rstrip("\\/")) for t in out} if t}
+    # 纯点号的不是文件,是路径语法。Windows 上 `os.path.exists` 对 `.` `..` `...` `....`
+    # **全返回 True**(连着的点会被折掉),于是上面问文件系统那一关照单全收 ——
+    # 实测一轮里,任务描述提到 `return ["..."]`,权限框就打出「`...` 是你点名要的产出」。
+    # 更坏的是 `..`:它一旦进了 `denied`,`_mentions` 会在**每一条相对路径**上命中
+    # (`..\x` 里 `..` 后面是分隔符,边界成立),从此往上一级的命令条条弹框。
+    # `t.strip(".")` 只滤掉「除了点什么都没有」的,`.env` / `.gitignore` / `a.` 一个不误伤。
+    return {t for t in out | {os.path.basename(t.rstrip("\\/")) for t in out}
+            if t and t.strip(".")}
 
 
 # 名字必须被当成**一个独立的名字**提到,不是随便出现在某个更长的词里面。

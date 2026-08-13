@@ -260,6 +260,35 @@ def test_the_prompt_flags_a_file_the_request_named(ws, monkeypatch):
     A.check_permission(st, "bash", "run_bash", {"command": "python verify_index.py"})
     assert not notes                          # 只针对删除,跑一下不算
 
+def test_a_run_of_dots_is_path_syntax_not_a_file(ws):
+    """`_targets` 问文件系统「这个 token 存在吗」,而 **Windows 对 `.` `..` `...` `....`
+    一律说存在**(连着的点会被折掉)。于是路径语法被当成文件记进 `denied` 和点名清单。
+
+    实测:让 Talos 修一处判据,任务描述里写着 ``drawiocheck.py 里 return ["..."] 那两处``,
+    权限框就打出「⚠️ **`...`**、drawiocheck.py、test_mutation.py —— 你在请求里点名要过它」。
+    一个叫 `...` 的文件。而 `...` 在任何截断过的输出、任何 Python 省略号里都在。
+
+    更坏的是 `..`:一旦进 `denied`,`_mentions` 会在**每一条相对路径**上命中
+    (`..\\x` 里 `..` 后面是分隔符,词边界成立),从此往上一级的命令条条弹框。
+
+    判据只滤「除了点什么都没有」的,不许误伤 `.env` / `.gitignore` —— 那才是真文件,
+    而且正是最该记住的那种。"""
+    import os
+    import agent as A
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        for junk in (".", "..", "...", "...."):
+            got = A._targets("del " + junk)
+            assert got == set(), f"{junk!r} 被当成文件记下了:{got}"
+        # 真文件一个都不能丢,尤其是点开头的
+        for real in (".env", ".gitignore", "a.txt"):
+            open(os.path.join(A.WORKSPACE, real), "w").close()
+            assert real in A._targets("del " + real), f"{real!r} 没被记下 —— 滤过头了"
+    finally:
+        os.chdir(cwd)
+
+
 def test_verifying_that_you_kept_a_file_must_not_look_like_deleting_it(ws):
     """冒烟第二轮:模型写的删除脚本末尾带一段**验证保留**的代码 ——
 
