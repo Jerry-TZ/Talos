@@ -120,9 +120,70 @@ def test_maybe_compact(ws, monkeypatch):
            {"role": "assistant", "content": "y" * 20000},
            {"role": "user", "content": "z"}]
     out = A.maybe_compact(client, "m", big, force=True)
-    assert len(out) == 2 and "SUMMARY" in out[0]["content"]
+    assert "SUMMARY" in out[0]["content"]
     small = [{"role": "user", "content": "hi"}]
     assert A.maybe_compact(client, "m", small) is small          # 太短 -> 原样返回
+
+
+def test_compaction_keeps_the_last_few_messages_verbatim(ws, monkeypatch):
+    """摘要写不出「刚才那一步的原文」,而下一步恰恰接在那上面。
+
+    上一版把整段历史压成 2 条,尾部一条不留。实测:一轮 32 步的任务压缩之后,模型花了
+    约十次调用重新读它刚读过的文件、重新列它刚列过的目录,直到重复熔断把它拽出来。
+    摘要告诉它「做过什么」,但它需要的是「上一条工具返回了什么」。
+
+    切尾部不能直接 `messages[-keep:]`:切点落在 `tool` 消息上,它的 `assistant`
+    tool_calls 留在被摘要的那一半 —— **一条没有来处的工具结果,接口当场报错**。
+    所以起点要往后挪到第一条不是 tool 的消息。这条断言的就是这两件事。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    # 切点落在 tool 上时必须往后挪 —— 这一条直接钉 `_tail_start`,不绕端到端
+    msgs = [{"role": "user", "content": "干活"}]
+    for i in range(8):
+        msgs.append({"role": "assistant", "content": None,
+                     "tool_calls": [_tc("read_file", "{}", f"c{i}")]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"结果{i}"})
+    for keep in range(1, len(msgs)):
+        i = A._tail_start(msgs, keep)
+        assert msgs[i].get("role") != "tool", \
+            f"keep={keep} 时切在了工具结果上 —— 它的 assistant 会被摘要吃掉,接口直接报错"
+        assert i > 0, f"keep={keep} 时整段都成了尾巴,没有头可摘"
+
+    client = _Client([_msg(content="SUMMARY")])
+    msgs[0]["content"] = "干活" + "x" * 40000
+    out = A.maybe_compact(client, "m", list(msgs), force=True)
+    assert "SUMMARY" in out[0]["content"], "摘要没进去"
+    assert out[-1]["content"] == "结果7", f"最后一条不是原文:{out[-1]}"
+    assert len(out) > 2, "又压成了只剩摘要 —— 下一步接不上刚才那一步"
+    # 落单的 tool:每一条工具结果前面都必须有发起它的那条 assistant
+    seen = set()
+    for m in out:
+        for c in (m.get("tool_calls") or []):
+            seen.add(c.id if hasattr(c, "id") else c["id"])
+        if m.get("role") == "tool":
+            assert m["tool_call_id"] in seen, \
+                f"落单的工具结果 {m['tool_call_id']} —— 它的 assistant 被摘要吃掉了"
+
+
+def test_cheap_pruning_runs_before_paying_the_model(ws, monkeypatch):
+    """分级治理:先剪旧工具输出,不够再叫模型。`_prune_old_tool_results` 本来就存在,
+    但它跑在压缩**之后** —— 于是压缩每次都对着没剪过的历史叫模型。同一个便宜手段,
+    只是没用在该用的地方。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    calls = []
+    monkeypatch.setattr(A, "_chat", lambda *a, **k: calls.append(1) or _Client(
+        [_msg(content="SUMMARY")]).chat.completions.create())
+    msgs = [{"role": "user", "content": "干活"}]
+    for i in range(12):
+        msgs.append({"role": "assistant", "content": None,
+                     "tool_calls": [_tc("read_file", "{}", f"c{i}")]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "大块输出" * 1000})
+    assert A._ctx_chars(msgs) > A.COMPACT_AT
+    out = A.maybe_compact(None, "m", msgs)
+    assert calls == [], "剪一下就够了,却还是花钱叫了模型"
+    assert A._ctx_chars(out) < A.COMPACT_AT, "剪完还是超,那这一级就是白加的"
+    assert any("已省略工具输出" in str(m.get("content")) for m in out), "根本没剪"
 
 def test_seal_keeps_work_after_a_failed_turn():
     """一轮中途挂了(比如 429),进度必须留着让用户「继续」,只补上缺的工具结果。"""

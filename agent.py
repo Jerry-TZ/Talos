@@ -2205,22 +2205,62 @@ def consolidate(client, model: str, state: dict) -> str:
 def _ctx_chars(messages: list) -> int:
     return sum(len(str(m.get("content") or "")) for m in messages)
 
+COMPACT_KEEP = 8     # 压缩之后原样留在末尾的消息数,见 _tail_start
+
+def _tail_start(messages: list, keep: int) -> int:
+    """尾部从哪一条开始切。
+
+    不能直接 `messages[-keep:]`:切点落在一条 `tool` 消息上,它的 `assistant`
+    tool_calls 就被留在了被摘要的那一半 —— 一条**没有来处的工具结果**,接口当场报错。
+    所以起点往后挪到第一条不是 `tool` 的消息。"""
+    # 尾部**不许超过一半**。写死 8 的话,一段 9 条的历史整个变成尾巴,`/compact` 什么
+    # 都不做还不说一声 —— 压缩的前提是有个头可摘。
+    i = max(0, len(messages) - min(keep, len(messages) // 2))
+    # **往前退,不往后挪。** 并行工具调用会让结尾连着好几条 `tool`,往后挪会一路走出
+    # 列表末尾、把尾巴挪成空的;往前退是退到发起它们的那条 assistant —— 不会落单,
+    # 而且留下的上下文更多,正是这一改想要的。
+    while i > 0 and messages[i].get("role") == "tool":
+        i -= 1
+    return i
+
 def maybe_compact(client, model: str, messages: list, force: bool = False) -> list:
-    """History got long? Replace it with a summary + a continue marker. Returns the new list."""
+    """History got long? Summarize the head, keep the tail verbatim. Returns the new list.
+
+    **上一版把整段历史压成 2 条,尾部一条不留。** 实测代价:一轮 32 步的任务压缩之后,
+    模型花了约十次调用重新读它刚读过的文件、重新列它刚列过的目录,直到重复熔断把它拽出来。
+    摘要能告诉它「做过什么」,但**「刚才那一步的原文」是摘要写不出来的** —— 而下一步
+    恰恰接在那上面。
+
+    分两级(抄 opencode 的分级治理):**先用不花钱的手段腾空间,LLM 是最后手段。**
+    `_prune_old_tool_results` 本来就存在,但它跑在压缩**之后**,于是压缩每次都对着
+    没剪过的历史叫模型 —— 同一个便宜手段,只是没有用在该用的地方。"""
     if len(messages) < 3 or (not force and _ctx_chars(messages) < COMPACT_AT):
         return messages
-    clean = [{"role": m["role"], "content": m["content"]} for m in messages
+    # 第一级:剪掉旧的大块工具输出。够了就不叫模型。
+    _prune_old_tool_results(messages, keep=COMPACT_KEEP)
+    if not force and _ctx_chars(messages) < COMPACT_AT:
+        ui.note("🗜 剪掉旧工具输出就够了,没叫模型压缩")
+        return messages
+    # 第二级:摘要头部,尾部原样留着。
+    cut = _tail_start(messages, COMPACT_KEEP)
+    if cut == 0:
+        return messages                    # 全是尾巴,没有头可摘 —— 叫模型也压不出东西
+    clean = [{"role": m["role"], "content": m["content"]} for m in messages[:cut]
              if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
              and m["content"] and "tool_calls" not in m]
     with ui.thinking():
         resp = _chat(client, model=model, messages=(
-            [{"role": "system", "content": "你在压缩一段编程 agent 的对话历史。产出一段简报,保留:"
-              "当前任务、已做的决定、改动过的文件、还没完成的线索。简洁、要点式。"}]
+            [{"role": "system", "content": "你在压缩一段编程 agent 的对话历史。产出一段简报,"
+              "分六段:①当前任务的目标 ②用户明确说过的约束(「别动 X」「必须用 Y」这类,"
+              "一个字都不许漏)③已经做完的 ④关键决定和它的理由 ⑤下一步要做什么 "
+              "⑥还没解决的问题。简洁、要点式。"}]
             + clean + [{"role": "user", "content": "把以上压成简报。"}]))
     summary = resp.choices[0].message.content or "(空)"
-    ui.note(f"🗜 上下文已压缩({len(messages)} 条 → 2 条)")
+    tail = messages[cut:]
+    ui.note(f"🗜 上下文已压缩({len(messages)} 条 → {2 + len(tail)} 条,"
+            f"最近 {len(tail)} 条原样留着)")
     return [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary},
-            {"role": "assistant", "content": "了解,以上是之前的进展,我们继续。"}]
+            {"role": "assistant", "content": "了解,以上是之前的进展,我们继续。"}] + tail
 
 def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
     """Stub OLD, bulky tool outputs in place so they stop getting resent every step (token saver).
