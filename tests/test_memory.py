@@ -644,7 +644,9 @@ def test_recall_withholds_the_body_when_nothing_clearly_won(ws):
     out = R.recall("读取报告文件统计内容")
     assert "alpha" in out or "beta" in out or "gamma" in out    # 描述行还是要给
     assert "[技能正文" not in out                               # 但正文一条都不给
-    assert all(not p["body"] for p in _trace_lines(R)[-1]["picked"])   # 轨迹如实记录
+    # 取最后一条**检索**行 —— 裸下标会在同目录别的测试写过结果行之后 KeyError
+    picks = [r for r in _trace_lines(R) if "picked" in r]
+    assert all(not p["body"] for p in picks[-1]["picked"])          # 轨迹如实记录
 
 def test_a_past_task_at_rank_one_does_not_block_the_skill_body(ws):
     """上一个任务的原话跟新任务共享一大堆关键词,分数常压过任何技能 —— 而往事没有正文可给,
@@ -862,6 +864,40 @@ def test_recall_trace_records_what_was_actually_injected(ws):
     assert picked and all({"key", "score", "body"} == set(p) for p in picked)
     assert any(p["body"] for p in picked)                  # 技能给了正文,记下来了
     assert picked == sorted(picked, key=lambda p: -p["score"])   # 按激活分排序
+
+def test_a_nested_subagent_must_not_overwrite_the_parents_outcome(ws):
+    """「捞到了什么」和「这一轮花了多少」原来分在两处,谁都答不了**捞到的东西有没有帮上忙** ——
+    复盘写完技能就结束,从不知道哪条真管用(CODESKILL 管这叫 downstream feedback)。
+
+    显而易见的实现是:检索时把记录攒在模块变量里,跑完一起写。**那是错的,而且错两次:**
+
+    · 一轮崩了,这条轨迹就没了 —— 而崩掉的那轮恰恰最值得看。
+    · `spawn_subagent` 是**嵌套调 `agent_turn`** 的。父检索完、子 agent 进来又检索一次,
+      父那半条记录被原地盖掉;等父跑完回填,数字落到了子的记录上。
+      父跑了 40 步、子跑了 3 步,存出来两条都是 3 步 —— **而且看不出错。**
+
+    所以检索行照旧在检索那一刻就落盘,进程里不留半成品状态。
+
+    **第一版这条测试用了两个手挑的、必然不同的 query** —— 而跨层唯一会对错的情形恰恰是
+    **父子 query 相同**(复盘就是拿 `query=task` 再跑一遍)。判据从构造上排除了要判的那件事。
+    现在两次检索用**同一个 query**:攒模块变量的写法在这里照样红,而且红得对。"""
+    import recall as R
+    same = "重画流程图"                        # 复盘复用的就是同一个 query
+    R.recall(same)                             # 父检索
+    R.recall(same)                             # 复盘/子 agent 嵌套进来,又检索一次
+    R.trace_outcome(same, steps=1, calls=0)    # 短的那轮先回填
+    R.trace_outcome(same, steps=40, calls=32)  # 父跑完
+
+    rows = _trace_lines(R)
+    assert len(rows) == 4, f"四次动作应该四行,实际 {len(rows)} 行:{rows}"
+    outs = [r["out"] for r in rows if "out" in r]
+    assert [o["steps"] for o in outs] == [1, 40], \
+        f"两条结果行没有各自落盘 —— 攒在模块变量里就会互相盖:{outs}"
+    # 检索行和结果行要分得开(memory_report 靠这个数「几轮检索」),检索行一个字没变
+    picks = [r for r in rows if "out" not in r]
+    assert len(picks) == 2 and all("picked" in r for r in picks)
+    assert {r["q"] for r in rows} == {R._qhash(same)}, "q 对不上,结果行认不回检索行"
+
 
 def test_recall_trace_stores_a_hash_not_the_question(ws):
     """原文已经在会话 JSONL 里了,这里再存一份只是多开一个泄露面。"""

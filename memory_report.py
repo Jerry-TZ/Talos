@@ -44,7 +44,11 @@ def _bar(frac, w=180):
 
 
 def build() -> str:
-    trace = _rows("recall_trace.jsonl")
+    rows = _rows("recall_trace.jsonl")
+    # 同一个文件里两种行:检索那一刻写的(带 picked),和这一轮跑完回填的(带 out)。
+    # 混在一起数,「轮检索」会凭空翻倍。
+    trace = [r for r in rows if "out" not in r]
+    outs = [r["out"] for r in rows if isinstance(r.get("out"), dict)]
     cache = _rows("cache_trace.jsonl")
     hits = {}
     hp = os.path.join(D, "recall_hits.json")
@@ -103,8 +107,29 @@ def build() -> str:
                          f"<td class=n>{buckets.get(b, 0)}</td></tr>")
         parts.append("</table>")
 
-    # ④ 缓存 —— system 变没变 × 命中多少
-    parts.append("<h2>④ KV 缓存命中</h2>")
+    # ④ 注入正文到底有没有让这一轮更省 —— 复盘写完技能就结束,从来不知道哪条真管用。
+    # **按结果行自己带的 bodies 分组,不按 q 去跟检索行对。** 复盘用同一个 query 再检索
+    # 一遍、同一个问题问两次,按 q 分组就把没拿到正文的那些轮也算进「注入过」那一组。
+    groups = {True: [], False: []}
+    for out in outs:
+        if isinstance(out.get("calls"), int) and not out.get("capped"):
+            groups[bool(out.get("bodies"))].append(out["calls"])
+    parts.append("<h2>④ 注入了技能正文的轮,是不是更省</h2>")
+    if not any(groups.values()):
+        parts.append("<p class=dim>还没有数据 —— 结果是这一轮跑完才回填的,正常用几轮再来看。</p>")
+    else:
+        for label, want in (("注入过技能正文", True), ("只给了描述", False)):
+            g = groups[want]
+            if g:
+                parts.append(f"<p><b>{label}</b> n={len(g)} · 工具调用中位数 "
+                             f"{statistics.median(g):.1f} · 范围 {min(g)}~{max(g)}</p>")
+        capped_n = sum(1 for o in outs if o.get("capped"))
+        parts.append(f"<p class=dim>差值小于 2 次、或任一组 n&lt;8 时,别下结论 —— "
+                     f"任务难度本身的方差比这大。撞了步数上限的 {capped_n} 轮不计入"
+                     f"(那是「卡住了」,不是「花得多」)。这是燃尽表,每跑一个真任务加一条。</p>")
+
+    # ⑤ 缓存 —— system 变没变 × 命中多少
+    parts.append("<h2>⑤ KV 缓存命中</h2>")
     if not cache:
         parts.append("<p class=dim>还没有数据。正常用几轮,复盘写过技能之后再来看 —— "
                      "要比的是「system 块变了的那些轮」和「没变的那些轮」。</p>")

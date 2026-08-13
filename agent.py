@@ -1865,7 +1865,8 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
             f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
             f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。")
 
-def agent_turn(client, model: str, messages: list, state: dict, query: str = "") -> str:
+def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
+               top: bool = False) -> str:
     """Drive one user request to completion, looping over tool calls.
 
     `query` overrides what recall searches on. It exists for reflect(), which appends a fixed
@@ -1879,11 +1880,13 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
     query = query or next((m["content"] for m in reversed(messages)
                            if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
     recalled = ""
+    rec_info: dict = {}                                # 这一轮捞到了什么 —— 给 _seal_trace 用
     if query:
         try:
             import recall                              # 联想回忆:按当前任务捞相关记忆(spreading activation)
             recalled = recall.recall(query, blocked=set(flagged),
-                                     keep_fact=lambda ln: not skill_risks(ln))
+                                     keep_fact=lambda ln: not skill_risks(ln),
+                                     sink=rec_info)
         except Exception:
             recalled = ""
     system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
@@ -1902,6 +1905,31 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
     if not _RUNTIME.get("depth"):
         _RUNTIME["reads"] = {}
     reads: dict = _RUNTIME.setdefault("reads", {})
+    def _seal_trace(steps: int, capped: bool) -> None:
+        """把这一轮的结果回填进检索轨迹 —— 「捞到了什么」和「这一轮花了多少」原来分在两处,
+        谁都答不了「捞到的东西到底有没有帮上忙」。
+
+        **只有顶层记。** `agent_turn` 一次用户请求要跑好几遍:复盘用**同一个 query** 再跑一遍
+        (`reflect` 里 `query=task`),每个子 agent 也各跑一遍。都记的话,一次请求写出好几条
+        记录,而复盘和子 agent 那几条普遍很短 —— 拿它们当独立样本,中位数直接被拉垮,
+        **而且看不出错**。实测一个 6 步任务落盘成 `{steps:6}` + `{steps:1}`,报告打印
+        「n=2 · 中位数 3.5」。
+
+        `capped` 由调用方直接传,不从 `state` 读:`state["capped"]` 要到**下一轮**
+        `agent_turn` 跑完之后才被 pop(2531 在 2512 后面),复盘轮撞上限会把它留在那儿,
+        于是下一轮干净收尾的记录被误标成撞了上限。
+
+        `bodies` 是这一轮**注入了几条技能正文** —— 直接写进结果行,读的那头就不用拿 `q`
+        去跟检索行对了。同一个问题问两次、复盘复用同一个 `q`,按 `q` 分组全是错的。"""
+        if not (top and query):
+            return
+        try:
+            recall_mod().trace_outcome(query, steps=steps, capped=capped,
+                                       calls=state["last_tok"]["calls"],
+                                       bodies=int(rec_info.get("bodies", 0)))
+        except Exception:
+            pass                               # 观测坏了不许拖垮一轮
+
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -1910,6 +1938,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
             state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
             state["last_calls"] = state["last_tok"]["calls"]
             state["capped"] = True                     # a flailing turn must not teach itself its own workarounds
+            _seal_trace(steps, capped=True)
             return (f"(已到 {MAX_STEPS} 步上限,停下了。历史都还在 —— 直接说「继续」就接着做,"
                     f"或者拆小些重来;想放宽上限设 TALOS_MAX_STEPS。)")
         if steps == MAX_STEPS - 4:                     # let it land the plane instead of being cut mid-flight
@@ -1954,6 +1983,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "")
         if not tool_calls:                              # no tool wanted -> final answer
             state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
             state["last_calls"] = state["last_tok"]["calls"]
+            _seal_trace(steps, capped=False)
             return msg.content or ""
 
         for c in tool_calls:
@@ -2289,7 +2319,7 @@ def once(task: str, mode: str = "bypass") -> str:
     state = {"mode": mode, "allow": set(), "view": "normal", "asked": task}
     messages: list = [{"role": "user", "content": task}]
     try:
-        result = agent_turn(client, model, messages, state)
+        result = agent_turn(client, model, messages, state, top=True)
     except KeyboardInterrupt:
         ui.note("⛔ 已中断")
         sys.exit(130)
@@ -2494,7 +2524,7 @@ def repl(resume=None) -> None:
         state["asked"] = state.get("asked", "") + "\n" + task
         messages.append({"role": "user", "content": task})
         try:
-            result = agent_turn(client, model, messages, state)
+            result = agent_turn(client, model, messages, state, top=True)
         except KeyboardInterrupt:                  # Ctrl-C: stop this turn, keep the REPL and the work
             _seal(messages)
             sess.save(messages)

@@ -137,7 +137,8 @@ class Watch:
 
     def _draw(self):
         name, msgs = _latest_session()
-        trace = _rows("recall_trace.jsonl")
+        # 带 out 的是这一轮跑完回填的结果行,不是一次检索 —— 混着数会让「轮检索」翻倍
+        trace = [r for r in _rows("recall_trace.jsonl") if "out" not in r]
         cache = _rows("cache_trace.jsonl")
         sig = (name, len(msgs), len(trace), len(cache))
         if sig == self.sig:

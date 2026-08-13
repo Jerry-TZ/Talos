@@ -125,6 +125,50 @@ def test_maybe_compact(ws, monkeypatch):
     assert A.maybe_compact(client, "m", small) is small          # 太短 -> 原样返回
 
 
+def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
+    """一次用户请求会跑好几遍 `agent_turn`:复盘用**同一个 query** 再跑一遍
+    (`reflect` 里 `query=task`),每个子 agent 也各跑一遍。都记的话,一次请求写出好几条
+    结果行,而复盘和子 agent 那几条普遍很短 —— 拿它们当独立样本,中位数直接被拉垮,
+    **而且看不出错**。所以只有顶层记。
+
+    第一版这条测试写的是 `assert outs[-1]["capped"] is False` —— **结构上不可能失败**:
+    每次都传全新的 state,`capped` 的唯一写入点在它自己 return 的前一行。那句断言无论
+    生产代码怎么写都是 False,而它恰恰是本该抓住「capped 跨轮泄漏」的那一句。
+    第三十二节刚写完六种形状的第三种,这里就又犯一次。现在改成**比较两轮**:
+    正常那轮和撞上限那轮必须分得开,把哪一边写死都会红。"""
+    import json
+    import agent as A
+    import recall as R
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("ok", False))
+
+    def _outs():
+        with open(R.TRACE_FILE, encoding="utf-8") as f:
+            return [json.loads(ln)["out"] for ln in f
+                    if ln.strip() and isinstance(json.loads(ln).get("out"), dict)]
+
+    # ① 顶层正常收尾:一次工具调用之后给答案
+    script = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}')]), _msg(content="done")]
+    A.agent_turn(_Client(script), "m", [{"role": "user", "content": "看看 a.py"}],
+                 {"mode": "bypass", "allow": set()}, top=True)
+    assert _outs(), "顶层跑完了,轨迹里一条结果都没有 —— 回填那行根本没被调用"
+    assert _outs()[-1]["calls"] == 1, f"数字对不上:{_outs()[-1]}"
+
+    # ② 非顶层(复盘 / 子 agent 走的就是这条):一个字都不许写
+    before = len(_outs())
+    A.agent_turn(_Client([_msg(content="done")]), "m",
+                 [{"role": "user", "content": "看看 a.py"}], {"mode": "bypass", "allow": set()})
+    assert len(_outs()) == before, "非顶层也记了 —— 一次请求会被算成好几个样本"
+
+    # ③ 撞上限要标出来,而且跟正常那轮**分得开**
+    monkeypatch.setattr(A, "MAX_STEPS", 2)
+    spin = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"c{i}")]) for i in range(5)]
+    A.agent_turn(_Client(spin), "m", [{"role": "user", "content": "一直转"}],
+                 {"mode": "bypass", "allow": set()}, top=True)
+    flags = [o["capped"] for o in _outs()]
+    assert flags == [False, True], f"正常轮和撞上限的轮分不开:{flags}"
+
+
 def test_compaction_keeps_the_last_few_messages_verbatim(ws, monkeypatch):
     """摘要写不出「刚才那一步的原文」,而下一步恰恰接在那上面。
 
