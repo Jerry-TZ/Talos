@@ -1512,7 +1512,24 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     ui.preview(name, args)
     named = _named_in_request(state, args) if name == "run_bash" else []
     if named and ui is not None:
-        ui.note("⚠️  " + "、".join(named) + " —— 你在请求里点名要过它,删了就没了")
+        # **名字在命令里,和名字在脚本里,不是同一句话。** 前者这条命令确实在删它;
+        # 后者只知道脚本**提到**了它 —— 而提到不等于删。实测:模型写的删除脚本末尾有
+        # `kept = ["out", "draft.md"]; assert os.path.exists(k)`,它在验证自己保留对了,
+        # 于是 `del del_three.py` 打出「draft.md、out 删了就没了」。那句话是假的,
+        # 人照着它按了 N,模型连自己的临时脚本都清不掉,换三种写法撞的是同一句假话。
+        # **越认真验证,越容易被拦。**
+        #
+        # 分不出「提到」和「要删」不是这里能解决的(脚本可以 `for f in targets:
+        # os.remove(f)`,名字和删除动作根本不在一行)—— 但**说话可以不撒谎**:
+        # 看得见的就断言,看不见的就让人自己去看。两句都是真的,覆盖面一点没少。
+        cmd = args.get("command", "")
+        direct = [f for f in named if _mentions(cmd, f)]
+        indirect = [f for f in named if f not in direct]
+        if direct:
+            ui.note("⚠️  " + "、".join(direct) + " —— 你在请求里点名要过它,删了就没了")
+        if indirect:
+            ui.note("⚠️  这条命令要跑的脚本里提到了 " + "、".join(indirect)
+                    + " —— 你在请求里点名要过它们,看清楚脚本对它们做什么")
     try:
         ans = ui.ask()
     except (KeyboardInterrupt, EOFError):

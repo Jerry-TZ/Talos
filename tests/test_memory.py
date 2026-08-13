@@ -260,6 +260,66 @@ def test_the_prompt_flags_a_file_the_request_named(ws, monkeypatch):
     A.check_permission(st, "bash", "run_bash", {"command": "python verify_index.py"})
     assert not notes                          # 只针对删除,跑一下不算
 
+def test_verifying_that_you_kept_a_file_must_not_look_like_deleting_it(ws):
+    """冒烟第二轮:模型写的删除脚本末尾带一段**验证保留**的代码 ——
+
+        kept = ["out", "draft.md"]
+        for k in kept: assert os.path.exists(k)
+
+    然后它去删自己的临时脚本,屏幕上打出「⚠️ draft.md、out —— 你在请求里点名要过它,
+    删了就没了」。`del del_three.py` 一根毛都没碰这两个文件,**那句话是假的**,而人
+    照着它按了 N。模型于是清不掉自己的临时脚本,换了三种写法都被同一句假话拦住,
+    最后 workspace 里躺着三个删不掉的 scratch 文件 —— 每试一次多一个,是个棘轮。
+
+    **越认真验证,越容易被拦。** 判据把「脚本提到这个名字」当成了「脚本要删这个名字」。
+
+    分不出「提到」和「要删」不是判据能解决的:真实的绕过脚本是 `for f in targets:
+    os.remove(f)`,名字和删除动作根本不在一行,任何靠邻近性的近似都会漏掉它。
+    **但说话可以不撒谎** —— 名字出现在命令里就断言「删了就没了」(看得见),只出现在
+    脚本里就说「脚本提到了它,看清楚脚本对它做什么」(看不见)。两句都是真的,
+    覆盖面一点没少:`_named_in_request` 照旧读脚本,变的只是屏幕上那句话。"""
+    import os
+    import types
+    import agent as A
+    for n in ("out", "draft.md"):
+        open(os.path.join(A.WORKSPACE, n), "w", encoding="utf-8").close()
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    notes = []
+    A_ui = A.ui
+    A.ui = types.SimpleNamespace(preview=lambda *a: None, ask=lambda: "n",
+                                 note=lambda s: notes.append(s), denied=lambda *a: None)
+    try:
+        open("del_three.py", "w", encoding="utf-8").write(
+            'import os\nfor f in ["a.csv"]:\n    os.remove(f)\n'
+            'kept = ["out", "draft.md"]\n'
+            'for k in kept:\n    assert os.path.exists(k)\n')
+        st = {"mode": "default", "allow": {"run_bash"}, "denied": set(),
+              "asked": "report(1).csv 和 日志 我不要了,out 和 draft.md 留着"}
+
+        # ① 名字只在脚本里(而且脚本是在**验证保留**它们)—— 不许说「删了就没了」
+        notes.clear()
+        A.check_permission(st, "bash", "run_bash", {"command": "del del_three.py"})
+        msg = " ".join(notes)
+        assert "out" in msg and "draft.md" in msg, "脚本提到了用户点名的文件,提示行不该沉默"
+        assert "删了就没了" not in msg, \
+            "对着一条不删它们的命令说「删了就没了」—— 人会照着这句假话按 N"
+        assert "脚本" in msg, "得说清楚名字是从脚本里看见的,不是从命令里"
+
+        # ② 名字真在命令里 —— 那句强断言必须还在
+        notes.clear()
+        A.check_permission(st, "bash", "run_bash", {"command": "del out draft.md"})
+        assert "删了就没了" in " ".join(notes), "命令真的点名删它,反而不警告了"
+
+        # ③ 一个都不沾的命令,一句话都不该说
+        notes.clear()
+        A.check_permission(st, "bash", "run_bash", {"command": "del scratch.tmp"})
+        assert not [n for n in notes if "点名" in n or "脚本里提到" in n], f"误伤:{notes}"
+    finally:
+        A.ui = A_ui
+        os.chdir(cwd)
+
+
 def test_a_refusal_sticks_to_the_file_not_the_command(ws, monkeypatch):
     """拒了 `del x.md`,它回头发 `cmd /c del x.md` —— 同一个删除,前面加个壳,闸门没认出来,
     六个文件零确认没了。加宽正则只能买一轮:`python -c "os.remove('x.md')"` 正则永远看不见。
