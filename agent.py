@@ -2151,10 +2151,22 @@ def _known_skills(task: str) -> str:
               "(**改**,不是新建);确实一条都不沾边,才新建;这次的经验里面已经写过了,"
               "就**什么都不写**。同一件事拆成两条技能,两条会在检索里互相压分,谁都捞不出来。\n")
 
+def _skill_stat() -> dict:
+    """技能库的指纹。**改**一条技能跟**新建**一条同样算「记下了东西」—— 只数文件个数
+    的话,查重成功那次(UPDATE 而不是 NEW,正是我们想要的行为)会被报成「什么都没记」。"""
+    out = {}
+    for p in glob.glob(os.path.join(SKILLS_DIR, "*.md")):
+        try:
+            st = os.stat(p)
+            out[p] = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            pass
+    return out
+
 def reflect(client, model: str, messages: list, state: dict) -> str:
     """One extra learning turn — saves skills/facts, reusing the gated tools.
     Runs on a COPY of messages so the reflection prompt never pollutes memory."""
-    before = _memory_lines()
+    before, skills_before = _memory_lines(), _skill_stat()
     # reversed:要的是**刚做完的**那个请求,不是本次会话开头那个。REPL 的 messages 跨轮累积,
     # 正向取到的永远是第一轮的任务 —— 于是从第二轮起,查重摆到复盘眼前的是一张跟本次无关的
     # 技能表,而提示词还写着"上面有沾边的就去改"。`/compact` 之后更糟:首条 user 消息变成
@@ -2167,6 +2179,15 @@ def reflect(client, model: str, messages: list, state: dict) -> str:
     n = _tag_new_memory(before)
     if n and ui is not None:
         ui.note(f"📝 memory.md 新增 {n} 条,已标记来源(手写的行不会被 /forget 建议删除)")
+    # **开了口就得收尾。** 上一版只在写了 memory 行时才吭声,而复盘最常见的结局是
+    # 「看过了,没什么值得记的」—— 那条路一个字都不打,`🧠 复盘看有没有值得记的…`
+    # 悬在屏幕上,后面是提示符。**「做完了什么都没记」和「卡住了」长得一模一样**,
+    # 而复盘要跑十几到八十秒,人只能盯着猜。这是第二十节那三层沉默的同一个形状:
+    # 一个**正确**的行为被安静地扔掉,于是看起来像故障。
+    if ui is not None:
+        bits = ([f"memory.md 新增 {n} 条"] if n else []) + \
+               (["技能有改动"] if _skill_stat() != skills_before else [])
+        ui.note("📝 复盘完成 — " + ("、".join(bits) if bits else "这次没什么值得记的"))
     return out
 
 def consolidate(client, model: str, state: dict) -> str:

@@ -368,6 +368,56 @@ def test_reflection_looks_at_the_task_that_just_finished(monkeypatch):
     assert seen["task"] == "帮我升级 rust 依赖 cargo update", \
         f"复盘查的是会话第一个任务,不是刚做完的: {seen['task']!r}"
 
+def test_reflection_says_so_even_when_it_decides_to_write_nothing(ws, monkeypatch):
+    """复盘开口那句(`🧠 这次用了 N 步 — 复盘看有没有值得记的…`)是无条件打的,而收尾那句
+    原来只在**写了 memory 行**时才打。于是最常见的那个结局 —— 看过了、判断没什么可记的、
+    一个字都不写 —— 屏幕上是开口那句悬着,后面直接是提示符。
+
+    而复盘要跑十几到八十秒。真实一轮里用户问的就是这个:「为什么最后还是模型思考中,
+    但是还没出结果」—— 它没卡,它做完了。**「做完了什么都没记」和「卡住了」长得一模一样。**
+
+    这是第二十节那三层沉默的同一个形状,而且是最刺眼的一种:被安静扔掉的那个行为
+    是**正确**的(不该学的就别学),于是系统做对了事,看起来却像故障。
+
+    收尾必须无条件,内容才分情况。改技能和新建技能同样算「记下了东西」——
+    只数文件个数的话,查重成功那次(UPDATE 而不是 NEW,正是想要的行为)会被
+    报成「什么都没记」。"""
+    import os
+    import agent as A
+    notes = []
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A.ui, "note", lambda s: notes.append(s))
+    monkeypatch.setattr(A, "agent_turn", lambda *a, **k: "done")
+    monkeypatch.setattr(A, "_known_skills", lambda t: "")
+    monkeypatch.setattr(A, "_memory_lines", lambda: [])
+    monkeypatch.setattr(A, "_tag_new_memory", lambda before: 0)
+    msgs = [{"role": "user", "content": "算第 10 个斐波那契数"}]
+
+    # ① 什么都没写 —— 也得说一声
+    notes.clear()
+    A.reflect(None, "m", msgs, {"mode": "bypass", "allow": set()})
+    assert notes, "复盘一个字都没说 —— 屏幕上只剩「复盘看有没有值得记的…」和一个提示符"
+    assert "没什么值得记的" in " ".join(notes), f"没说清是「做完了」还是「还在跑」:{notes}"
+
+    # ② 改了一条已有技能(查重成功那条路)—— 不许报成「什么都没记」
+    os.makedirs(A.SKILLS_DIR, exist_ok=True)
+    p = os.path.join(A.SKILLS_DIR, "existing.md")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("---\nname: existing\ndescription: 旧的\n---\n1. old\n")
+
+    def _edit(*a, **k):
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("2. 这次补的\n")
+        return "done"
+    monkeypatch.setattr(A, "agent_turn", _edit)
+    notes.clear()
+    A.reflect(None, "m", msgs, {"mode": "bypass", "allow": set()})
+    joined = " ".join(notes)
+    assert "没什么值得记的" not in joined, \
+        f"改了一条已有技能却报成什么都没记 —— UPDATE 正是想要的行为:{notes}"
+    assert "技能有改动" in joined, f"改动没被说出来:{notes}"
+
+
 def test_a_subagent_hitting_the_step_cap_does_not_cancel_the_parents_reflection(monkeypatch):
     """一个 state 里混着三类性质完全不同的东西,而子 agent 原来拿的是父的同一个 dict:
 
