@@ -791,6 +791,48 @@ def test_the_error_a_model_gets_back_must_name_the_parameters_it_has_to_supply(w
         del A.TOOLS["_probe_hint"]
 
 
+def test_the_read_budget_message_must_be_true_from_the_subagents_side(ws, monkeypatch):
+    """读预算**故意**跨子 agent 累计(父烧完额度派个子 agent 就又有一份,那道闸等于没有)。
+    那条设计是对的。坏的是它说的话。
+
+    真实一轮:父读了 13 次撞上限,派出去的子 agent 一个字都没读过,收到的却是
+    「这一轮**你**已经读了 13 次…用**你已经读到的**内容往下做」。子 agent 回话说
+    `this environment is intercepting every attempt to read those two files`——
+    **它没胡说,它是照着一句在它视角下为假的话做的正确推理。**
+
+    今天第四次撞同一类:假的拒绝理由(把模型推向 python -c)、假的警告(让人拒掉正确的
+    清理)、该说而没说(复盘的沉默像卡死),现在是**换个视角才假**的话。
+    所以判据是:这句话在**每个视角下**都得成立,而且得给没花过额度的那个一条能走的路。"""
+    import os
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    p = os.path.join(A.WORKSPACE, "big.py")
+    open(p, "w", encoding="utf-8").write("x = 1\n" * 50)
+
+    def _burn():
+        seen = {}
+        for i in range(A.READ_LIMIT * 3):
+            out = A._read_guard(seen, "read_file", {"path": p}, f"片段{i}")
+            if "片段" not in out:
+                return out
+        raise AssertionError("烧不满额度,这条测试没测到东西")
+
+    monkeypatch.setitem(A._RUNTIME, "depth", 0)
+    top = _burn()
+    assert "别再一段一段翻" in top and "用你已经读到的内容" in top
+
+    monkeypatch.setitem(A._RUNTIME, "depth", 1)          # 子 agent 里
+    sub = _burn()
+    assert "用你已经读到的内容" not in sub, \
+        "对一个一个字都没读过的子 agent 说「用你已经读到的内容往下做」—— 它没有"
+    assert "不是你花的" in sub and "不是环境在拦你" in sub, \
+        f"没告诉它额度是别人花的,它会以为环境坏了:{sub}"
+    assert "让派你来的那个把内容贴给你" in sub, "拦住了却没给一条能走的路"
+    # 两边都不许再说「这一轮你已经读了」—— 额度是按一次请求算的,不是按这一层
+    for msg in (top, sub):
+        assert "你已经读了" not in msg, f"这句话换个视角就是假的:{msg[:60]}"
+
+
 def test_slicing_a_file_with_run_bash_counts_too(ws, monkeypatch):
     """真实一轮:模型三十几次 run_bash 打印 agent.py 的不同片段,一次 read_file 都没用 ——
     上一版守卫按**工具名**计数,于是一次都没触发。文件工具关在 workspace 里,读上一级的

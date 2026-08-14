@@ -1858,12 +1858,25 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
             hot, n = p, cnt            # p 只用来给人看名字,判据一律走 key[1]
     if not hot:
         return out
+    # **额度是按「一次请求」算的,而看这句话的可能是个一个字都没读过的子 agent。**
+    # 读预算故意跨子 agent 累计(见上面 `_RUNTIME["reads"]` 那段:不累计的话,父烧完额度
+    # 派个子 agent 就又有一份)。那条设计是对的,坏的是这句话:原话是「这一轮**你**已经读了
+    # 13 次…用**你已经读到的**内容往下做」,而子 agent 读到的是零。
+    # 实测后果:派出去的子 agent 回话说「this environment is intercepting every attempt
+    # to read those two files」—— 它没胡说,它是照着一句在它视角下为假的话做的正确推理。
+    # 今天第四次了:假的拒绝理由、假的警告、该说没说、现在是**在另一个视角下才假**的话。
+    # 所以措辞要在**每个视角下都成立**,而且给没花过额度的那个一条能走的路。
+    nested = bool(_RUNTIME.get("depth"))
     if ui is not None:
-        ui.note(f"📖 {os.path.basename(hot)} 本轮已读 {n} 次(整本 {_pages(hot)} 页)—— 不再返回内容")
-    return (f"[系统] 这一轮你已经读了 {os.path.basename(hot)} {n} 次(换 offset、换成 findstr/type 打印切片,都算)。"
+        ui.note(f"📖 {os.path.basename(hot)} 本次请求已读 {n} 次(整本 {_pages(hot)} 页)—— 不再返回内容")
+    return (f"[系统] 这次请求里 {os.path.basename(hot)} 已经被读了 {n} 次"
+            f"(换 offset、换成 findstr/type 打印切片、以及派出去的子 agent 读的,都算在一起)。"
             f"文件没变,再读一遍不会读出新东西,而每读一遍都要把整段上下文重发。\n"
-            f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
-            f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。")
+            + (f"**这份额度不是你花的** —— 派你来的那一层已经读过了,不是环境在拦你。"
+               f"别再自己找路子读它:回话里说清楚你需要哪一段,让派你来的那个把内容贴给你。"
+               if nested else
+               f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
+               f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。"))
 
 def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                top: bool = False) -> str:
