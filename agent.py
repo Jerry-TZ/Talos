@@ -1872,8 +1872,9 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
     return (f"[系统] 这次请求里 {os.path.basename(hot)} 已经被读了 {n} 次"
             f"(换 offset、换成 findstr/type 打印切片、以及派出去的子 agent 读的,都算在一起)。"
             f"文件没变,再读一遍不会读出新东西,而每读一遍都要把整段上下文重发。\n"
-            + (f"**这份额度不是你花的** —— 派你来的那一层已经读过了,不是环境在拦你。"
-               f"别再自己找路子读它:回话里说清楚你需要哪一段,让派你来的那个把内容贴给你。"
+            + (f"**这份额度是整次请求共用的** —— 可能是派你来的那一层花的,也可能是你自己"
+               f"刚才读的。**不是环境在拦你。** 别再自己找路子读它:在最终回复里说清楚"
+               f"你还缺哪一段,让派你来的那一层接着处理或者重新派活。"
                if nested else
                f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
                f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。"))
@@ -1951,7 +1952,10 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
             state["last_calls"] = state["last_tok"]["calls"]
             state["capped"] = True                     # a flailing turn must not teach itself its own workarounds
-            _seal_trace(steps, capped=True)
+            # `steps` 这时是 MAX_STEPS+1(闸在自增之后),而真正发生过的模型往返只有
+            # MAX_STEPS 次 —— 记 steps 会比 `last_tok["steps"]` 多一,两个数放在同一份
+            # 报告里对不上。回填真实发生的那个。
+            _seal_trace(steps - 1, capped=True)
             return (f"(已到 {MAX_STEPS} 步上限,停下了。历史都还在 —— 直接说「继续」就接着做,"
                     f"或者拆小些重来;想放宽上限设 TALOS_MAX_STEPS。)")
         if steps == MAX_STEPS - 4:                     # let it land the plane instead of being cut mid-flight
@@ -2248,7 +2252,8 @@ def consolidate(client, model: str, state: dict) -> str:
 def _ctx_chars(messages: list) -> int:
     return sum(len(str(m.get("content") or "")) for m in messages)
 
-COMPACT_KEEP = 8     # 压缩之后原样留在末尾的消息数,见 _tail_start
+COMPACT_KEEP = 8         # 压缩之后原样留在末尾的消息数,见 _tail_start
+COMPACT_EVIDENCE = 200   # 送进摘要的每条工具结果折成一行、截到这么长(留证据,不搬原文)
 
 def _tail_start(messages: list, keep: int) -> int:
     """尾部从哪一条开始切。
@@ -2288,9 +2293,26 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
     cut = _tail_start(messages, COMPACT_KEEP)
     if cut == 0:
         return messages                    # 全是尾巴,没有头可摘 —— 叫模型也压不出东西
-    clean = [{"role": m["role"], "content": m["content"]} for m in messages[:cut]
-             if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
-             and m["content"] and "tool_calls" not in m]
+    # **摘要必须看得见工具做过什么。** 上一版这里只留纯文本的 user/assistant,把工具调用和
+    # 工具结果全滤掉了 —— 而一轮里真正发生过的事几乎都在那里面。实测:六次 `edit_file` 改
+    # critical.py,送进摘要模型的内容里 `edit_file` 和结果里的哨兵串**一个都不在**,
+    # 而同一次改动我刚给提示词加了「③已经做完的 ④关键决定和它的理由」。
+    # **要它答的东西,输入里没有** —— 两条判据互相矛盾,而两边都是我自己写的。
+    # 折成一行、各自限长:目的是留下证据,不是把原文搬过去(那就不叫压缩了)。
+    clean = []
+    for m in messages[:cut]:
+        role, text = m.get("role"), m.get("content")
+        if role == "tool":
+            clean.append({"role": "user",
+                          "content": "[工具结果] " + " ".join(str(text or "").split())[:COMPACT_EVIDENCE]})
+        elif role == "assistant" and m.get("tool_calls"):
+            did = ", ".join(f"{(c.get('function') or {}).get('name', '?')}"
+                            f"({str((c.get('function') or {}).get('arguments', ''))[:80]})"
+                            for c in m["tool_calls"] if isinstance(c, dict))
+            clean.append({"role": "assistant", "content": (str(text or "").strip()
+                                                           + f"\n[调用了 {did}]").strip()})
+        elif role in ("user", "assistant") and isinstance(text, str) and text:
+            clean.append({"role": role, "content": text})
     with ui.thinking():
         resp = _chat(client, model=model, messages=(
             [{"role": "system", "content": "你在压缩一段编程 agent 的对话历史。产出一段简报,"

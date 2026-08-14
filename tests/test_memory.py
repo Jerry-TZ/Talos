@@ -904,10 +904,20 @@ def test_recall_trace_stores_a_hash_not_the_question(ws):
     import recall as R
     with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
         f.write("- 某条事实 alpha beta\n")
-    R.recall("alpha beta 我的密码是 hunter2")
+    q1 = "alpha beta 我的密码是 hunter2"
+    R.recall(q1)
     raw = open(R.TRACE_FILE, encoding="utf-8").read()
     assert "hunter2" not in raw and "密码" not in raw
-    assert len(_trace_lines(R)[0]["q"]) == 12
+    # **独立重算,不拿 `_qhash` 证明 `_qhash`。** 上一版只查长度、再跟同一个 `_qhash()`
+    # 比一次 —— 把它整个换成常量 `"0"*12`,全套测试照样绿:不同的问题会失去可区分性
+    # (轨迹里所有行都对上同一个 q),而没有任何判据看得见。第二种形状,判据和被判对象
+    # 共享盲点。现在用标准库自己算一遍,并且要求**两个不同的问题给出不同的值**。
+    import hashlib
+    want = hashlib.sha256(q1.encode("utf-8")).hexdigest()[:12]
+    assert _trace_lines(R)[0]["q"] == want, "存的不是这个问题的 sha256 前 12 位"
+    R.recall("完全是另一个问题 gamma delta")
+    qs = [r["q"] for r in _trace_lines(R) if "picked" in r]
+    assert len(set(qs)) == 2, f"两个不同的问题哈希成了同一个值 —— 轨迹失去可区分性:{qs}"
 
 def test_recall_trace_records_empty_rounds_too(ws):
     """「什么都没捞到」同样是数据 —— 不记就永远不知道召回率有多低。"""

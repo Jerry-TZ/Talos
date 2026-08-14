@@ -167,6 +167,51 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
                  {"mode": "bypass", "allow": set()}, top=True)
     flags = [o["capped"] for o in _outs()]
     assert flags == [False, True], f"正常轮和撞上限的轮分不开:{flags}"
+    # 撞上限时 `steps` 是 MAX_STEPS+1(闸在自增之后),而真正发生过的模型往返只有
+    # MAX_STEPS 次。两个数放在同一份报告里对不上,而报告比的正是它们。
+    st = {"mode": "bypass", "allow": set()}
+    A.agent_turn(_Client([_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"d{i}")])
+                          for i in range(5)]), "m",
+                 [{"role": "user", "content": "再转一次"}], st, top=True)
+    assert _outs()[-1]["steps"] == st["last_tok"]["steps"], \
+        f'trace 记 {_outs()[-1]["steps"]} 步,而实际模型往返 {st["last_tok"]["steps"]} 步'
+
+
+def test_the_summary_can_see_what_the_tools_actually_did(ws, monkeypatch):
+    """压缩的提示词要它写「③已经做完的 ④关键决定和它的理由」,而上一版送进去的内容
+    **把工具调用和工具结果全滤掉了** —— 一轮里真正发生过的事几乎都在那里面。
+    **要它答的东西,输入里没有**,而两边都是同一次改动里我自己写的。
+
+    实测:六次 `edit_file` 改 critical.py,送进摘要模型的内容里 `edit_file` 和结果里的
+    哨兵串一个都不在。判据就钉这一条:摘要的输入里必须找得到工具名和结果的痕迹。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    got = {}
+
+    def _spy(client, **kw):
+        got["msgs"] = kw["messages"]
+        return _Client([_msg(content="SUMMARY")]).chat.completions.create()
+    monkeypatch.setattr(A, "_chat", _spy)
+
+    msgs = [{"role": "user", "content": "改 critical.py" + "x" * 40000}]
+    for i in range(6):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "type": "function",
+                                     "function": {"name": "edit_file",
+                                                  "arguments": '{"path": "critical.py"}'}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}",
+                     "content": "edited critical.py; TEST_SENTINEL 188 passed "
+                                + "HEAD_MARK" + "z" * 5000 + "TAIL_MARK"})
+    A.maybe_compact(None, "m", msgs, force=True)
+
+    blob = "".join(str(m.get("content") or "") for m in got["msgs"])
+    assert "edit_file" in blob, "摘要看不见调用过哪个工具,却被要求写「已经做完的」"
+    assert "critical.py" in blob, "摘要看不见动过哪个文件"
+    assert "TEST_SENTINEL" in blob, "摘要看不见工具返回了什么"
+    # **是留证据,不是搬原文。** 每条工具结果折一行、限长 —— 不限的话「压缩」这一步
+    # 自己就把整段历史又发了一遍,比不压还贵。
+    assert "HEAD_MARK" in blob and "TAIL_MARK" not in blob, \
+        "大块工具输出被整个搬进了摘要输入 —— 压缩自己成了最贵的那一步"
 
 
 def test_compaction_keeps_the_last_few_messages_verbatim(ws, monkeypatch):
@@ -824,10 +869,16 @@ def test_the_read_budget_message_must_be_true_from_the_subagents_side(ws, monkey
     monkeypatch.setitem(A._RUNTIME, "depth", 1)          # 子 agent 里
     sub = _burn()
     assert "用你已经读到的内容" not in sub, \
-        "对一个一个字都没读过的子 agent 说「用你已经读到的内容往下做」—— 它没有"
-    assert "不是你花的" in sub and "不是环境在拦你" in sub, \
-        f"没告诉它额度是别人花的,它会以为环境坏了:{sub}"
-    assert "让派你来的那个把内容贴给你" in sub, "拦住了却没给一条能走的路"
+        "对一个可能一个字都没读过的子 agent 说「用你已经读到的内容往下做」—— 它可能没有"
+    # **上一版这里断言的是「这份额度不是你花的」,而这条测试自己构造的场景恰恰是子 agent
+    # 自己烧满的**(`_burn` 每次新建 `seen`)—— 我断言了一句在测试自身场景里为假的话,
+    # 而生产代码在同一场景下照样会那么说。第三十四节刚写完「递给谁?那个人知道什么?」,
+    # 下一条测试就把收信人搞错了。现在只说能证明的:额度整次请求共用,来源不确定;
+    # 而「不是环境在拦你」在两种来源下都成立。
+    assert "整次请求共用" in sub and "不是环境在拦你" in sub, \
+        f"没说清额度是共用的,它会以为环境坏了:{sub}"
+    assert "不是你花的" not in sub, "又断言了一句在这个场景里不成立的话"
+    assert "让派你来的那一层接着处理" in sub, "拦住了却没给一条能走的路"
     # 两边都不许再说「这一轮你已经读了」—— 额度是按一次请求算的,不是按这一层
     for msg in (top, sub):
         assert "你已经读了" not in msg, f"这句话换个视角就是假的:{msg[:60]}"
