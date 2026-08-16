@@ -410,6 +410,43 @@ def test_the_step_cap_message_does_not_promise_an_intact_history(ws, monkeypatch
     assert "继续" in out, "拿掉假话的同时把能走的那条路也拿掉了"
 
 
+def test_compaction_must_actually_get_under_the_threshold(ws, monkeypatch):
+    """**压完还是超,下一步就再压一次。** 实测日志里连着两条:
+    `压缩(33 条 → 10 条,最近 8 条原样留着)`、`压缩(11 条 → 7 条,最近 5 条原样留着)`。
+    每多压一次 = 一次全量缓存作废 + 一次额外的模型调用,而信息还被摘要吃掉一层。
+
+    根因是**单位不一致**:尾部保留按「条数」写(`COMPACT_KEEP=8`),而预算一直按「字符」
+    算(`COMPACT_AT`)。一条一万字符的长回答就能让留下的 8 条自己超预算 ——
+    这是我加尾部保留时没算到的代价。
+
+    判据钉的是**性质不是机制**:压缩之后必须真的低于阈值。怎么做到的(缩尾巴、
+    砍证据、还是别的)以后可以换,这条不用跟着改。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "_chat", lambda c, **kw: _msg(content="简报"))
+    # **用真实常数,不打桩。** 第一版把 COMPACT_AT 和 COMPACT_TAIL_CHARS 都换成了小值,
+    # 于是把默认预算改成无穷大(等价于没有这个机制)时测试照样全绿 ——
+    # 判据只盖住了机制,没盖住那两个数本身。
+
+    # 尾部那几条里塞一条巨长的回答 —— 光按条数留就压不下去
+    msgs = [{"role": "user", "content": "干活"}]
+    for i in range(6):
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 3000})
+    msgs.append({"role": "assistant", "content": "长" * 25000})
+    assert A._ctx_chars(msgs) > A.COMPACT_AT, "样本还没超阈值,压缩根本不会触发"
+
+    out = A.maybe_compact(None, "m", msgs, force=True)
+    assert A._ctx_chars(out) < A.COMPACT_AT, (
+        f"压完还是 {A._ctx_chars(out)} 字符,超过阈值 {A.COMPACT_AT} —— "
+        "下一步会立刻再压一次,每次都是一次全量缓存作废加一次模型调用")
+    # 别为了压下去把尾巴整个丢了:尾部保留这件事本身还得成立
+    assert len(out) > 2 or A._ctx_chars(msgs[-1:]) > A.COMPACT_TAIL_CHARS, \
+        "尾巴全丢了 —— 那就退回成「只剩摘要」,下一步接不上刚才那一步"
+
+
 def test_the_summary_can_see_what_the_tools_actually_did(ws, monkeypatch):
     """压缩的提示词要它写「③已经做完的 ④关键决定和它的理由」,而上一版送进去的内容
     **把工具调用和工具结果全滤掉了** —— 一轮里真正发生过的事几乎都在那里面。

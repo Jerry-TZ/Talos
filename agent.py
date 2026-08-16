@@ -2338,7 +2338,8 @@ def consolidate(client, model: str, state: dict) -> str:
 def _ctx_chars(messages: list) -> int:
     return sum(len(str(m.get("content") or "")) for m in messages)
 
-COMPACT_KEEP = 8         # 压缩之后原样留在末尾的消息数,见 _tail_start
+COMPACT_KEEP = 8                        # 压缩之后原样留在末尾的消息数,见 _tail_start
+COMPACT_TAIL_CHARS = COMPACT_AT // 3    # 尾部最多占预算的三分之一 —— 光按条数留会压不下去
 COMPACT_EVIDENCE = 200   # 送进摘要的每条工具结果折成一行、截到这么长(留证据,不搬原文)
 
 def _tail_start(messages: list, keep: int) -> int:
@@ -2350,10 +2351,23 @@ def _tail_start(messages: list, keep: int) -> int:
     # 尾部**不许超过一半**。写死 8 的话,一段 9 条的历史整个变成尾巴,`/compact` 什么
     # 都不做还不说一声 —— 压缩的前提是有个头可摘。
     i = max(0, len(messages) - min(keep, len(messages) // 2))
+    # **还要受字符预算约束 —— 条数和预算是两个单位。** 只按条数留的话,一条一万字符的
+    # 长回答就能让「压缩完还是超阈值」,于是下一步立刻再压一次:实测连着两次
+    # 「33 条 → 10 条」「11 条 → 7 条」,每一次都是一次全量缓存作废加一次额外的模型调用。
+    # 这是我加尾部保留时没算到的代价 —— 保留是按条数写的,而预算一直是按字符算的。
+    spent, j = 0, len(messages)
+    while j > i:
+        spent += len(str(messages[j - 1].get("content") or ""))
+        if spent > COMPACT_TAIL_CHARS:
+            break
+        j -= 1
+    i = max(i, j)                              # 两个上限取更紧的那个
     # **往前退,不往后挪。** 并行工具调用会让结尾连着好几条 `tool`,往后挪会一路走出
     # 列表末尾、把尾巴挪成空的;往前退是退到发起它们的那条 assistant —— 不会落单,
     # 而且留下的上下文更多,正是这一改想要的。
-    while i > 0 and messages[i].get("role") == "tool":
+    # `i` 可能正好等于 len(messages):字符预算把尾巴压成空的。所以上界也要挡一下,
+    # 否则 `messages[i]` 当场越界 —— 加了字符预算之后才可能发生,加之前 i 必定小于长度。
+    while 0 < i < len(messages) and messages[i].get("role") == "tool":
         i -= 1
     return i
 
