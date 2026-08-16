@@ -880,10 +880,23 @@ def _trace_summary(entries: list) -> str:
         out.append(f"{t} × {n}" + (f",失败 {err}" if err else "") + (f",被拒 {den}" if den else ""))
     return " · ".join(out)
 
-_CHILD_KEYS = ("mode", "allow", "view",      # 继承:子轮该按同样的权限和显示档跑
-               "tok", "trace",               # 汇总:子轮的消耗算在父这次请求头上
-               "asked",                     # 继承:用户点名要保的东西,派给谁干都算数
-               "denied")                    # 继承+回传:拒绝过的文件名,换个 agent 也还是拒绝过
+# 一个 `state` 里混着三类性质完全不同的东西,而**分错档出过三次事**(见 `_child_state`)。
+# 这张分类表原来只活在注释里 —— 三份副本、零个判据,其中一份把 `asked` 分错了档,
+# 是外部审阅逮出来的,而我第一次还只修了两份中的一份。**同一句话写在三个地方,
+# 修一处就等于留了一个会把人带回去的坑。**
+#
+# 现在它是代码,而且 `tests/` 里有一条判据:AST 扫 agent.py 里碰过的每一个 state 键,
+# 必须在且只在其中一档 —— **新加一个键忘了分类,当场红。**
+# 判据的形状是「一个都不许漏」,不是「这张表看着对吗」:枚举合法的永远落后一步。
+STATE_INHERIT = ("mode", "allow", "view",    # 子轮该按同样的权限和显示档跑
+                 "asked",                    # 用户点名要保的东西,派给谁干都算数
+                 "denied")                   # 继承+回传:拒过的文件名,换个 agent 也还是拒过
+STATE_SHARED = ("tok", "trace")              # 汇总:子轮的消耗算在父这次请求头上
+STATE_LOCAL = ("capped", "last_tok", "last_calls",   # 只描述"刚刚这一轮"
+               "since_reflect", "reads",             # 只在顶层那份 state 上累
+               "sys_hash", "sys_prev", "sys_now")    # 缓存仪表,同样不跨层
+
+_CHILD_KEYS = STATE_INHERIT + STATE_SHARED
 
 def _child_state(parent: dict) -> dict:
     """子 agent 拿到的 state —— 只有该继承的和该汇总的,**本轮字段一律不给**。

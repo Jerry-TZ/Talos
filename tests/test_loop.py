@@ -647,6 +647,59 @@ def test_reflection_says_so_even_when_it_decides_to_write_nothing(ws, monkeypatc
     assert "技能有改动" in joined, f"改动没被说出来:{notes}"
 
 
+def test_every_state_key_is_classified_and_child_state_follows_it():
+    """`state` 里混着三类性质完全不同的东西,分错档已经出过三次事:repeat 计数被子轮
+    清零、`capped` 让父任务的复盘被跳过、`asked` 漏继承导致子 agent 删用户点名的文件时
+    **一声不吭**。三次的修法都是「把这个键挪到对的那一档」。
+
+    而这张分类表一直只活在**注释**里 —— 三份副本、零个判据。第四次因此栽:外部审阅逮到
+    两处注释与实现矛盾(`asked` 被写成"本轮",而 `_CHILD_KEYS` 里它明确被继承),
+    **而我第一次只修了两份中的一份。**
+
+    所以判据的形状是「**一个都不许漏**」,不是「这张表看着对吗」——
+    AST 扫 agent.py 里真正碰过的每一个 state 键,新加一个忘了分类,当场红。
+    枚举合法的永远落后一步(第三十二节),这条反过来:**枚举全部,要求每个都归档**。"""
+    import ast
+    import io
+    import agent as A
+
+    tree = ast.parse(io.open(A.__file__, encoding="utf-8").read())
+    used = set()
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
+                and n.value.id in ("state", "parent", "child")
+                and isinstance(n.slice, ast.Constant) and isinstance(n.slice.value, str)):
+            used.add(n.slice.value)
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and isinstance(n.func.value, ast.Name)
+              and n.func.value.id in ("state", "parent", "child")
+              and n.func.attr in ("get", "setdefault", "pop") and n.args
+              and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)):
+            used.add(n.args[0].value)
+    assert len(used) > 10, f"扫描本身失效了,只找到 {used} —— 全绿会变成假消息"
+
+    table = {"继承": set(A.STATE_INHERIT), "汇总": set(A.STATE_SHARED), "不跨层": set(A.STATE_LOCAL)}
+    classified = set().union(*table.values())
+    assert not (used - classified), (
+        f"这些 state 键没被分档,而分错档已经出过三次事:{sorted(used - classified)}\n"
+        "把它加进 agent.py 的 STATE_INHERIT / STATE_SHARED / STATE_LOCAL 之一")
+    assert not (classified - used), \
+        f"分类表里有已经没人用的键,留着会误导:{sorted(classified - used)}"
+    for a in table:
+        for b in table:
+            if a < b:
+                assert not (table[a] & table[b]), f"{a} 和 {b} 都收了 {table[a] & table[b]}"
+
+    # 分类表说了算,`_child_state` 就得照着做 —— 上一版的测试在自己代码里重拼了一遍这个
+    # dict,于是把生产代码改回去,测试照样绿(那条教训写在 `_child_state` 的 docstring 里)。
+    parent = {k: f"<{k}>" for k in used}
+    child = A._child_state(parent)
+    assert set(child) == set(A.STATE_INHERIT) | set(A.STATE_SHARED), \
+        f"子 state 拿到的跟分类表对不上:多了 {set(child) - classified},少了 " \
+        f"{(set(A.STATE_INHERIT) | set(A.STATE_SHARED)) - set(child)}"
+    assert not (set(child) & set(A.STATE_LOCAL)), "本轮字段漏给了子 agent"
+
+
 def test_a_subagent_hitting_the_step_cap_does_not_cancel_the_parents_reflection(monkeypatch):
     """一个 state 里混着三类性质完全不同的东西,而子 agent 原来拿的是父的同一个 dict:
 
