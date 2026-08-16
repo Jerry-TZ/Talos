@@ -137,18 +137,27 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
     第三十二节刚写完六种形状的第三种,这里就又犯一次。现在改成**比较两轮**:
     正常那轮和撞上限那轮必须分得开,把哪一边写死都会红。"""
     import json
+    import os
     import agent as A
-    import recall as R
     monkeypatch.setattr(A, "ui", _ui())
     monkeypatch.setattr(A, "run_tool", lambda name, args: ("ok", False))
 
     def _outs():
-        with open(R.TRACE_FILE, encoding="utf-8") as f:
-            return [json.loads(ln)["out"] for ln in f
-                    if ln.strip() and isinstance(json.loads(ln).get("out"), dict)]
+        """一次顶层请求一行,写在 CACHE_TRACE 里 —— 上一版分在两个文件、两个写入者、
+        同一个粒度,谁也 join 不到谁。"""
+        if not os.path.exists(A.CACHE_TRACE):
+            return []
+        with open(A.CACHE_TRACE, encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+
+    # 没有 usage 就没有 token,`_log_turn` 会当成空轮直接跳过 —— 那是对的,
+    # 但这条测试要观测的正是那一行,所以得让假客户端报出用量。
+    usage = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20,
+                                  prompt_tokens_details=None)
 
     # ① 顶层正常收尾:一次工具调用之后给答案
-    script = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}')]), _msg(content="done")]
+    script = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}')], usage=usage),
+              _msg(content="done", usage=usage)]
     A.agent_turn(_Client(script), "m", [{"role": "user", "content": "看看 a.py"}],
                  {"mode": "bypass", "allow": set()}, top=True)
     assert _outs(), "顶层跑完了,轨迹里一条结果都没有 —— 回填那行根本没被调用"
@@ -156,13 +165,14 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
 
     # ② 非顶层(复盘 / 子 agent 走的就是这条):一个字都不许写
     before = len(_outs())
-    A.agent_turn(_Client([_msg(content="done")]), "m",
+    A.agent_turn(_Client([_msg(content="done", usage=usage)]), "m",
                  [{"role": "user", "content": "看看 a.py"}], {"mode": "bypass", "allow": set()})
     assert len(_outs()) == before, "非顶层也记了 —— 一次请求会被算成好几个样本"
 
     # ③ 撞上限要标出来,而且跟正常那轮**分得开**
     monkeypatch.setattr(A, "MAX_STEPS", 2)
-    spin = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"c{i}")]) for i in range(5)]
+    spin = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"c{i}")], usage=usage)
+            for i in range(5)]
     A.agent_turn(_Client(spin), "m", [{"role": "user", "content": "一直转"}],
                  {"mode": "bypass", "allow": set()}, top=True)
     flags = [o["capped"] for o in _outs()]
@@ -170,15 +180,15 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
     # 撞上限时 `steps` 是 MAX_STEPS+1(闸在自增之后),而真正发生过的模型往返只有
     # MAX_STEPS 次。两个数放在同一份报告里对不上,而报告比的正是它们。
     st = {"mode": "bypass", "allow": set()}
-    A.agent_turn(_Client([_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"d{i}")])
-                          for i in range(5)]), "m",
+    A.agent_turn(_Client([_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"d{i}")],
+                                 usage=usage) for i in range(5)]), "m",
                  [{"role": "user", "content": "再转一次"}], st, top=True)
     assert _outs()[-1]["steps"] == st["last_tok"]["steps"], \
         f'trace 记 {_outs()[-1]["steps"]} 步,而实际模型往返 {st["last_tok"]["steps"]} 步'
 
 
 def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
-    """`_log_cache` 只哈希了 `retrieve()`,而真正发出去的 system 是
+    """`_log_turn`(原 `_log_cache`)只哈希了 `retrieve()`,而真正发出去的 system 是
     `SYSTEM + _env_block() + learned + recalled` —— **`recalled` 按当前任务捞、几乎每轮都变,
     而它压根不在被哈希的那半边**。于是本机 34 轮里 29 轮报「system 没变」,两组命中率
     差 1.8 个点(n=5),看起来像「这个变量不重要」。**真相是仪表在测一个不动的东西。**
@@ -209,9 +219,10 @@ def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
     # 消费端:只动 recall 那一段(retrieve() 不变),prefix_kept 必须掉
     head = "稳定的前缀" * 50
     st = {"sys_now": head + "回忆:A", "tok": {}}
-    A._log_cache(st, {"in": 100, "cached": 80, "steps": 1})
+    st["last_tok"] = {"in": 100, "cached": 80}
+    A._log_turn(st, steps=1)
     st["sys_now"] = head + "回忆:完全不同的一段"
-    A._log_cache(st, {"in": 100, "cached": 80, "steps": 1})
+    A._log_turn(st, steps=1)
     rows = [__import__("json").loads(l) for l in open(A.CACHE_TRACE, encoding="utf-8") if l.strip()]
     assert rows[-1]["prefix_kept"] is not None, "没记前缀留存"
     assert rows[-1]["prefix_kept"] < 1.0, \
@@ -746,11 +757,13 @@ def test_cache_trace_pairs_the_system_hash_with_the_hit_rate(tmp_path, monkeypat
     monkeypatch.setattr(A, "retrieve", lambda: next(blocks))
     st = {}
     for cached in (900, 950, 300):
-        A._log_cache(st, {"in": 1000, "out": 10, "cached": cached, "steps": 3})
+        st["last_tok"] = {"in": 1000, "out": 10, "cached": cached}
+        A._log_turn(st, steps=3)
     rows = [json.loads(l) for l in open(tmp_path / "cache.jsonl", encoding="utf-8")]
     assert [r["sys_changed"] for r in rows] == [False, False, True], rows
     assert [r["hit"] for r in rows] == [0.9, 0.95, 0.3]
-    A._log_cache(st, {"in": 0, "out": 0, "cached": 0})          # 空轮不记
+    st["last_tok"] = {"in": 0, "out": 0, "cached": 0}
+    A._log_turn(st)                                            # 空轮不记
     assert len(list(open(tmp_path / "cache.jsonl", encoding="utf-8"))) == 3
 
 
@@ -763,11 +776,13 @@ def test_cache_trace_counts_reads_per_turn(tmp_path, monkeypatch):
     monkeypatch.setattr(A, "CACHE_TRACE", str(tmp_path / "c.jsonl"))
     monkeypatch.setattr(A, "retrieve", lambda: "块")
     st = {"reads": 4}
-    A._log_cache(st, {"in": 100, "out": 1, "cached": 50, "steps": 2})
+    st["last_tok"] = {"in": 100, "out": 1, "cached": 50}
+    A._log_turn(st, steps=2)
     row = json.loads(open(tmp_path / "c.jsonl", encoding="utf-8").readline())
     assert row["reads"] == 4, row
     assert "reads" not in st, "计数没清零,下一轮会把这轮的读数算进去"
-    A._log_cache(st, {"in": 100, "out": 1, "cached": 50, "steps": 2})
+    st["last_tok"] = {"in": 100, "out": 1, "cached": 50}
+    A._log_turn(st, steps=2)
     rows = [json.loads(l) for l in open(tmp_path / "c.jsonl", encoding="utf-8")]
     assert rows[1]["reads"] == 0
 

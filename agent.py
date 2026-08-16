@@ -1932,7 +1932,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
               + ("\n\n" + recalled if recalled else ""))
     if top:
         # 量前缀稳定性用**真正发出去的这一串**。挂 `top` 上是因为子 agent 共享 state:
-        # 不挡一下,最后写进来的是最后一个子 agent 的 system,而 `_log_cache` 在顶层跑完
+        # 不挡一下,最后写进来的是最后一个子 agent 的 system,而 `_log_turn` 在顶层跑完
         # 之后才读它。同一个理由,今天已经用过一次(见 `_seal_trace`)。
         state["sys_now"] = system
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
@@ -1964,12 +1964,13 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
 
         `bodies` 是这一轮**注入了几条技能正文** —— 直接写进结果行,读的那头就不用拿 `q`
         去跟检索行对了。同一个问题问两次、复盘复用同一个 `q`,按 `q` 分组全是错的。"""
-        if not (top and query):
+        if not top:
             return
         try:
-            recall_mod().trace_outcome(query, steps=steps, capped=capped,
-                                       calls=state["last_tok"]["calls"],
-                                       bodies=int(rec_info.get("bodies", 0)))
+            _log_turn(state, steps=steps, capped=capped,
+                      calls=state["last_tok"]["calls"],
+                      bodies=int(rec_info.get("bodies", 0)),
+                      q=recall_mod()._qhash(query) if query else None)
         except Exception:
             pass                               # 观测坏了不许拖垮一轮
 
@@ -2409,16 +2410,21 @@ def once(task: str, mode: str = "bypass") -> str:
 
 CACHE_TRACE = os.path.join(HOME, ".talos", "cache_trace.jsonl")
 
-def _log_cache(state: dict, tk: dict) -> None:
-    """一轮一行:这轮的 system 块跟上一轮一不一样,以及缓存命中了多少。
+def _log_turn(state: dict, **outcome) -> None:
+    """**一次顶层请求一行,一个写入者,一个文件。**
 
-    P3(KV cache)当初被划成「已否决」,依据是实测命中 92~99% —— 但那是 `-p` 一次性模式
-    量的,**中间不复盘**。交互式会话里复盘每写一条技能,retrieve() 的常驻块就变了,而它在
-    system prompt 里,一变整个前缀的缓存就作废。今天四轮量到 83~88%,低了约十个百分点,
-    方向对得上。但 n=4,而且"复盘写没写技能"和"命中率"从来没被同时记下来过 —— 所以先量,
-    别改。书 ch2 第一条铁律说的就是这件事,可它说的是"别改 system",没说"改了亏多少"。
+    上一版是两个写入者写同一个粒度、分在两个文件里:`_log_cache` 在 repl 里记缓存命中,
+    `trace_outcome` 在 `agent_turn` 里记步数/工具调用/注入了几条技能正文 —— 而两边**谁也
+    join 不到谁**。于是「注入过正文的那些轮,缓存命中怎么样」这种最基本的交叉问不出来,
+    而这正是当下要答的问题。更糟的是 `_log_cache` 只挂在 repl 上:**`-p` 那条路跑了一整天
+    没有任何缓存数据**,而 `-p` 恰恰是当初「命中 92~99%」那个结论的来源。
+
+    合成一行之后:repl 和 `-p` 都覆盖,任何两列都能交叉,而且 recall_trace 回到「一次检索
+    一行」的单一形状 —— 那个「结果行被数成一次检索、计数翻倍」的 bug 就不再可能发生,
+    不是靠读的那头小心,是靠写的那头不再混。
 
     只存哈希和数字,不存正文:常驻块里有 memory.md 的原文。"""
+    tk = state.get("last_tok") or {}
     if not (tk.get("in") or tk.get("out")):
         return
     try:
@@ -2443,10 +2449,11 @@ def _log_cache(state: dict, tk: dict) -> None:
             if before and now else None)
     row = {"in": tk.get("in", 0), "cached": tk.get("cached", 0),
            "hit": round(tk.get("cached", 0) / tk["in"], 3) if tk.get("in") else None,
-           "sys_changed": prev is not None and prev != cur, "steps": tk.get("steps", 0),
+           "sys_changed": prev is not None and prev != cur,
            "prefix_kept": kept,                     # system 消息跟上一轮的公共前缀占比
            "sys_chars": len(now),
-           "reads": state.pop("reads", 0)}          # 本轮 read_file 调了几次
+           "reads": state.pop("reads", 0),          # 本轮 read_file 调了几次
+           **outcome}                               # steps / calls / capped / bodies / q
     try:
         os.makedirs(os.path.dirname(CACHE_TRACE), exist_ok=True)
         with open(CACHE_TRACE, "a", encoding="utf-8") as f:
@@ -2630,7 +2637,6 @@ def repl(resume=None) -> None:
         if _tk.get("in") or _tk.get("out"):
             ui.note(f"🎫 本轮 {_tk.get('steps', 1)} 次调用 · {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
                     + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
-        _log_cache(state, _tk)                         # 量:system 变没变 × 这轮命中多少
         _corr = _is_correction(task)
         _due = _due_for_reflection(state, _corr)
         if state.pop("capped", False):                 # hit the step cap: it was flailing, so whatever it

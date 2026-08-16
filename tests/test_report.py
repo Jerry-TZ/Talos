@@ -59,9 +59,11 @@ def test_the_report_groups_by_the_turn_not_by_the_question(ws, monkeypatch):
     monkeypatch.setattr(MR, "D", ws)
     _write(ws, "recall_trace.jsonl", [
         {"q": "same", "picked": [{"key": "s", "score": 0.6, "body": True}]},
-        {"q": "same", "out": {"calls": 3, "bodies": 1, "capped": False}},
         {"q": "same", "picked": [{"key": "s", "score": 0.1, "body": False}]},
-        {"q": "same", "out": {"calls": 30, "bodies": 0, "capped": False}},
+    ])
+    _write(ws, "cache_trace.jsonl", [        # 一次顶层请求一行,不再跟检索行混在一个文件里
+        {"q": "same", "calls": 3, "bodies": 1, "capped": False},
+        {"q": "same", "calls": 30, "bodies": 0, "capped": False},
     ])
     html = MR.build()
     assert "注入过技能正文</b> n=1" in html, f"注入过那组数错了:{html[-900:]}"
@@ -75,10 +77,10 @@ def test_a_turn_that_hit_the_step_cap_is_not_counted_as_expensive(ws, monkeypatc
     都会把那一组的中位数拉飞,而它跟捞没捞到技能没关系。"""
     import memory_report as MR
     monkeypatch.setattr(MR, "D", ws)
-    _write(ws, "recall_trace.jsonl", [
-        {"q": "a", "out": {"calls": 4, "bodies": 1, "capped": False}},
-        {"q": "b", "out": {"calls": 999, "bodies": 1, "capped": True}},
-        {"q": "c", "out": {"calls": 6, "bodies": 0, "capped": False}},
+    _write(ws, "cache_trace.jsonl", [
+        {"q": "a", "calls": 4, "bodies": 1, "capped": False},
+        {"q": "b", "calls": 999, "bodies": 1, "capped": True},
+        {"q": "c", "calls": 6, "bodies": 0, "capped": False},
     ])
     html = MR.build()
     assert "注入过技能正文</b> n=1" in html, "撞上限那轮被算进来了"
@@ -93,9 +95,9 @@ def test_result_rows_are_not_counted_as_retrievals(ws, monkeypatch):
     monkeypatch.setattr(MR, "D", ws)
     _write(ws, "recall_trace.jsonl", [
         {"q": "a", "picked": [{"key": "s", "score": 0.4, "body": False}]},
-        {"q": "a", "out": {"calls": 5, "bodies": 0, "capped": False}},
+        {"q": "a", "out": {"calls": 5, "bodies": 0}},    # 历史遗留的结果行,现在不再产生
     ])
-    assert "1 轮检索" in MR.build(), "结果行被当成了一次检索"
+    assert "1 轮检索" in MR.build(), "老文件里遗留的结果行被当成了一次检索"
 
 
 def test_the_report_survives_no_data_and_bad_lines(ws, monkeypatch):
@@ -105,11 +107,10 @@ def test_the_report_survives_no_data_and_bad_lines(ws, monkeypatch):
     monkeypatch.setattr(MR, "D", ws)
     assert "<h1>" in MR.build()                         # 一个文件都没有
 
-    with open(os.path.join(ws, "recall_trace.jsonl"), "w", encoding="utf-8") as f:
-        f.write('{"q": "a", "out": {"calls": 5, "bodies": 1, "capped": false}}\n')
+    with open(os.path.join(ws, "cache_trace.jsonl"), "w", encoding="utf-8") as f:
+        f.write('{"q": "a", "calls": 5, "bodies": 1, "capped": false}\n')
         f.write("这不是 JSON\n")
-        f.write('{"q": "b", "out": {"calls": "五", "bodies": 1}}\n')      # 类型不对
-        f.write('{"q": "c", "out": null}\n')                              # out 不是对象
-        f.write('{"q": "d"}\n')                                           # 什么都没有
+        f.write('{"q": "b", "calls": "五", "bodies": 1}\n')               # 类型不对
+        f.write('{"q": "c"}\n')                                          # 什么都没有
     html = MR.build()
     assert "注入过技能正文</b> n=1" in html, f"脏行把好行也带走了:{html[-600:]}"

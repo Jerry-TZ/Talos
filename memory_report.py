@@ -44,12 +44,13 @@ def _bar(frac, w=180):
 
 
 def build() -> str:
-    rows = _rows("recall_trace.jsonl")
-    # 同一个文件里两种行:检索那一刻写的(带 picked),和这一轮跑完回填的(带 out)。
-    # 混在一起数,「轮检索」会凭空翻倍。
-    trace = [r for r in rows if "out" not in r]
-    outs = [r["out"] for r in rows if isinstance(r.get("out"), dict)]
+    # 一次检索一行。老文件里还留着一批带 `out` 的结果行(那阵子两种行混在一个文件里,
+    # 数「几轮检索」直接翻倍)—— 结果行已经搬去 cache_trace,这里只是跳过历史遗留。
+    trace = [r for r in _rows("recall_trace.jsonl") if "out" not in r]
+    # 一次顶层请求一行:缓存命中 + 这一轮花了多少 + 注入了几条技能正文,全在同一行,
+    # 所以任何两列都能交叉 —— 上一版分在两个文件,交叉不了。
     cache = _rows("cache_trace.jsonl")
+    outs = cache
     hits = {}
     hp = os.path.join(D, "recall_hits.json")
     if os.path.exists(hp):

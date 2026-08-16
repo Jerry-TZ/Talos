@@ -928,27 +928,23 @@ def test_a_nested_subagent_must_not_overwrite_the_parents_outcome(ws):
       父那半条记录被原地盖掉;等父跑完回填,数字落到了子的记录上。
       父跑了 40 步、子跑了 3 步,存出来两条都是 3 步 —— **而且看不出错。**
 
-    所以检索行照旧在检索那一刻就落盘,进程里不留半成品状态。
+    所以检索行照旧在检索那一刻就落盘,进程里不留半成品状态。而结果行后来整个搬走了 ——
+    它现在跟缓存数据合成**一次顶层请求一行**,写在 `agent.py::_log_turn` 里。
+    搬走的理由是这条测试守不到的另一半:同一个文件里两种行,读的那头要靠 `"out" in r`
+    猜,而 `memory_report` / `talos_watch` 数「几轮检索」时把结果行也算了进去,**计数翻倍**。
 
-    **第一版这条测试用了两个手挑的、必然不同的 query** —— 而跨层唯一会对错的情形恰恰是
-    **父子 query 相同**(复盘就是拿 `query=task` 再跑一遍)。判据从构造上排除了要判的那件事。
-    现在两次检索用**同一个 query**:攒模块变量的写法在这里照样红,而且红得对。"""
+    所以这条判据现在守的是**形状单一**:这个文件只有一种行。计数翻倍那个 bug 不再可能
+    发生,不是靠读的那头小心,是靠写的那头不再混。"""
     import recall as R
     same = "重画流程图"                        # 复盘复用的就是同一个 query
     R.recall(same)                             # 父检索
     R.recall(same)                             # 复盘/子 agent 嵌套进来,又检索一次
-    R.trace_outcome(same, steps=1, calls=0)    # 短的那轮先回填
-    R.trace_outcome(same, steps=40, calls=32)  # 父跑完
 
     rows = _trace_lines(R)
-    assert len(rows) == 4, f"四次动作应该四行,实际 {len(rows)} 行:{rows}"
-    outs = [r["out"] for r in rows if "out" in r]
-    assert [o["steps"] for o in outs] == [1, 40], \
-        f"两条结果行没有各自落盘 —— 攒在模块变量里就会互相盖:{outs}"
-    # 检索行和结果行要分得开(memory_report 靠这个数「几轮检索」),检索行一个字没变
-    picks = [r for r in rows if "out" not in r]
-    assert len(picks) == 2 and all("picked" in r for r in picks)
-    assert {r["q"] for r in rows} == {R._qhash(same)}, "q 对不上,结果行认不回检索行"
+    assert len(rows) == 2, f"两次检索应该两行,实际 {len(rows)} 行:{rows}"
+    assert all("picked" in r and "q" in r and "t" in r for r in rows),         f"检索行的形状变了,memory_report 还在按老形状读:{rows}"
+    assert not any("out" in r for r in rows),         "这个文件里又混进了第二种行 —— 数「几轮检索」的地方会再翻一次倍"
+    assert {r["q"] for r in rows} == {R._qhash(same)}
 
 
 def test_recall_trace_stores_a_hash_not_the_question(ws):

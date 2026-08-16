@@ -416,16 +416,12 @@ def _trace(query: str, picked: list) -> None:
     再回头看噪声长什么样,别现在就调 DECAY/HOPS 或换 embedding(没有数据的调参是猜)。"""
     _write_trace({"picked": picked, "q": _qhash(query)})
 
-def trace_outcome(query: str, **fields) -> None:
-    """这一轮**跑完之后**回填结果:捞到的东西到底有没有让这一轮更省。
-
-    检索那一行照旧在**检索那一刻**就落盘,一个字不改 —— 换成「先攒着、跑完一起写」的话,
-    两件事同时坏:一轮崩了轨迹就没了;而 `spawn_subagent` 是嵌套调 `agent_turn` 的,
-    子 agent 的检索会把父那半条记录**原地盖掉**。所以结果单独一行,靠 `q` 对上,
-    进程里不留任何半成品状态。
-
-    带 `out` 键的就是结果行 —— 读的那头靠这个跟检索行分开,不用猜。"""
-    _write_trace({"q": _qhash(query), "out": fields})
+# 这里原来还有一个 `trace_outcome`:一轮跑完往同一个文件里回填结果行(带 `out` 键)。
+# 那是个**形状混用**——同一个文件里两种行,而读的那头要靠 `"out" in r` 猜。代价当场兑现:
+# `memory_report` 和 `talos_watch` 数「几轮检索」时把结果行也算进去,计数直接翻倍。
+# 现在结果行归 `agent.py::_log_turn`(一次顶层请求一行,跟缓存数据同一行),
+# 这个文件回到**一次检索一行**的单一形状 —— 计数翻倍那个 bug 不再可能发生,
+# 不是靠读的那头小心,是靠写的那头不再混。老文件里还留着历史的 `out` 行,读的那头照旧跳过。
 
 # ── usage tracking:让"用没用到"决定记忆去留 ─────────────────────────────────────
 HITS_FILE = os.path.join(HOME, ".talos", "recall_hits.json")
