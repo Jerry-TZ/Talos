@@ -1910,9 +1910,22 @@ def _with_recall(messages: list, recalled: str, slot: int) -> list:
     历史,一个 token 都不会重算),但每轮多留一段几百字的旧回忆,`/history` 也就不再是
     对话了 —— 这个取舍先按「会话干净」这一边定,不行再说。
 
-    位置的理由见 `system` 那段:轮内不动,轮间只让**上一轮那一次交换**失效。"""
+    位置的理由见 `system` 那段:轮内不动,轮间只让**上一轮那一次交换**失效。
+
+    **切点必须在这里复核,不能信调用方算好的那个。** 上一版的注释写着「循环里只往
+    messages 尾部追加,所以这个下标一直有效」—— 那句话是假的:`maybe_compact` 会把
+    **整个列表换掉**(`messages[:] = ...`),旧下标落在新列表里就是随机位置。真实一轮里
+    压缩过后,回忆块被插进了一条 assistant(带 tool_calls)和它的工具结果**中间**,
+    接口 400:`tool_calls must be followed by tool messages`,整轮当场没了。
+
+    复核规则跟 `_tail_start` 是同一条:**不许插在一条 `tool` 消息前面**,那会把它跟
+    发起它的 assistant 拆开。往前退到那条 assistant 之前 —— 插在 assistant 前面是安全的,
+    它和它的结果仍然挨着。"""
     if not recalled:
         return messages
+    slot = max(0, min(slot, len(messages)))
+    while 0 < slot < len(messages) and messages[slot].get("role") == "tool":
+        slot -= 1
     return messages[:slot] + [{"role": "user", "content": recalled}] + messages[slot:]
 
 def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
@@ -1995,10 +2008,16 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
         except Exception:
             pass                               # 观测坏了不许拖垮一轮
 
-    # 切点在进循环**之前**算好:循环里只往 messages 尾部追加,所以这个下标一直有效。
-    # 每步重算的话,`_repeat_guard` 那条「还剩 4 步」的提示(role=user)会把切点顶走,
-    # 回忆块跟着挪位置 —— 而位置一动,它后面的全部重算,这一改就白做了。
-    slot = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=len(messages))
+    # 切点在进循环**之前**算好:每步重算的话,`_repeat_guard` 那条「还剩 4 步」的提示
+    # (role=user)会把切点顶走,回忆块跟着挪位置 —— 而位置一动,它后面的全部重算,
+    # 这一改就白做了。
+    # **但「算好之后一直有效」是假的**:`maybe_compact` 会把整个列表换掉,旧下标在新列表里
+    # 就是随机位置 —— 真实一轮里因此 400 过。修在 `_with_recall` 里(它自己夹范围、
+    # 自己退到 tool 前面),不在这儿重算:重算那一行摘掉之后没有任何测试红,
+    # 而它的好处(压缩之后位置更合理)我说不出判据 —— 那就当它是冗余的删掉,
+    # 不留一行「看着有道理但没人查」的代码。
+    slot = max((i for i, m in enumerate(messages) if m.get("role") == "user"),
+               default=len(messages))
 
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost

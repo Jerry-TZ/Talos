@@ -248,6 +248,88 @@ def test_the_recall_block_sits_where_it_does_not_invalidate_the_prefix(ws, monke
         "回忆块写进了会话历史 —— /history 看到的就不再是人说过的话"
 
 
+def test_no_request_ever_separates_a_tool_call_from_its_result(ws, monkeypatch):
+    """**真实一轮里 400 掉的那条:**
+    `An assistant message with 'tool_calls' must be followed by tool messages`。
+
+    因果是这样的:回忆块的切点在进循环前算好(为了轮内不动、别让缓存作废),而我在注释里
+    写了「循环里只往尾部追加,所以这个下标一直有效」—— **那句话是假的**:
+    `maybe_compact` 会 `messages[:] = ...` 把整个列表换掉,旧下标落在新列表里就是随机位置。
+    压缩过后,回忆块被插进了一条 assistant(带 tool_calls)和它的工具结果**中间**,
+    接口当场 400,整轮没了。
+
+    上一版的判据测不到,因为**它从来没让压缩在一轮之内触发** —— 压缩是这一改唯一会
+    重排列表的东西,而样本里没有它。第四种形状,今天第三次。
+
+    所以这条断言的不是「切点对不对」,是**发出去的每一条请求都合法**:任何带 tool_calls
+    的 assistant,后面必须紧跟着它每一个 tool_call_id 的结果。压缩、回忆块插入、剪裁,
+    谁破坏了这条都会红。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+
+    # ① 先用确定性的单元断言钉住复核本身。第一版只有端到端那半,而它的初始消息只有一条
+    # user,于是 `slot=0` —— **插在 0 位永远安全**,不管列表怎么被重排。三个突变体全绿,
+    # 判据没在判它声称判的东西。切点落在一条 tool 上才是那个错法,这里直接摆出来。
+    pair = [{"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "结果"}]
+    got = A._with_recall(list(pair), "# 回忆", slot=1)          # 1 正指着那条 tool
+    assert got[1]["role"] != "tool" or got[0]["role"] == "assistant", \
+        f"回忆块插进了 assistant 和它的工具结果中间 —— 接口会 400:{[m['role'] for m in got]}"
+    assert [m["role"] for m in got] == ["user", "assistant", "tool"], \
+        f"应该退到 assistant 之前再插:{[m['role'] for m in got]}"
+    assert A._with_recall(list(pair), "# 回忆", slot=99)[-1]["role"] == "user", \
+        "下标越界(压缩把列表缩短了)时没有夹到合法范围"
+
+    # ② 端到端:带着几轮历史进来,`slot` 才会是个有意义的深下标
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("x" * 3000, False))
+    monkeypatch.setattr(A, "retrieve", lambda: "常驻块")
+    monkeypatch.setattr(A, "COMPACT_AT", 4000)          # 让压缩在这一轮之内一定触发
+    import recall as R
+    monkeypatch.setattr(R, "recall", lambda q, **k: "# 回忆\n- 捞到的东西")
+
+    seen = []
+    script = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"c{i}")]) for i in range(6)]
+    script.append(_msg(content="done"))
+    client = _Client(script)
+
+    def _spy(c, **kw):
+        msgs = kw["messages"]
+        # 压缩自己也走 `_chat`。不认出来的话它会吃掉脚本里的一条,后面全错位 ——
+        # 而且 `seen` 里会混进一条根本不是「这一轮的请求」的东西,判据就判错了对象。
+        if msgs and "你在压缩" in str(msgs[0].get("content") or ""):
+            return _msg(content="SUMMARY")
+        seen.append(msgs)
+        return client.chat.completions.create()
+    monkeypatch.setattr(A, "_chat", _spy)
+    hist = []
+    for i in range(4):                       # 几轮历史,让 slot 落在列表深处
+        hist += [{"role": "user", "content": f"老问题{i}"},
+                 {"role": "assistant", "content": "", "tool_calls": [
+                     {"id": f"h{i}", "type": "function",
+                      "function": {"name": "read_file", "arguments": "{}"}}]},
+                 {"role": "tool", "tool_call_id": f"h{i}", "content": "y" * 900}]
+    hist.append({"role": "user", "content": "干活"})
+    A.agent_turn(client, "m", hist, {"mode": "bypass", "allow": set()})
+
+    assert len(seen) >= 4, f"只发了 {len(seen)} 次请求,压缩来不及触发"
+    assert any("压缩摘要" in str(m.get("content")) for r in seen for m in r), \
+        "压缩没触发 —— 这条测试测不到那个错法"
+    for n, req in enumerate(seen, 1):
+        pending = []
+        for m in req:
+            if m.get("role") == "tool":
+                assert pending and m["tool_call_id"] in pending, \
+                    f"第 {n} 次请求:工具结果 {m['tool_call_id']} 前面没有发起它的 assistant"
+                pending.remove(m["tool_call_id"])
+            else:
+                assert not pending, (
+                    f"第 {n} 次请求:一条带 tool_calls 的 assistant 后面插进了 "
+                    f"{m.get('role')} 消息,而它的结果 {pending} 还没跟上 —— 接口会 400")
+                pending = [c["id"] if isinstance(c, dict) else c.id
+                           for c in (m.get("tool_calls") or [])]
+
+
 def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
     """`_log_turn`(原 `_log_cache`)只哈希了 `retrieve()`,而真正发出去的 system 是
     `SYSTEM + _env_block() + learned + recalled` —— **`recalled` 按当前任务捞、几乎每轮都变,
