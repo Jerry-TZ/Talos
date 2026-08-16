@@ -650,9 +650,14 @@ def test_reflection_says_so_even_when_it_decides_to_write_nothing(ws, monkeypatc
 def test_a_subagent_hitting_the_step_cap_does_not_cancel_the_parents_reflection(monkeypatch):
     """一个 state 里混着三类性质完全不同的东西,而子 agent 原来拿的是父的同一个 dict:
 
-        继承 — mode / allow / view      子轮该按同样的权限跑
-        汇总 — tok / trace              一次请求的总账,子轮的消耗算在父头上
-        本轮 — capped / last_* / asked  只描述"刚刚这一轮",跨层就是错的
+        继承 — mode / allow / view / asked / denied   子轮该按同样的权限和同样的"用户点名过什么"跑
+        汇总 — tok / trace                            一次请求的总账,子轮的消耗算在父头上
+        本轮 — capped / last_* / since_reflect        只描述"刚刚这一轮",跨层就是错的
+
+    (`asked` 这一栏上一版写在"本轮"里,和 `_CHILD_KEYS` 里它明确被继承直接矛盾 ——
+    外部审阅逮到的,而我当时只改了 agent.py 那一处,漏了这里。**同一句话写在两个地方,
+    修一处就等于留了一个会把人带回去的坑。** 这也正是下一条待办要解决的东西:
+    把这张分类表从"两处注释"变成一条会红的判据。)
 
     代价出过两次:第一次是 repeat 计数被子轮清零(已修);第二次是 capped —— 子 agent
     撞 MAX_STEPS 会写 state["capped"]=True,父任务明明成功返回,repl 却因为这个标记
