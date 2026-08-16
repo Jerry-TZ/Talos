@@ -129,8 +129,28 @@ def build() -> str:
                      f"任务难度本身的方差比这大。撞了步数上限的 {capped_n} 轮不计入"
                      f"(那是「卡住了」,不是「花得多」)。这是燃尽表,每跑一个真任务加一条。</p>")
 
-    # ⑤ 缓存 —— system 变没变 × 命中多少
-    parts.append("<h2>⑤ KV 缓存命中</h2>")
+    # ⑤ 缓存 —— 拆成跨轮和轮内两个数,一个混起来的命中率答不了「谁在漏」
+    parts.append("<h2>⑤ KV 缓存:跨轮 vs 轮内</h2>")
+    firsts = [r["hit_first"] for r in cache if isinstance(r.get("hit_first"), (int, float))]
+    rests = [r["hit_rest"] for r in cache if isinstance(r.get("hit_rest"), (int, float))]
+    if firsts or rests:
+        for label, g, why in (
+                ("第 1 次调用(跨轮前缀)", firsts,
+                 "低 = 前缀在轮之间断了:system 变了、压缩重排了、历史被改写了"),
+                ("第 2..N 次(轮内前缀)", rests,
+                 "理论上该接近 100%(循环只往后追加)。明显低于 1 = 有人在轮内改写历史,"
+                 "头号嫌疑是 <code>_prune_old_tool_results</code> 每步把旧工具输出换成「已省略」")):
+            if g:
+                parts.append(f"<p><b>{label}</b> n={len(g)} · 中位数 "
+                             f"{statistics.median(g):.0%} · 范围 {min(g):.0%}~{max(g):.0%}<br>"
+                             f"<span class=dim>{why}</span></p>")
+        parts.append("<p class=dim>任一组 n&lt;8 时别下结论。这两个数是**日常使用自动攒的**,"
+                     "不用专门跑对照实验 —— 上一版只有一个混起来的命中率,而一轮里这两种"
+                     "缓存的性质完全不同。</p>")
+    else:
+        parts.append("<p class=dim>还没有数据 —— 正常用几轮再来看。</p>")
+
+    parts.append("<h2>⑥ system 变没变 × 命中多少</h2>")
     if not cache:
         parts.append("<p class=dim>还没有数据。正常用几轮,复盘写过技能之后再来看 —— "
                      "要比的是「system 块变了的那些轮」和「没变的那些轮」。</p>")

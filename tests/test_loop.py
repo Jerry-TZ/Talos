@@ -373,6 +373,53 @@ def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
     assert rows[-1]["prefix_kept"] > 0.5, f"共同的头明明还在,却算成全丢:{rows[-1]}"
 
 
+def test_the_turn_row_splits_the_first_call_from_the_rest(ws, monkeypatch):
+    """一轮一个命中率答不了「谁在漏」。第 1 次调用吃的是**跨轮**前缀
+    (system + tools + 老历史),第 2..N 次吃的是**轮内**前缀(循环只往后追加,
+    理论上该接近 100%)。`_prune_old_tool_results` 每步原地改写旧工具输出,
+    **只会伤后者** —— 混着记就永远查不出它赔了多少。
+
+    分开之后日常使用就在产这个数据,不用专门花几十万 token 跑对照实验。
+
+    钉三件事:两个数按各自的分子分母算(不是把整轮的除一除)、
+    只有一次调用时 `hit_rest` 必须是 None(没有轮内可言)、
+    以及**子 agent 的调用不许混进来**(它挂在本层局部变量上,不挂共享的 state)。"""
+    import json
+    import os
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("ok", False))
+
+    def _rows():
+        with open(A.CACHE_TRACE, encoding="utf-8") as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+
+    def _u(prompt, cached):
+        return types.SimpleNamespace(
+            prompt_tokens=prompt, completion_tokens=10,
+            prompt_tokens_details=types.SimpleNamespace(cached_tokens=cached))
+
+    # 第 1 次 1000 里命中 200(跨轮差),之后两次 1000 里命中 900(轮内好)
+    script = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', "c1")], usage=_u(1000, 200)),
+              _msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', "c2")], usage=_u(1000, 900)),
+              _msg(content="done", usage=_u(1000, 900))]
+    A.agent_turn(_Client(script), "m", [{"role": "user", "content": "干活"}],
+                 {"mode": "bypass", "allow": set()}, top=True)
+    r = _rows()[-1]
+    assert r["hit_first"] == 0.2, f"跨轮那个数不是按第 1 次算的:{r}"
+    assert r["hit_rest"] == 0.9, f"轮内那个数不是按第 2..N 次算的:{r}"
+    assert r["hit"] == round(2000 / 3000, 3), "整轮那个数也要留着,老数据序列不能断"
+
+    # 只有一次调用:没有「轮内」,不许拿 0 顶上去
+    os.remove(A.CACHE_TRACE)
+    A.agent_turn(_Client([_msg(content="done", usage=_u(500, 100))]), "m",
+                 [{"role": "user", "content": "一句话"}],
+                 {"mode": "bypass", "allow": set()}, top=True)
+    r = _rows()[-1]
+    assert r["hit_first"] == 0.2 and r["hit_rest"] is None, \
+        f"单次调用的轮给「轮内」贡献了一个数 —— 它会把要看的中位数拉垮:{r}"
+
+
 def test_only_a_real_permission_refusal_is_reported_as_denied(ws, monkeypatch):
     """`state["trace"]` 的 `denied` 会被 `_trace_summary` 原样报给**父 agent**。
     上一版写的是 `not allowed`,而 `allowed` 在三种情况下都是 False:权限真的拒了、

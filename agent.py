@@ -1903,6 +1903,25 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
                f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
                f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。"))
 
+def _split_hits(calls_io: list) -> dict:
+    """把一轮的缓存命中拆成**跨轮**和**轮内**两个数。
+
+    `hit_first` —— 第 1 次调用:吃的是上一轮留下的前缀(system + tools + 老历史)。
+    这个数低,说明前缀在**轮之间**被打断了(system 变了、压缩重排了、历史被改写了)。
+
+    `hit_rest` —— 第 2..N 次:吃的是这一轮自己刚发过的东西,理论上该接近 100%,
+    因为循环只往后追加。**它要是明显低于 1,说明有人在轮内改写历史** ——
+    `_prune_old_tool_results` 每步把滑出窗口的旧工具输出原地换成「已省略」,
+    改一条,它后面的全部重算。那笔账是它省下的 token 抵不抵得过,一直没量过。
+
+    只有一次调用时 `hit_rest` 是 None —— 没有「轮内」可言,别拿 0 去拉低平均。"""
+    if not calls_io:
+        return {}
+    fi, fc = calls_io[0]
+    ri, rc = sum(i for i, _ in calls_io[1:]), sum(c for _, c in calls_io[1:])
+    return {"hit_first": round(fc / fi, 3) if fi else None,
+            "hit_rest": round(rc / ri, 3) if ri else None}
+
 def _with_recall(messages: list, recalled: str, slot: int) -> list:
     """把这一轮的回忆块插在 `slot`(这次任务那条 user 消息)之前,**只进请求,不落盘**。
 
@@ -2004,7 +2023,8 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             _log_turn(state, steps=steps, capped=capped,
                       calls=state["last_tok"]["calls"],
                       bodies=int(rec_info.get("bodies", 0)),
-                      q=recall_mod()._qhash(query) if query else None)
+                      q=recall_mod()._qhash(query) if query else None,
+                      **_split_hits(calls_io))
         except Exception:
             pass                               # 观测坏了不许拖垮一轮
 
@@ -2019,6 +2039,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
     slot = max((i for i, m in enumerate(messages) if m.get("role") == "user"),
                default=len(messages))
 
+    calls_io: list = []          # 本层每次模型调用的 (in, cached) —— 见循环里那段
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -2056,8 +2077,17 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                                    + _with_recall(messages, recalled, slot)),
                          tools=tool_specs())
         state["tok"]["steps"] += 1
-        for _k, _v in zip(("in", "out", "cached"), _usage(resp)):
+        _in, _out, _cached = _usage(resp)
+        for _k, _v in zip(("in", "out", "cached"), (_in, _out, _cached)):
             state["tok"][_k] += _v
+        # **一轮一个命中率答不了「谁在漏」。** 一轮里混着两种完全不同的缓存:
+        # 第 1 次调用吃的是**跨轮**前缀(system + tools + 老历史);
+        # 第 2..N 次吃的是**轮内**前缀(只有新追加的没缓存,理论上该接近 100%)。
+        # `_prune_old_tool_results` 每步原地改写旧工具输出,只会伤第二种 —— 而我们手上
+        # 一直只有混在一起的那个数,所以它到底赔了多少,量不出来。
+        # 分开记之后,日常使用就在产这个数据,不用专门花几十万 token 做对照实验。
+        # 挂在**本层的局部变量**上,不挂 state:子 agent 共享 state,混进来就不是这一层的账了。
+        calls_io.append((_in, _cached))
         msg = resp.choices[0].message
         view = state.get("view", "normal")
         if view in ("verbose", "transcript"):

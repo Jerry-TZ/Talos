@@ -100,6 +100,27 @@ def test_result_rows_are_not_counted_as_retrievals(ws, monkeypatch):
     assert "1 轮检索" in MR.build(), "老文件里遗留的结果行被当成了一次检索"
 
 
+def test_the_report_splits_cross_turn_from_within_turn_cache(ws, monkeypatch):
+    """一轮一个命中率答不了「谁在漏」:第 1 次调用吃的是**跨轮**前缀,第 2..N 次吃的是
+    **轮内**前缀,两者性质完全不同 —— 而 `_prune_old_tool_results` 每步改写旧工具输出,
+    只会伤后者。混着记就永远查不出它赔了多少。
+
+    这条钉两件事:两组必须分开显示,而且**只有一次调用的那些轮不许污染「轮内」那一组**
+    (它们根本没有轮内可言,拿 0 或 None 混进去会把中位数拉垮,而那正是要看的那个数)。"""
+    import memory_report as MR
+    monkeypatch.setattr(MR, "D", ws)
+    _write(ws, "cache_trace.jsonl", [
+        {"q": "a", "calls": 2, "hit_first": 0.30, "hit_rest": 0.99},
+        {"q": "b", "calls": 2, "hit_first": 0.40, "hit_rest": 0.97},
+        {"q": "c", "calls": 0, "hit_first": 0.35, "hit_rest": None},   # 单次调用,没有轮内
+    ])
+    html = MR.build()
+    assert "第 1 次调用(跨轮前缀)</b> n=3" in html, f"跨轮那组数错了:{html[-800:]}"
+    assert "第 2..N 次(轮内前缀)</b> n=2" in html, \
+        "单次调用的轮被算进了「轮内」—— 它没有轮内,会把要看的那个数拉垮"
+    assert "中位数 98%" in html, "轮内中位数算错了"
+
+
 def test_the_report_survives_no_data_and_bad_lines(ws, monkeypatch):
     """报告是只读观测,**它自己崩掉不许比它要观测的东西还脆**。
     一行脏数据、缺字段、类型不对,都得照常出页面 —— 而不是 median 拿到空列表抛异常。"""
