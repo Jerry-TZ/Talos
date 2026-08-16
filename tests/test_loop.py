@@ -177,6 +177,43 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
         f'trace 记 {_outs()[-1]["steps"]} 步,而实际模型往返 {st["last_tok"]["steps"]} 步'
 
 
+def test_only_a_real_permission_refusal_is_reported_as_denied(ws, monkeypatch):
+    """`state["trace"]` 的 `denied` 会被 `_trace_summary` 原样报给**父 agent**。
+    上一版写的是 `not allowed`,而 `allowed` 在三种情况下都是 False:权限真的拒了、
+    参数根本执行不了、工具名不存在。后两种一个框都没弹、没人拒绝过任何东西 ——
+    于是子 agent 的汇报里写着「权限拒了 N 次」,而实际上一次都没有。
+
+    又是一句在某条路径上为假的话,这次的收信人是父 agent(它拿这份汇报判断子 agent
+    是不是被挡住了,而这正是它无法自述、只能靠主循环记录的那件事)。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("ok", False))
+    script = [_msg(tool_calls=[_tc("run_bash", "{}")]),                    # 参数不合法
+              _msg(tool_calls=[_tc("no_such_tool", "{}", "c2")]),          # 工具不存在
+              _msg(content="done")]
+    state = {"mode": "bypass", "allow": set()}
+    A.agent_turn(_Client(script), "m", [{"role": "user", "content": "干活"}], state)
+    flags = [(t["tool"], t["denied"]) for t in state["trace"]]
+    assert flags == [("run_bash", False), ("no_such_tool", False)], \
+        f"没人拒绝过任何东西,却报成了被拒:{flags}"
+
+
+def test_the_step_cap_message_does_not_promise_an_intact_history(ws, monkeypatch):
+    """撞上限那句原话是「历史都还在」—— 而 `_prune_old_tool_results` 每轮把旧的大块
+    工具输出原地换成「已省略」,`maybe_compact` 还会把头部换成摘要。会话确实能接着走,
+    但「都还在」是假的,而人会照着它决定要不要说「继续」。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("x" * 2000, False))
+    monkeypatch.setattr(A, "MAX_STEPS", 3)
+    spin = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"c{i}")]) for i in range(8)]
+    msgs = [{"role": "user", "content": "一直转"}]
+    out = A.agent_turn(_Client(spin), "m", msgs, {"mode": "bypass", "allow": set()})
+    assert "历史都还在" not in out, f"承诺了一件裁剪之后不成立的事:{out}"
+    assert "裁剪" in out or "摘要" in out, f"没说清早先的内容可能已经不在了:{out}"
+    assert "继续" in out, "拿掉假话的同时把能走的那条路也拿掉了"
+
+
 def test_the_summary_can_see_what_the_tools_actually_did(ws, monkeypatch):
     """压缩的提示词要它写「③已经做完的 ④关键决定和它的理由」,而上一版送进去的内容
     **把工具调用和工具结果全滤掉了** —— 一轮里真正发生过的事几乎都在那里面。

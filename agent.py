@@ -913,7 +913,8 @@ def spawn_subagent(task: str) -> str:
     #
     #   继承 — mode / allow / view      子轮该按同样的权限跑
     #   汇总 — tok / trace              一次请求的总账,子轮的消耗算在父头上
-    #   本轮 — capped / last_* / asked  只描述"刚刚这一轮",跨层就是错的
+    #   本轮 — capped / last_*          只描述"刚刚这一轮",跨层就是错的
+    #   (`asked` 属于**继承**那一档,见 _CHILD_KEYS —— 用户点名要保的东西,派给谁干都算数)
     #
     # 混用的代价出过两次。第一次是 repeat 计数被子轮清零(已修,改成 agent_turn 的局部
     # 变量)。第二次是 capped:子 agent 撞 MAX_STEPS 会写 state["capped"]=True,父任务
@@ -1548,7 +1549,12 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # Neither an answer nor obviously guidance: probably a typo. Silently reading it as
         # "no" has burned real approvals, so confirm rather than guess.
         try:
-            verdict = _verdict(ui.ask_again(ans))
+            # **回值要赋回 `ans`。** 上一版只把它喂给 `_verdict`,于是最后那条
+            # 「用户拒绝,并说:{ans}」带回去的还是第一次那个错别字:实测第一次敲 `yy`、
+            # 第二次说「不要执行,改用只读工具」,模型收到的是「用户拒绝,并说:yy」——
+            # **人说清楚了,而说清楚的那一句被丢了。**
+            ans = ui.ask_again(ans)
+            verdict = _verdict(ans)
         except (KeyboardInterrupt, EOFError):
             raise KeyboardInterrupt
         if verdict is None:                        # still unclear -> treat the text as guidance
@@ -1591,8 +1597,13 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # else, so it proposed the identical `del verify_salary.py` four times in a row,
             # then went for the report too. A denial that does not say what was wrong teaches
             # nothing — hand the model the fact the warning already had.
-            return False, (f"用户拒绝删除 {'、'.join(named)}:这是请求里点名要的产出,不是你的"
-                           "临时文件。别再尝试删它,换个收尾动作。")
+            # **只陈述能证明的事。** 上一版说的是「这是请求里点名要的产出,不是你的临时
+            # 文件」—— 而 `_named_in_request` 证明的只有「这个名字在用户的请求里出现过」。
+            # 出现过不等于是产出:「读一下 source.py 再分析」里 source.py 出现过,
+            # 「把 old.log 删了」里 old.log 出现过而且用户就是要删它。把「名字出现过」升格
+            # 成「它是交付物」,是判据替用户做了它没做的判断。
+            return False, (f"用户拒绝删除 {'、'.join(named)}。这几个名字在用户的请求里出现过 ——"
+                           "别再尝试删它们,换个收尾动作;真要删就在回答里说清理由,让用户自己定。")
         if _DESTRUCTIVE.search(args.get("command", "")):
             # Same defect as the `a` branch above, milder: a bare "用户拒绝了这次调用" reads
             # as a coin flip, so the model re-sent `del scan_deps.py` after a plain refusal
@@ -1956,7 +1967,11 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             # MAX_STEPS 次 —— 记 steps 会比 `last_tok["steps"]` 多一,两个数放在同一份
             # 报告里对不上。回填真实发生的那个。
             _seal_trace(steps - 1, capped=True)
-            return (f"(已到 {MAX_STEPS} 步上限,停下了。历史都还在 —— 直接说「继续」就接着做,"
+            # 「历史都还在」是假的:`_prune_old_tool_results` 每轮把旧的大块工具输出原地
+            # 换成「已省略」,`maybe_compact` 还会把头部换成摘要。会话能接着走,但早先
+            # 读到的内容不一定还在。
+            return (f"(已到 {MAX_STEPS} 步上限,停下了。会话还能接着走,不过早先的大块工具输出"
+                    f"可能已经被裁剪或压成摘要了 —— 直接说「继续」就接着做,"
                     f"或者拆小些重来;想放宽上限设 TALOS_MAX_STEPS。)")
         if steps == MAX_STEPS - 4:                     # let it land the plane instead of being cut mid-flight
             messages.append({"role": "user", "content":
@@ -2051,7 +2066,13 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                 out, is_error = run_tool(name, args)
                 if view != "quiet":
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))
-            state["trace"].append({"tool": name, "error": is_error, "denied": not allowed})
+            # **`not allowed` 不等于「被拒绝」。** `allowed` 在三种情况下都是 False:
+            # 权限真的拒了、参数根本执行不了(`bad is not None`)、工具名不存在(`cls is None`)。
+            # 后两种没人拒绝过任何东西 —— 而 `_trace_summary` 会把它们当成「被拒」报给父 agent,
+            # 于是子 agent 的汇报里写着「权限拒了 N 次」,实际一次框都没弹。
+            # 又是一句在某条路径上为假的话,这次的收信人是**父 agent**。
+            denied = bad is None and cls is not None and not allowed
+            state["trace"].append({"tool": name, "error": is_error, "denied": denied})
             # 两条守卫是**省钱**的,不是干活的 —— 它们自己出问题,不该把整轮的活带走。
             # `run_tool` 把工具抛的异常转成 `error:` 交回模型,而守卫跑在 `run_tool` **外面**,
             # 所以它抛什么都直接冲出 `agent_turn`:实测一个路径里带 `\x00` 的 read_file 就够了 ——

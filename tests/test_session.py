@@ -5,6 +5,24 @@ import sys
 
 import pytest
 
+def test_session_ids_come_from_a_clock_that_never_goes_backwards(ws, monkeypatch):
+    """发号、扫占位符、`resolve` 的前缀匹配,整套都建立在「时间只往前走,过去的那一秒
+    不会再来」上 —— 而**本地时间每年会违反一次**:夏令时秋季回拨,本地钟真的退回一小时。
+    那一小时里起的会话跟一小时前撞号,而扫占位符只认「不是当前这一秒就删」,
+    会把一个还活着的号放出来,两个会话写进同一个 sid。
+
+    UTC 没有回拨,所以判据是「sid 来自 `gmtime` 而不是 `localtime`」。
+    **不能直接拿两者比相等** —— 本机时区恰好是 UTC 时那句断言恒真、换台机器才红,
+    正是「判据烤进本机语义」那种。所以把 `gmtime` 换成一个哨兵:
+    代码要是去问 `localtime`,这个哨兵就出不来。"""
+    import time
+    import session as S
+    fake = time.struct_time((2020, 1, 2, 3, 4, 5, 3, 2, 0))
+    monkeypatch.setattr(S.time, "gmtime", lambda *a: fake)
+    assert S.Session.new().sid.startswith("20200102-030405"), \
+        "sid 不是从 UTC 来的 —— 夏令时回拨那一小时会发出重复的号"
+
+
 def test_roundtrip_and_autotitle(ws):
     import session as S
     s = S.Session.new()

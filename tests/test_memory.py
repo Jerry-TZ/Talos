@@ -349,6 +349,58 @@ def test_verifying_that_you_kept_a_file_must_not_look_like_deleting_it(ws):
         os.chdir(cwd)
 
 
+def test_a_refusal_only_states_what_it_can_prove(ws, monkeypatch):
+    """拒绝的说明里,每一句都得是判据真的证明过的。
+
+    上一版说「这是请求里点名要的产出,**不是你的临时文件**」—— 而 `_named_in_request`
+    证明的只有「这个名字在用户的请求里出现过」。出现过不等于是产出:
+    「读一下 source.py 再分析」里 source.py 出现过;「把 old.log 删了」里 old.log
+    出现过**而且用户就是要删它**。把「名字出现过」升格成「它是交付物」,
+    是判据替用户做了一个它没做的判断,而模型会照着这个判断行事。
+
+    另一半同样要守:名字必须还在,而且必须给一条能走的路 —— 上上版只回
+    「用户拒绝了这次调用」,模型原样重发了四次。"""
+    import types
+    import agent as A
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "n", note=lambda *a: None, ask_again=lambda a: "n"))
+    st = {"mode": "default", "allow": {"run_bash"}, "denied": set(),
+          "asked": "把 old.log 删了,顺手读一下 source.py"}
+    open(os.path.join(A.WORKSPACE, "old.log"), "w").close()
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del old.log"})
+        assert not ok
+        assert "old.log" in why, "拒了却没说拒的是哪个文件"
+        assert "出现过" in why, "得说清楚判据真正知道的是什么"
+        assert "产出" not in why and "临时文件" not in why, \
+            f"把「名字出现过」说成了「它是交付物」—— 用户明明就是要删它:{why}"
+        assert "让用户自己定" in why or "说清理由" in why, "拒住了却没给一条能走的路"
+    finally:
+        os.chdir(cwd)
+
+
+def test_the_second_answer_is_the_one_that_reaches_the_model(ws, monkeypatch):
+    """敲错了会再问一次(`ask_again`),而上一版只把回值喂给 `_verdict`,`ans` 没重新赋值 ——
+    最后那句「用户拒绝,并说:{ans}」带回模型的还是**第一次那个错别字**。
+
+    实测:第一次敲 `yy`,第二次说「不要执行,改用只读工具」,模型收到
+    「用户拒绝,并说:yy」。**人说清楚了,而说清楚的那一句被丢了** ——
+    再问一次的全部意义就是拿到那句话。"""
+    import types
+    import agent as A
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, note=lambda *a: None,
+        ask=lambda: "yy",                                  # 错别字:既不是同意也不是拒绝
+        ask_again=lambda prev: "不要执行,改用只读工具"))
+    ok, why = A.check_permission({"mode": "default", "allow": set(), "asked": ""},
+                                 "bash", "run_bash", {"command": "python build.py"})
+    assert not ok
+    assert "改用只读工具" in why, f"人第二次说清楚的那句被丢了,模型收到的是:{why}"
+    assert "yy" not in why, f"带回去的还是第一次那个错别字:{why}"
+
+
 def test_a_refusal_sticks_to_the_file_not_the_command(ws, monkeypatch):
     """拒了 `del x.md`,它回头发 `cmd /c del x.md` —— 同一个删除,前面加个壳,闸门没认出来,
     六个文件零确认没了。加宽正则只能买一轮:`python -c "os.remove('x.md')"` 正则永远看不见。

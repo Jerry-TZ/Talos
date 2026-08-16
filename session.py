@@ -75,7 +75,14 @@ class Session:
 
         另外 `new()` 会创建 `.talos/sessions/`:目录写不了的话崩在起会话时,而不是崩在
         第一轮 save —— 反正都是崩,早点崩看得清。"""
-        base = sid = time.strftime("%Y%m%d-%H%M%S")
+        # **UTC,不用本地时间。** 这一整套(发号、扫占位符、`resolve` 的前缀匹配)都建立
+        # 在「时间只会往前走,过去的那一秒不会再来」上。本地时间**每年会违反一次**:
+        # 夏令时秋季回拨,本地钟真的退回一小时,那一小时里起的会话跟一小时前撞号,
+        # 而扫占位符那步只认「不是当前这一秒就删」,会把还活着的号放出来。
+        # UTC 没有回拨。NTP 大幅校正仍然能撞,但那不是每年都发生的事,记在 FINDINGS 里。
+        # 文件名的可读性代价:时间戳变成 UTC,看文件名对不上本地时钟 —— `/history`
+        # 显示的时间走 mtime,不受影响。
+        base = sid = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         os.makedirs(SESS_DIR, exist_ok=True)
         for stale in glob.glob(os.path.join(SESS_DIR, "*.claim")):
             # 时间戳是定宽的,所以「文件名以这一秒开头」恰好等于「它是这一秒或它的 -N 变体」
