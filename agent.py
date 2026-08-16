@@ -1903,6 +1903,18 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
                f"**别再一段一段翻了。** 用你已经读到的内容往下做 —— 现在就动手写要交的东西;"
                f"真的还缺一整块,一次把那个函数整段打印出来,只打一次。"))
 
+def _with_recall(messages: list, recalled: str, slot: int) -> list:
+    """把这一轮的回忆块插在 `slot`(这次任务那条 user 消息)之前,**只进请求,不落盘**。
+
+    不落盘的理由:会话文件里存的该是人说过的话。落盘的话缓存更好(回忆块变成不再变动的
+    历史,一个 token 都不会重算),但每轮多留一段几百字的旧回忆,`/history` 也就不再是
+    对话了 —— 这个取舍先按「会话干净」这一边定,不行再说。
+
+    位置的理由见 `system` 那段:轮内不动,轮间只让**上一轮那一次交换**失效。"""
+    if not recalled:
+        return messages
+    return messages[:slot] + [{"role": "user", "content": recalled}] + messages[slot:]
+
 def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                top: bool = False) -> str:
     """Drive one user request to completion, looping over tool calls.
@@ -1927,9 +1939,18 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                                      sink=rec_info)
         except Exception:
             recalled = ""
+    # **`recalled` 不在 system 里。** 它按当前任务捞,每轮都不一样,而 system 是整个请求
+    # 的最前面 —— 前缀缓存逐 token 从头匹配,系统块尾部改几百个字符,它**后面的全部**
+    # (工具 schema 2738 字符 + 整段历史)一起作废。实测:系统块 ~13000 字符,每轮变动的
+    # 尾巴只有 434~1824 字符(3~13%),而短轮的命中率只有 61~63%。
+    #
+    # 挪到消息列表里、紧挨着这次的任务之前:轮内它不动(切点在进循环前算好),
+    # 轮间它只让**上一轮那一次交换**失效,而不是整段历史。
+    # 它不落盘 —— 会话里存的还是干净的对话,`/history` 看到的还是人说的话。
+    #
+    # 这一改自带验证:system 不再含每轮变动的部分,`prefix_kept` 应该跳到 1.0。
     system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
-              + ("\n\n" + learned if learned else "")
-              + ("\n\n" + recalled if recalled else ""))
+              + ("\n\n" + learned if learned else ""))
     if top:
         # 量前缀稳定性用**真正发出去的这一串**。挂 `top` 上是因为子 agent 共享 state:
         # 不挡一下,最后写进来的是最后一个子 agent 的 system,而 `_log_turn` 在顶层跑完
@@ -1974,6 +1995,11 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
         except Exception:
             pass                               # 观测坏了不许拖垮一轮
 
+    # 切点在进循环**之前**算好:循环里只往 messages 尾部追加,所以这个下标一直有效。
+    # 每步重算的话,`_repeat_guard` 那条「还剩 4 步」的提示(role=user)会把切点顶走,
+    # 回忆块跟着挪位置 —— 而位置一动,它后面的全部重算,这一改就白做了。
+    slot = max((i for i, m in enumerate(messages) if m.get("role") == "user"), default=len(messages))
+
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
     while True:
@@ -2007,7 +2033,8 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             messages[:] = maybe_compact(client, model, messages)
         with ui.thinking():
             resp = _chat(client, model=model,
-                         messages=[{"role": "system", "content": system}] + messages,
+                         messages=([{"role": "system", "content": system}]
+                                   + _with_recall(messages, recalled, slot)),
                          tools=tool_specs())
         state["tok"]["steps"] += 1
         for _k, _v in zip(("in", "out", "cached"), _usage(resp)):

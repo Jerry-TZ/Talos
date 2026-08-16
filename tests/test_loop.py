@@ -187,6 +187,67 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
         f'trace 记 {_outs()[-1]["steps"]} 步,而实际模型往返 {st["last_tok"]["steps"]} 步'
 
 
+def test_the_recall_block_sits_where_it_does_not_invalidate_the_prefix(ws, monkeypatch):
+    """回忆块按当前任务捞,**每轮都不一样**;而 system 是整个请求的最前面。前缀缓存逐
+    token 从头匹配,系统块尾部改几百字符,它后面的全部(工具 schema 2738 字符 + 整段历史)
+    一起作废。实测:系统块 ~13000 字符,每轮变动的尾巴只有 434~1824 字符(3~13%),
+    而短轮的命中率只有 61~63%。
+
+    所以它挪进消息列表。这条判据钉四件事,而**第三件才是缓存真正依赖的那个**:
+
+    ① 不在 system 里(在的话这一改等于没做)
+    ② 但必须真的送到了模型面前(挪没了就成了「省了缓存,丢了功能」)
+    ③ **一轮之内位置不动** —— 切点在进循环前算好。每步重算的话,`_repeat_guard` 那条
+       「还剩 4 步」的提示(role=user)会把切点顶走,回忆块跟着挪,它后面的全部重算
+    ④ 不落盘 —— 会话文件里存的该是人说过的话"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: ("ok", False))
+    monkeypatch.setattr(A, "retrieve", lambda: "常驻块")
+    import recall as R
+    monkeypatch.setattr(R, "recall", lambda q, **k: "# 回忆\n- 这一轮捞到的东西")
+
+    seen = []
+    # **打桩要转发给脚本,别自己造答案。** 第一版这里返回的是写死的 `content="x"`,
+    # 于是循环第一步就收尾:`seen` 只有一条,而下面那句「两次请求里下标必须一样」
+    # 在单元素集合上恒真 —— 又一个结构上不可能失败的断言,而它正是本该抓住
+    # 「切点每步重算」的那一句。
+    # **MAX_STEPS=6 是这条测试的要害。** `_repeat_guard` 在 `steps == MAX_STEPS - 4` 时
+    # 追加一条 role=user 的「还剩 4 步」提示 —— 那是**轮内唯一会新增 user 消息**的地方,
+    # 也是「切点每步重算」唯一会出错的场景。第一版这条测试跑的是默认上限,那个提示
+    # 一次都没触发,于是把切点改成每步重算,测试照样全绿:**样本软到判据成摆设。**
+    monkeypatch.setattr(A, "MAX_STEPS", 6)
+    script = [_msg(tool_calls=[_tc("read_file", '{"path": "a.py"}', f"c{i}")]) for i in range(2)]
+    script.append(_msg(content="done"))
+    client = _Client(script)
+    monkeypatch.setattr(A, "_chat", lambda c, **kw: seen.append(kw["messages"])
+                        or client.chat.completions.create())
+    msgs = [{"role": "user", "content": "老问题"}, {"role": "assistant", "content": "老回答"},
+            {"role": "user", "content": "这次的任务"}]
+    A.agent_turn(client, "m", msgs, {"mode": "bypass", "allow": set()})
+    assert len(seen) >= 3, f"只走了 {len(seen)} 步 —— 下面比「两次请求」的断言会恒真"
+    assert any("还剩 4 步" in str(m.get("content")) for m in msgs), \
+        "那条会顶走切点的提示没触发 —— 这条测试测不到「每步重算」那个错法"
+
+    for req in seen:
+        assert "这一轮捞到的东西" not in req[0]["content"], \
+            "回忆块还在 system 里 —— 它后面的工具 schema 和整段历史每轮都会重算"
+    assert any("这一轮捞到的东西" in str(m.get("content")) for m in seen[0]), \
+        "挪出 system 之后没送到模型面前 —— 省了缓存,丢了功能"
+
+    # ③ 轮内位置不动:两次请求里回忆块的下标必须一样
+    idx = [next(i for i, m in enumerate(r) if "这一轮捞到的东西" in str(m.get("content")))
+           for r in seen]
+    assert len(set(idx)) == 1, f"回忆块在轮内挪了位置({idx})—— 它后面的内容每步重算"
+    # 而且要在这次任务之前,不是黏在最后(黏最后的话,下一步追加的消息排在它后面,
+    # 第一次调用和第二次调用的公共前缀就断在这儿了)
+    assert seen[0][idx[0] + 1]["content"] == "这次的任务"
+
+    # ④ 不落盘
+    assert not any("这一轮捞到的东西" in str(m.get("content")) for m in msgs), \
+        "回忆块写进了会话历史 —— /history 看到的就不再是人说过的话"
+
+
 def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
     """`_log_turn`(原 `_log_cache`)只哈希了 `retrieve()`,而真正发出去的 system 是
     `SYSTEM + _env_block() + learned + recalled` —— **`recalled` 按当前任务捞、几乎每轮都变,
