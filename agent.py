@@ -1917,6 +1917,11 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
     system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
               + ("\n\n" + learned if learned else "")
               + ("\n\n" + recalled if recalled else ""))
+    if top:
+        # 量前缀稳定性用**真正发出去的这一串**。挂 `top` 上是因为子 agent 共享 state:
+        # 不挡一下,最后写进来的是最后一个子 agent 的 system,而 `_log_cache` 在顶层跑完
+        # 之后才读它。同一个理由,今天已经用过一次(见 `_seal_trace`)。
+        state["sys_now"] = system
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
     state.setdefault("trace", [])                 # every dispatched tool, in order (see _trace_summary)
     repeat: dict = {}                             # 本轮独有;绝不能挂在 state 上 —— 见 _repeat_guard
@@ -2409,9 +2414,25 @@ def _log_cache(state: dict, tk: dict) -> None:
         return                                          # 量化不该拖垮主流程
     prev = state.get("sys_hash")
     state["sys_hash"] = cur
+    # **上一版只哈希了 `retrieve()`,而真正发出去的 system 是
+    # `SYSTEM + _env_block() + learned + recalled` —— `recalled` 按当前任务捞,几乎每轮都变,
+    # 而它压根不在被哈希的那半边。** 于是 34 轮里 29 轮报「system 没变」,
+    # 两组命中率差 1.8 个点(n=5),看起来像「这个变量不重要」——
+    # 真相是**这个仪表在测一个不动的东西**,而每轮真变的那半从来没人看。
+    #
+    # 换成量**公共前缀留下了多少**:前缀缓存是逐 token 从头匹配的,所以第一个不同的字符
+    # 之后全部作废 —— 「改了多少」不重要,「从第几个字符开始改」才重要。
+    # 只落一个比值,不落正文(常驻块里有 memory.md 的原文)。
+    now = state.get("sys_now") or ""
+    before = state.get("sys_prev")
+    state["sys_prev"] = now
+    kept = (round(len(os.path.commonprefix([before, now])) / len(now), 3)
+            if before and now else None)
     row = {"in": tk.get("in", 0), "cached": tk.get("cached", 0),
            "hit": round(tk.get("cached", 0) / tk["in"], 3) if tk.get("in") else None,
            "sys_changed": prev is not None and prev != cur, "steps": tk.get("steps", 0),
+           "prefix_kept": kept,                     # system 消息跟上一轮的公共前缀占比
+           "sys_chars": len(now),
            "reads": state.pop("reads", 0)}          # 本轮 read_file 调了几次
     try:
         os.makedirs(os.path.dirname(CACHE_TRACE), exist_ok=True)

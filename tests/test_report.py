@@ -10,6 +10,36 @@ import json
 import os
 
 
+def test_no_writable_path_still_points_at_the_real_project(ws):
+    """`ws` 这个 fixture 的 docstring 写着「测试绝不碰真实项目文件」,而它的实现是**一张
+    手写的重定向清单** —— 枚举永远落后一步,今天就落后了一次:`_log_cache` 直接写
+    `agent.CACHE_TRACE`,清单里没有它,一条新测试跑一次就往**真实的**
+    `.talos/cache_trace.jsonl` 里落了两行合成数据 —— 而那份文件正是用来判断缓存优化
+    有没有效的样本。(已清掉;这条测试是那次的判据。)
+
+    所以别再枚举「记得重定向哪些」,改成断言「一条都没漏」:任何模块级的绝对路径常量,
+    只要还指着真实项目目录,就是一条能被测试写脏的路。`HOME` 和 `_SELF` 例外 ——
+    前者是源码目录(只读,而且工具就是靠它判断能不能读),后者是解释器路径。"""
+    import os
+    import agent
+    import recall
+    import session
+    real = os.path.dirname(os.path.abspath(agent.__file__))
+    allow = {"HOME", "_SELF"}
+    leaks = []
+    for mod in (agent, recall, session):
+        for name in dir(mod):
+            if not name.isupper() or name in allow:
+                continue
+            v = getattr(mod, name, None)
+            if (isinstance(v, str) and os.path.isabs(v)
+                    and os.path.normcase(v).startswith(os.path.normcase(real))):
+                leaks.append(f"{mod.__name__}.{name}")
+    assert not leaks, (
+        "这些路径在测试里仍然指着真实项目 —— 谁写它们谁就污染真实数据,"
+        f"而且不会有任何地方报错:{leaks}\n把它们加进 tests/conftest.py 的 ws fixture")
+
+
 def _write(d, name, rows):
     with open(os.path.join(d, name), "w", encoding="utf-8") as f:
         for r in rows:

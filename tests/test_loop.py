@@ -177,6 +177,48 @@ def test_only_the_top_level_turn_writes_back_what_it_cost(ws, monkeypatch):
         f'trace 记 {_outs()[-1]["steps"]} 步,而实际模型往返 {st["last_tok"]["steps"]} 步'
 
 
+def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
+    """`_log_cache` 只哈希了 `retrieve()`,而真正发出去的 system 是
+    `SYSTEM + _env_block() + learned + recalled` —— **`recalled` 按当前任务捞、几乎每轮都变,
+    而它压根不在被哈希的那半边**。于是本机 34 轮里 29 轮报「system 没变」,两组命中率
+    差 1.8 个点(n=5),看起来像「这个变量不重要」。**真相是仪表在测一个不动的东西。**
+
+    前缀缓存逐 token 从头匹配,第一个不同的字符之后全部作废 —— 所以「改了多少」不重要,
+    「从第几个字符开始改」才重要。判据分两半,因为坏的可能是任何一半:
+
+    · 生产端:`agent_turn` 记下的必须**就是发给模型的那一串**(拿 `_chat` 收到的对比)
+    · 消费端:`retrieve()` 没变、只有 recall 那段变了时,`prefix_kept` 必须掉下来"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    sent = {}
+
+    def _spy(client, **kw):
+        sent["system"] = kw["messages"][0]["content"]
+        return _Client([_msg(content="done")]).chat.completions.create()
+    monkeypatch.setattr(A, "_chat", _spy)
+
+    state = {"mode": "bypass", "allow": set()}
+    A.agent_turn(None, "m", [{"role": "user", "content": "把三个 csv 合并"}], state, top=True)
+    assert state["sys_now"] == sent["system"], \
+        "记下的不是发出去的那一串 —— 量的是另一个东西"
+
+    # 非顶层不许写:子 agent 共享 state,写了就会盖掉顶层那份
+    A.agent_turn(None, "m", [{"role": "user", "content": "别的事"}], state)
+    assert state["sys_now"] == sent["system"] or state["sys_now"], "被子层覆盖了"
+
+    # 消费端:只动 recall 那一段(retrieve() 不变),prefix_kept 必须掉
+    head = "稳定的前缀" * 50
+    st = {"sys_now": head + "回忆:A", "tok": {}}
+    A._log_cache(st, {"in": 100, "cached": 80, "steps": 1})
+    st["sys_now"] = head + "回忆:完全不同的一段"
+    A._log_cache(st, {"in": 100, "cached": 80, "steps": 1})
+    rows = [__import__("json").loads(l) for l in open(A.CACHE_TRACE, encoding="utf-8") if l.strip()]
+    assert rows[-1]["prefix_kept"] is not None, "没记前缀留存"
+    assert rows[-1]["prefix_kept"] < 1.0, \
+        f"只有 recall 段变了就说前缀全留住 —— 又在测那个不动的东西:{rows[-1]}"
+    assert rows[-1]["prefix_kept"] > 0.5, f"共同的头明明还在,却算成全丢:{rows[-1]}"
+
+
 def test_only_a_real_permission_refusal_is_reported_as_denied(ws, monkeypatch):
     """`state["trace"]` 的 `denied` 会被 `_trace_summary` 原样报给**父 agent**。
     上一版写的是 `not allowed`,而 `allowed` 在三种情况下都是 False:权限真的拒了、
