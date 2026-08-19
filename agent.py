@@ -471,6 +471,27 @@ def _read_full(path: str) -> str:
     full = _in_workspace(path, for_read=True)
     if os.path.isdir(full):                       # Windows raises a bare "Permission denied" here
         raise ValueError(f"{path} 是目录,不是文件。列目录用 run_bash `dir {path}`。")
+    if not os.path.exists(full):
+        # 相对路径是在工作区下找的,而人说「README.md」时多半指项目根那个。原来只抛
+        # 一个 FileNotFoundError,模型只好 `dir` 一层层猜 —— 实测一次冒烟里 5 次调用 /
+        # 46,667 token 才找到,而线索一直在手边(读路径本来就额外放开了 HOME,见
+        # `_in_workspace`)。**不是说错话,是说得不够** —— 而说得不够一样要按步数收费。
+        #
+        # 只说能证明的:那边确实有这个文件(isfile),而且**真的读得到** —— 后半句是
+        # 再走一遍同一道闸问出来的,不是假设。`.env`、工具批准清单这些在闸里就被挡掉,
+        # 于是 hint 保持为空:**这条提示永远指不到一个你其实打不开的东西。**
+        # 不用判 `os.path.isabs`:`os.path.join(HOME, 绝对路径)` 直接返回那个绝对路径,
+        # 而它不存在正是我们站在这里的原因,`isfile` 必然是 False。加那道判断摘掉之后
+        # 行为一模一样 —— 变异测试证的,不是看出来的(第 5 个变异体全绿)。
+        hint = ""
+        alt = os.path.join(HOME, path)
+        if os.path.isfile(alt):
+            try:
+                _in_workspace(alt, for_read=True)
+                hint = f" 项目根有一个同名的,而且你读得到:{alt}"
+            except Exception:
+                hint = ""
+        raise ValueError(f"{path} 不存在。相对路径是在工作区 {WORKSPACE} 下找的。" + hint)
     size = os.path.getsize(full)
     if size > READ_MAX_BYTES:                      # read_file is a "read" perm-class = never gated,
         raise ValueError(                          # so an ungated caller could OOM the process

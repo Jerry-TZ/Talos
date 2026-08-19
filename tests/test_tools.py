@@ -162,6 +162,52 @@ def test_the_workspaces_own_name_is_stripped_when_it_would_nest(ws, monkeypatch)
     A.write_file(os.path.basename(ws) + "/real.txt", "nested")
     assert A.read_file(os.path.join(ws, os.path.basename(ws), "real.txt")) == "nested"
 
+def test_a_missing_file_says_where_it_looked_and_where_the_real_one_is(ws, monkeypatch):
+    """找不到文件时,报错要说清**在哪找的**;项目根有同名的就直接给路径。
+
+    原来只抛一个 `FileNotFoundError`,模型只好 `dir` 一层层猜。冒烟实测:
+    「用一句话总结 README.md」花了 **5 次调用 / 46,667 token**,四条任务里最贵的一条,
+    而线索一直在手边 —— 读路径本来就额外放开了 HOME(`_in_workspace` 的 `for_read`)。
+    **不是说错话,是说得不够**,而说得不够一样按步数收费。
+
+    第三条是这条判据的重点,也是唯一一条摘掉之后会出安全问题的:提示**只说能证明的** ——
+    「那边有」不够,还得「你真的读得到」。后半句是再走一遍同一道闸问出来的,不是假设。
+    否则 `.env` 这类会被热心地指出来,而模型跟过去撞一堵墙 ——
+    **一条指向你打不开的东西的提示,比不给提示更糟。**"""
+    import agent as A
+    monkeypatch.chdir(ws)
+    home = os.path.realpath(tempfile.mkdtemp())
+    monkeypatch.setattr(A, "HOME", home)
+
+    # ① 哪儿都没有:说清楚在工作区下找的,而且**不许凭空指一个项目根的路径** ——
+    #    指向一个也不存在的文件,比不指更浪费步数。
+    with pytest.raises(ValueError) as e1:
+        A.read_file("nope.md")
+    assert ws in str(e1.value), f"没说在哪找的,模型只能猜:{e1.value}"
+    assert home not in str(e1.value), f"项目根也没有,却指了过去:{e1.value}"
+
+    # ② 项目根有一个读得到的同名文件 —— 直接把路径给它,省掉那几步 dir
+    with open(os.path.join(home, "README.md"), "w", encoding="utf-8") as f:
+        f.write("# hi")
+    with pytest.raises(ValueError) as e2:
+        A.read_file("README.md")
+    assert home in str(e2.value) and "读得到" in str(e2.value), \
+        f"项目根明明有,还是让模型自己去找:{e2.value}"
+
+    # ③ 项目根有,但那边的闸不让读 —— 一个字都不许提。
+    #    **样本用 credentials.md,不用 .env。** 第一版用的就是 .env,而 .env 在
+    #    `_is_secret_path` 那道**总闸**上、进函数第一步就被拒了,压根走不到这段提示代码 ——
+    #    断言于是**结构上不可能红**(JUDGING 里的形状③),而它当时是绿的。
+    #    是变异测试逮到的:把闸摘掉、只凭「文件存在」就指路,那一版照样全绿。
+    #    credentials.md 过得了总闸(`_SECRET_NAMES` 里是无扩展名的 `credentials`),
+    #    只在 HOME 那条支路的词干闸上被拦 —— 这才真的走到这里。
+    with open(os.path.join(home, "credentials.md"), "w", encoding="utf-8") as f:
+        f.write("k=v")
+    with pytest.raises(ValueError) as e3:
+        A.read_file("credentials.md")
+    assert home not in str(e3.value), \
+        f"把一个读不到的凭据文件指给模型了:{e3.value}"
+
 def test_workspace_jail(ws):
     import agent as A
     outside = os.path.join(tempfile.mkdtemp(), "evil.txt")
