@@ -59,3 +59,14 @@ def test_the_line_counts_readme_invites_you_to_check_are_the_real_ones():
     assert not wrong, (
         "README 的行数表跟真实行数对不上:\n  " + "\n  ".join(wrong)
         + "\n表底下写着「行数自己数,别信我」—— 读者照做的第一件事就是发现这个。")
+
+    # 第一屏那句「N 行 Python」是这张表四行的和。**上一版没钉它**,理由写的是
+    # 「散文里的数字机器重算不了」—— 而这个数恰恰算得出来,边界划错了地方。
+    # 代价当天就到了:表修好了,这句还是旧的,冒烟里模型照着念了「约 3800 行」。
+    # 一份文档里两个应该相等的数字,只查其中一个,等于没查。
+    total = re.search(r"(\d[\d,]*)\s*行 Python", readme)
+    assert total, "README 第一屏那句「N 行 Python」没了或者改了写法 —— 这半条判据自己瞎了"
+    said, real = int(total.group(1).replace(",", "")), sum(claimed.values())
+    assert said == real, (
+        f"README 第一屏写「{said} 行 Python」,而下面那张表加起来是 {real}({real - said:+d})。\n"
+        "同一份文档里两个该相等的数字对不上 —— 读者先看到的是第一屏那个。")

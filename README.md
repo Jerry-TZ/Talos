@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 3828 行 Python,205 条离线判据,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 3870 行 Python,205 条离线判据,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
