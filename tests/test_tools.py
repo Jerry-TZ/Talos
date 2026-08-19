@@ -735,3 +735,65 @@ def test_a_long_call_says_it_is_still_alive(monkeypatch):
     beats = [ln for ln in lines if "已等" in ln]
     assert beats, f"长调用期间一行心跳都没有:{lines!r}"
     assert "0.1s" not in " ".join(beats), f"秒数没取整:{beats!r}"
+
+def test_no_provider_key_survives_startup(tmp_path):
+    """启动那一刻,六个 provider 的 key 一个都不该留在 `os.environ` 里。
+
+    这一半必须**真的起一个进程**:`monkeypatch.setenv` 天生发生在 import 之后,
+    于是它永远走不到模块级那行 pop —— 变异测试当场证明了,把模块级改成 `_KEYS = {}`
+    和「只 pop claude 一个」两个变异体都照绿。**判据结构上不可能红**,JUDGING.md
+    第三种形状,而且是在为它写的判据里犯的。
+
+    模块级那行不是 make_client 的重复:make_client 只 pop **当前** provider 的 key。
+    真实的 .env 里往往同时躺着好几家的 key(实测就有 DEEPSEEK + ZHIPUAI),
+    没被选中的那几个照样会被 run_bash 继承出去。"""
+    import subprocess
+    import sys
+    import agent as A
+    decoys = {e: "sk-DECOY" for e, _, _ in A.PROVIDERS.values()}
+    code = ("import os, agent; "
+            "print(' '.join(e for e, _, _ in agent.PROVIDERS.values() if e in os.environ))")
+    r = subprocess.run([sys.executable, "-c", code], cwd=A.HOME, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace",
+                       env=dict(os.environ, PYTHONIOENCODING="utf-8", **decoys))
+    assert r.returncode == 0, "探针进程没起来:" + (r.stderr or "")[-800:]
+    left = r.stdout.strip()
+    assert not left, (
+        "import agent 之后这些 key 还留在 os.environ 里:" + left + " —— "
+        "run_bash 吃的是 dict(os.environ, ...),子进程会连它们一起继承。")
+
+def test_no_provider_key_reaches_a_shell_the_model_can_run(monkeypatch):
+    """`.env` 拒读堵的是文件那条路;环境变量继承这条路一直是通的。
+
+    实测(假 key):`run_bash("echo %DEEPSEEK_API_KEY%")` 把它原样打印出来 —— 而
+    run_bash 的输出会进上下文、进 provider 历史、进 `.talos/sessions/*.jsonl` 明文。
+    这跟 SECURITY.md 里记成「已修」的 `read_file('.env')` 是**同一个危害、同一片面**,
+    只是换了条通道。补了被发现的那条、没补其余的,这个项目已经栽过一次(硬链接 →
+    回收站那条)。
+
+    **六个 provider 全枚举,不抽查。** PROVIDERS 是个闭集,新加一个 provider 而漏了
+    它的 key,这条就该红一次让人看一眼 —— 同 test_docs 的 `set(claimed) == set(_CORE)`。
+
+    挡不住的写在这儿,免得判据被当成比它更强的东西:`create_tool` 造的工具在**本进程**
+    exec,照样读得到 `A._KEYS`。加密也一样 —— 存储形态换不掉运行时形态。
+    """
+    import sys
+    import types
+    import agent as A
+    fake = types.ModuleType("openai")          # 同 test_loop:离线测试不真 import openai
+    fake.OpenAI = lambda **kw: object()
+    monkeypatch.setitem(sys.modules, "openai", fake)
+    monkeypatch.setattr(A, "_KEYS", {})        # 别把假 key 留给后面的测试
+
+    for name, (key_env, _, _) in A.PROVIDERS.items():
+        monkeypatch.setenv(key_env, "sk-DECOY-" + name)
+        monkeypatch.setattr(A, "PROVIDER", name)
+        A.make_client()
+        assert key_env not in os.environ, (
+            f"{key_env} 在建完客户端之后还留在 os.environ —— "
+            "run_bash 吃的是 dict(os.environ, ...),子进程会连它一起继承")
+        cmd = f"echo %{key_env}%" if os.name == "nt" else f"echo ${key_env}"
+        out = A.run_bash(cmd)
+        assert "sk-DECOY-" not in out, (
+            f"run_bash 把 {key_env} 读出来了:{out!r} —— "
+            "这段输出会进上下文和明文会话日志,后果跟 read_file('.env') 一样。")

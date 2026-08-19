@@ -82,6 +82,15 @@ PROVIDERS = {
 }
 PROVIDER = os.environ.get("TALOS_PROVIDER", "claude").lower()
 
+# 密钥读进来就从 os.environ 里**拿走**。run_bash / _sh / _git / 你自造的工具全都跑
+# `subprocess.run(..., env=dict(os.environ, ...))` —— 于是 `echo %DEEPSEEK_API_KEY%`
+# 一句话就把 key 送进上下文、provider 历史和 .talos/sessions 的明文日志。危害跟
+# `read_file('.env')` 一模一样,而那条早就堵了:**同一片面只堵了文件那条通道**,
+# 环境变量这条一直是通的(不是推测,是拿假 key 实测出来的)。
+# 挡不住 create_tool —— 进程内 exec 的代码照样读得到 _KEYS。加密同理:存储形态
+# 换不掉运行时形态,主进程必须握着明文才发得出请求。这里买的是「子进程看不见」。
+_KEYS = {e: os.environ.pop(e) for e, _, _ in PROVIDERS.values() if e in os.environ}
+
 SYSTEM = (
     "You are Talos, a minimal coding agent working inside the user's project "
     "directory. Use the tools to read, write, and edit files and to run shell "
@@ -167,7 +176,9 @@ def make_client():
     if PROVIDER not in PROVIDERS:
         raise SystemExit(f"未知 TALOS_PROVIDER: {PROVIDER}。可选: {', '.join(PROVIDERS)}")
     key_env, base_url, default_model = PROVIDERS[PROVIDER]
-    key = os.environ.get(key_env)
+    if key_env not in _KEYS and key_env in os.environ:
+        _KEYS[key_env] = os.environ.pop(key_env)   # import 之后才设的,一样拿走
+    key = _KEYS.get(key_env)
     if not key:
         raise SystemExit(f"缺少环境变量 {key_env} —— 设置你的 {PROVIDER} API key(或换 TALOS_PROVIDER)")
     from openai import OpenAI                       # lazy: only needed to actually talk to a model
