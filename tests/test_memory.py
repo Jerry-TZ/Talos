@@ -437,12 +437,18 @@ def test_a_refused_delete_tells_the_model_why(ws, monkeypatch):
 
 def test_all_does_not_approve_a_delete(ws, monkeypatch):
     """⚠️ 那行字确实打出来了,用户还是按了 a,verify_status.py 没了。警告没改变答案,所以
-    什么也没改变。删除本来就不吃会话放行,对删除回答「本会话都允许」是在答一个没人问的问题。"""
+    什么也没改变。删除本来就不吃会话放行,对删除回答「本会话都允许」是在答一个没人问的问题。
+
+    现在 `a` 会**就地降级重问一次**(见 check_permission 里那段),这条测试走的是重问之后
+    **没答 y** 的那一半 —— 也就是「连按 a」那个反射路径:防线跟以前一模一样,
+    文件照样删不掉、名字照样粘住。答了 y 的那一半见
+    `test_pressing_a_on_a_delete_is_the_wrong_key_not_a_refusal`。"""
     import types
     import agent as A
     notes = []
     monkeypatch.setattr(A, "ui", types.SimpleNamespace(
-        preview=lambda *a: None, ask=lambda: "a", note=notes.append))
+        preview=lambda *a: None, ask=lambda: "a", note=notes.append,
+        ask_yes=lambda p: False))        # 重问时又没按 y —— 反射地再按一次 a 就是这一路
     st = {"mode": "default", "allow": set(), "asked": ""}
     ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del out.py"})
     assert not ok
@@ -457,14 +463,43 @@ def test_all_does_not_approve_a_delete(ws, monkeypatch):
     # "场景没出现" 挂了很久。现在:run_bash 已经会话放行了,提到 out.py 照样重新问。
     asked = []
     monkeypatch.setattr(A, "ui", types.SimpleNamespace(
-        preview=lambda *a: asked.append(a), ask=lambda: "y", note=notes.append))
+        preview=lambda *a: asked.append(a), ask=lambda: "y", note=notes.append,
+        ask_yes=lambda p: False))
     ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python cleanup.py out.py"})
     assert asked, "按 a 拒了删除,换个写法提到同一个文件却直接放行了"
     asked.clear()
     ok, _ = A.check_permission(st, "bash", "run_bash", {"command": "python other.py"})
     assert ok and not asked, "跟被拒文件无关的命令不该受牵连"
 
-def test_ctrl_c_at_the_prompt_aborts_the_turn(ws, monkeypatch):
+def test_pressing_a_on_a_delete_is_the_wrong_key_not_a_refusal(ws, monkeypatch):
+    """按 `a` 想删,是**答错了档位**,不是拒绝。
+
+    冒烟第一条逮到的:人按 `a` → 收到「⛔ 被拒绝,别再提同一条命令」→ 模型放弃、
+    还转述给人「删除被权限系统拒绝了」。**可他按 `a` 就是想允许。** 下一轮他把整句请求
+    重打一遍、按 `y`,删成了 —— 意图从头到尾没变,系统白收了他一轮(实测 14,680 token),
+    还把那个文件记进了 `denied`,让后面提到它的命令都多弹一次框。
+
+    这条钉住修完之后的四件事,少任何一件这个修都是白修:
+      ① 重问真的发生了(不是直接放行,也不是直接拒)
+      ② 重问答 y 就放行
+      ③ **仍然不给会话放行** —— 「删除只认单独的 y」那条防线一点没松
+      ④ **不许记进 denied** —— 人明明批准了,粘性却当他拒过,这是原来那个 bug 最脏的一半
+    """
+    import types
+    import agent as A
+    prompts = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a, **k: None, note=lambda *a, **k: None,
+        ask=lambda: "a", ask_yes=lambda p: prompts.append(p) or True))
+    st = {"mode": "default", "allow": set(), "asked": "删掉 workspace 里的 a.txt"}
+    ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del a.txt"})
+
+    assert prompts, "按 a 之后没有重问 —— 答错档位的正确处理是就地重问,不是当场判拒绝"
+    assert ok, f"重问答了 y 还是没放行:{why}"
+    assert "run_bash" not in st["allow"], \
+        "顺手把整个工具会话放行了 —— 「删除不吃会话放行」这条防线塌了"
+    assert not (st.get("denied") or set()), \
+        f"人批准了删除,却被记进 denied:{st.get('denied')} —— 后面提到它的命令会平白多弹框"
     """在确认框按 Ctrl-C 是"整个停下",不是"拒了这一个然后接着跑我已经放弃的计划"。"""
     import types
 
@@ -1100,10 +1135,10 @@ def test_a_refused_delete_tells_the_model_to_stop_asking(ws, monkeypatch):
     import agent as A
     import types
     st = {"mode": "default", "allow": {"run_bash"}, "asked": "帮我清理临时文件"}
-    for key in ("a", ""):                       # `a`(无效答案)和回车(明确拒绝)两条路
+    for key in ("a", ""):                       # `a`(档位不对,重问后仍没按 y)和回车(明确拒绝)
         monkeypatch.setattr(A, "ui", types.SimpleNamespace(
             preview=lambda *a, **k: None, note=lambda *a, **k: None,
-            ask=lambda: key, denied=lambda *a, **k: None))
+            ask=lambda: key, denied=lambda *a, **k: None, ask_yes=lambda p: False))
         ok, why = A.check_permission(st, "bash", "run_bash", {"command": "del scan_deps.py"})
         assert not ok
         assert "别再提同一条命令" in why, f"按 {key!r} 之后模型收到的还是「再试一次」:{why}"
