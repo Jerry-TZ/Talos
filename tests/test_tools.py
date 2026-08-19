@@ -797,3 +797,42 @@ def test_no_provider_key_reaches_a_shell_the_model_can_run(monkeypatch):
         assert "sk-DECOY-" not in out, (
             f"run_bash 把 {key_env} 读出来了:{out!r} —— "
             "这段输出会进上下文和明文会话日志,后果跟 read_file('.env') 一样。")
+
+
+def test_an_api_key_never_rides_a_tool_result_back_into_the_conversation(ws, monkeypatch):
+    """`.env` 拒读堵的是 read_file;shell 一直是通的。
+
+    实测:`run_bash("type .env")` 把整份 .env 原样打出来。会话放行 run_bash 之后零弹框,
+    输出进上下文 → provider 历史 → `.talos/sessions/*.jsonl` 明文。跟 `read_file('.env')`
+    同一个后果,而那条记在「已修」表里。
+
+    **第二个断言比第一个重要。** 只断言「key 不在输出里」的话,命令失败、文件为空、
+    工作区不对 —— 每一种都让判据变绿,而它一件事都没验(样本软到判据成摆设)。
+    所以必须同时看到抹除标记:证明**真的读到了**,只是被抹了。
+
+    两个出口都走一遍:工具的正常输出、工具抛的异常。异常那条是自造工具最容易踩的
+    —— 它的报错信息是模型自己写的,里面带什么全凭它。"""
+    import agent as A
+    KEY = "sk-DECOY-9f3a-not-a-real-key"
+    monkeypatch.setattr(A, "_KEYS", {"DEEPSEEK_API_KEY": KEY})
+    with open(os.path.join(ws, ".env"), "w", encoding="utf-8") as f:
+        # **同一个值写两遍**,不是凑数:第一版只写一遍,于是「只抹第一处」那个变异体
+        # 照绿 —— 样本软到判据成摆设(第四种形状)。真实的 .env 里同一把 key 挂在两个
+        # 名下、或旧值被注释掉留在下面,都很常见。
+        f.write("DEEPSEEK_API_KEY=" + KEY + "\n# 换名之前那份: " + KEY + "\n")
+
+    out, is_err = A.run_tool("run_bash", {"command": "type .env" if os.name == "nt" else "cat .env"})
+    assert not is_err, "命令本身就失败了,这条判据什么也没验:" + out
+    assert KEY not in out, "key 明文从 run_bash 回到了对话里:" + out
+    assert "已抹掉" in out, (
+        "既没看到 key 也没看到抹除标记 —— 那多半是命令根本没读到 .env,"
+        "判据在为一个没发生的事情发绿灯。输出:" + out)
+
+    monkeypatch.setattr(A, "run_bash", lambda c: _boom(KEY))
+    out2, is_err2 = A.run_tool("run_bash", {"command": "whatever"})
+    assert is_err2 and KEY not in out2, "工具抛的异常把 key 带回了对话里:" + out2
+    assert "已抹掉" in out2, "异常正文里那个 key 没被抹:" + out2
+
+
+def _boom(key):
+    raise RuntimeError("自造工具报错时把配置抄了进来:" + key)

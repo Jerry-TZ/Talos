@@ -92,7 +92,7 @@ def test_the_test_count_the_docs_advertise_is_the_real_one():
     (硬链接→回收站、环境变量→子进程、这条)。所以这里连**两份文档**一起钉。
 
     数法是数 `^def test_`,不是起一个 pytest:判据自己不该跑一遍全套。实测两者相等
-    (211 == 211);真要分叉,那是 tests/ 里出现了参数化,那时正该有人看一眼。"""
+    (212 == 212);真要分叉,那是 tests/ 里出现了参数化,那时正该有人看一眼。"""
     real = sum(len(re.findall(r"(?m)^def test_", io.open(p, encoding="utf-8").read()))
                for p in sorted(glob.glob(os.path.join(HOME, "tests", "*.py"))))
     wrong = []

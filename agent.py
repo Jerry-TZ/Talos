@@ -1110,6 +1110,30 @@ def _bad_args(name: str, args) -> str | None:
     return None
 
 
+def _scrub(s: str) -> str:
+    """把 API key 的**明文值**从任何工具结果里抹掉。
+
+    `.env` 的文件黑名单堵的是 `read_file`;shell 从来没人拦 —— 实测
+    `run_bash("type .env")` 把整份 .env 原样打出来,而会话放行 run_bash 之后
+    **一次框都不弹**,输出直接进上下文、provider 历史和明文会话日志。后果跟
+    `read_file('.env')` 一模一样,而那条早被记成「已修」。这是这片面被绕过的第三条路
+    (前两条:硬链接绕开回收站、环境变量绕进子进程)。
+
+    **不去堵命令。** `type` / `cat` / `more` / `python -c` / `certutil` 是开集,
+    黑名单在那儿只是表演 —— SECURITY.md 对 `_EXFIL` 就是这么写的。堵的是**出口**:
+    工具结果只有 `run_tool` 一个漏斗,而 `_KEYS` 手上正好握着精确的值。精确匹配,
+    没有启发式,零误伤,所有命令一起覆盖。
+
+    # ponytail: 只抹得掉原文。`certutil -encode .env x.txt` 之后原文就不在输出里了,
+    # 这条抹不掉 —— 它跟 `_EXFIL` 同级,是减速带不是墙。要真墙只有断网/沙箱。
+    # 覆盖面也只有这六个 key:`.env` 里的 `GITHUB_TOKEN` 不在内,因为「.env 里所有的值」
+    # 会把 `TALOS_PROVIDER=deepseek` 的 `deepseek` 一起抹掉,毁正常输出。
+    """
+    for v in _KEYS.values():
+        if v and v in s:
+            s = s.replace(v, "[已抹掉:这是你的 API key]")
+    return s
+
 def run_tool(name: str, args: dict) -> tuple[str, bool]:
     name = (name or "").strip()
     if name not in TOOLS:                       # a bare KeyError told nobody anything
@@ -1127,9 +1151,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
         out = str(out)
         if name in ("write_file", "edit_file") and args.get("path"):
             out += _autotest(os.path.realpath(args["path"]))   # once per edit, not once per nested call
-        return out, False
+        return _scrub(out), False
     except Exception as e:                      # tool errors go back to the model, not crash
-        return f"error: {e}", True
+        return _scrub(f"error: {e}"), True
 
 # ── learned knowledge: memory (facts) + skills (procedures) ───────────────────
 # Learning = notes the agent writes for itself, read back later. Not training.
