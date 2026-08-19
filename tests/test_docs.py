@@ -13,6 +13,7 @@ README 第一屏有一张四个文件的行数表,底下紧跟着一句:
 
 判据只钉表格,不钉散文里的数字:表格是机器能重算的,散文里那句「四个文件」不是。
 """
+import glob
 import io
 import os
 import re
@@ -70,3 +71,37 @@ def test_the_line_counts_readme_invites_you_to_check_are_the_real_ones():
     assert said == real, (
         f"README 第一屏写「{said} 行 Python」,而下面那张表加起来是 {real}({real - said:+d})。\n"
         "同一份文档里两个该相等的数字对不上 —— 读者先看到的是第一屏那个。")
+
+
+# 「205 个测试」「207 条判据」「210 passed」—— 同一个数字,四个说法,两份文档。
+_COUNT = re.compile(r"(\d{2,4})\s*(?:个测试|条判据|passed|条。)")
+
+# 哪几份文档会声称这个数,是个**闭集**:README 和 DEVELOPMENT。FINDINGS/JUDGING 里
+# 的数字是**历史记录**(「175 条判据加 13 个变异体都没碰上」),钉它们等于逼人改历史。
+_CLAIMS = ("README.md", "DEVELOPMENT.md")
+
+
+def test_the_test_count_the_docs_advertise_is_the_real_one():
+    """两份文档里的「N 个测试」== `tests/` 里真的有几条。
+
+    上一版只钉了行数。于是今天加两条判据之后,四个数字**同时**变陈:README 说 205,
+    DEVELOPMENT 说 207,真实 210 —— 而全套测试照绿。行数那条判据每次都逮到,
+    测试数这条根本不存在:**同一份文档里两类同样可重算的数字,只查了一类**。
+
+    这是这一天里第三次踩同一个形状 —— 堵了一条通道,没堵这片面上其余的
+    (硬链接→回收站、环境变量→子进程、这条)。所以这里连**两份文档**一起钉。
+
+    数法是数 `^def test_`,不是起一个 pytest:判据自己不该跑一遍全套。实测两者相等
+    (211 == 211);真要分叉,那是 tests/ 里出现了参数化,那时正该有人看一眼。"""
+    real = sum(len(re.findall(r"(?m)^def test_", io.open(p, encoding="utf-8").read()))
+               for p in sorted(glob.glob(os.path.join(HOME, "tests", "*.py"))))
+    wrong = []
+    for f in _CLAIMS:
+        s = io.open(os.path.join(HOME, f), encoding="utf-8").read()
+        hits = [(s[:m.start()].count("\n") + 1, m.group(0)) for m in _COUNT.finditer(s)]
+        assert hits, f"{f} 里一句测试数都没有了 —— 要么文档改了写法,要么这半条判据自己瞎了"
+        wrong += [f"{f}:{ln} 写「{txt}」" for ln, txt in hits
+                  if int(re.match(r"\d+", txt).group()) != real]
+    assert not wrong, (
+        f"文档宣传的测试数跟 tests/ 里真实的 {real} 条对不上:\n  " + "\n  ".join(wrong)
+        + "\n加判据是这个项目每天在干的事,所以这个数**每天都会陈** —— 这条就是为它存在的。")
