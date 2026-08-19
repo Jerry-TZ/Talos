@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 2638 行 Python,130 个离线测试,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 3828 行 Python,205 条离线判据,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -19,10 +19,10 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `agent.py` | 1821 | 循环 + 工具 + 权限门 + 自学习 |
-| `console_ui.py` | 160 | 终端界面(可整体替换) |
-| `recall.py` | 303 | 联想记忆:扩散激活检索 |
-| `session.py` | 134 | 会话持久化(想换 SQLite 只改这个) |
+| `agent.py` | 2837 | 循环 + 工具 + 权限门 + 自学习 |
+| `console_ui.py` | 214 | 终端界面(可整体替换) |
+| `recall.py` | 506 | 联想记忆:扩散激活检索 |
+| `session.py` | 271 | 会话持久化(想换 SQLite 只改这个) |
 
 行数自己数,别信我:`wc -l agent.py console_ui.py recall.py session.py`
 
@@ -33,10 +33,10 @@
 极简 agent 赛道很挤,有人用 Zig 做到 678KB 二进制。**Talos 不比谁小,它比谁都好读。**
 
 - **能读完** — 四个文件,注释解释的是*为什么*,不是*是什么*。几乎每条防御旁边都写着它挡的那次真实翻车。
-- **能验证** — 130 个测试,**离线、免 API key、几秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
+- **能验证** — 205 个测试,**离线、免 API key、几秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
 - **不吹牛** — [`SECURITY.md`](SECURITY.md) 明写 `create_tool` 就是进程内 RCE、正则黑名单只是减速带。**没有沙箱就是没有沙箱。**
 - **有考卷** — [`EXAM.md`](EXAM.md) / [`EXAM2.md`](EXAM2.md) 是两份可复现的能力测试,带标准答案和作弊检测(比如逐个核验 arXiv ID 真伪,防止编造引用)。记录的是"我怎么验证它真的有用",不是功能列表。
-- **有实测** — [`FINDINGS.md`](FINDINGS.md) 记了十六个真实任务量出来的东西:哪条提示词生效、哪条从头到尾没生效、六次翻车、检索改动的前后数字,以及**两个被数据否掉的自己的方案**。样本小,局限写在最前面。
+- **有实测** — [`FINDINGS.md`](FINDINGS.md) 记了二十二个真实任务量出来的东西:哪条提示词生效、哪条从头到尾没生效、六次翻车、检索改动的前后数字,以及**两个被数据否掉的自己的方案**。样本小,局限写在最前面。
 
 ---
 
@@ -186,7 +186,7 @@ Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说
 python agent.py --selfcheck                       # 免依赖的冒烟检查
 ```
 
-更多文档:[`DEVELOPMENT.md`](DEVELOPMENT.md) 实现逻辑 · [`OVERVIEW.md`](OVERVIEW.md) 能力全景 · [`SELF_LEARNING.md`](SELF_LEARNING.md) 自学习怎么做的 · [`FINDINGS.md`](FINDINGS.md) 十六个真实任务测出来的东西
+更多文档:[`DEVELOPMENT.md`](DEVELOPMENT.md) 实现逻辑 · [`OVERVIEW.md`](OVERVIEW.md) 能力全景 · [`SELF_LEARNING.md`](SELF_LEARNING.md) 自学习怎么做的 · [`FINDINGS.md`](FINDINGS.md) 二十二个真实任务测出来的东西
 
 [`JUDGING.md`](JUDGING.md) 是从 `FINDINGS.md` 里抽出来的方法论,**不提这个项目**:六种「判据本身没人查」的形状、反向验证怎么做、以及它自己会怎么骗你。跟 Talos 无关也能读。
 
