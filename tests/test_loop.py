@@ -771,6 +771,13 @@ def test_the_client_bounds_how_long_one_call_can_hang(monkeypatch):
     fake = types.ModuleType("openai")          # 测试是纯 stdlib 离线的,不能真 import openai
     fake.OpenAI = lambda **kw: seen.update(kw) or object()
     monkeypatch.setitem(sys.modules, "openai", fake)
+    # 这行不是洁癖:没有它,这条测试走哪条路取决于**开发机上有没有 .env**。有 .env 的
+    # 机器上 _KEYS 已经装着真的 ZHIPUAI key,make_client 的迟到回退不触发;CI 上 _KEYS
+    # 是空的,回退触发,于是 "k" 被写进**模块级**的 _KEYS —— monkeypatch 还得回环境变量,
+    # 还不回一个它没 patch 过的 dict。之后 _scrub 拿着 "k" 去抹每一份工具结果,
+    # "async ok" 变成 "async o[已抹掉...]",红在三十条之外的 test_async_tool_is_awaited 上。
+    # 本机全绿、CI 四格全红,就是这么来的。
+    monkeypatch.setattr(A, "_KEYS", {})
     monkeypatch.setenv("ZHIPUAI_API_KEY", "k")
     monkeypatch.setattr(A, "PROVIDER", "glm")
     A.make_client()

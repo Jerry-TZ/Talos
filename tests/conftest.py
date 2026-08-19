@@ -33,3 +33,26 @@ def ws(tmp_path, monkeypatch):
     monkeypatch.setattr(recall, "HITS_FILE", os.path.join(d, "hits.json"))
     monkeypatch.setattr(recall, "TRACE_FILE", os.path.join(d, "recall_trace.jsonl"))
     return os.path.realpath(d)
+
+@pytest.fixture(autouse=True)
+def _keys_stay_put():
+    """任何测试都不许把 `agent._KEYS` 弄脏,弄脏了当场点名是谁。
+
+    `_scrub` 把 `_KEYS` 从「只有 make_client 读」变成**每一次工具调用都读**。它被写脏一次,
+    后面每条测试的工具输出都跟着变形 —— 上一次是 test_loop 塞了个单字符假 key,红的却是
+    三十条之外的 test_async_tool_is_awaited。症状离病灶那么远,靠读回溯基本读不出来。
+
+    闸挂在**漏斗**上(每条测试都过 autouse),不是挂在某一条测试上:test_tools 里那两条
+    早就自己 patch 了 _KEYS,于是「这片面已经有判据了」—— 而 test_loop 那条谁也没看。
+    JUDGING 第六节说的就是这句话最容易骗到自己。
+
+    只还原、不断言是不够的:那样脏了也没人知道,下一条测试可能正好依赖那份脏。"""
+    import agent
+    before = dict(agent._KEYS)
+    yield
+    after = dict(agent._KEYS)
+    agent._KEYS.clear()
+    agent._KEYS.update(before)          # 先还原,再报错,别把脏留给后面
+    assert after == before, (
+        "这条测试改了 agent._KEYS 又没还回去。它是全局的,而 _scrub 每次工具调用都读它,"
+        "留下的假 key 会去抹后面所有测试的工具输出。改法:monkeypatch.setattr(A, '_KEYS', {}) 。")
