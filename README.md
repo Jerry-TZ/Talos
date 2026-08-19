@@ -182,11 +182,13 @@ Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说
 
 ```bash
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest tests/ -q     # 130 passed,约 3 秒,不联网、不需要 key
+.venv\Scripts\python.exe -m pytest tests/ -q     # 205 passed,约 8 秒,不联网、不需要 key
 python agent.py --selfcheck                       # 免依赖的冒烟检查
 ```
 
 更多文档:[`DEVELOPMENT.md`](DEVELOPMENT.md) 实现逻辑 · [`OVERVIEW.md`](OVERVIEW.md) 能力全景 · [`SELF_LEARNING.md`](SELF_LEARNING.md) 自学习怎么做的 · [`FINDINGS.md`](FINDINGS.md) 十六个真实任务测出来的东西
+
+[`JUDGING.md`](JUDGING.md) 是从 `FINDINGS.md` 里抽出来的方法论,**不提这个项目**:六种「判据本身没人查」的形状、反向验证怎么做、以及它自己会怎么骗你。跟 Talos 无关也能读。
 
 ## 由来
 
