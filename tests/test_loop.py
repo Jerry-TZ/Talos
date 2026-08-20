@@ -146,6 +146,47 @@ def test_max_steps_cap(ws, monkeypatch):
     out = A.agent_turn(client, "m", [{"role": "user", "content": "x"}], {"mode": "bypass", "allow": set()})
     assert "上限" in out
 
+def test_the_session_budget_speaks_once_per_tier_not_once_per_turn():
+    """会话预算提醒:跨档说一次,档内闭嘴。
+
+    `MAX_STEPS` 管单轮,会话累计一直没人管 —— 可以跨轮无限攒。实测 40 个真实会话:
+    累计越过 20 万的有 8 个(20%),它们吃掉了 **91%** 的费用。`SESSION_BUDGET` 就是
+    照这条线定的,不是拍的。
+
+    **承重的是「档内闭嘴」这一半。** 每轮都响的告警等于没有告警 —— figcheck.py 那次
+    就是一个**正确**的哈希告警响了两周被当成噪音,真出事那次一起被划过去了。所以
+    第二档没跨进去之前,涨了多少都不许再说。
+
+    还钉两个数不相等:累计 `in+out` 里八成命中缓存,只报一个数会把正常的长会话说成
+    失控,或者把沉重的上下文说得很便宜。"""
+    import agent as A
+    st = {}
+    for total, expect in [(A.SESSION_BUDGET // 2, False),      # 没到
+                          (A.SESSION_BUDGET + 1, True),        # 跨进第 1 档:说
+                          (A.SESSION_BUDGET + 9999, False),    # 还在第 1 档:闭嘴
+                          (A.SESSION_BUDGET * 2 + 1, True),    # 跨进第 2 档:再说
+                          (A.SESSION_BUDGET * 2 + 5, False)]:  # 还在第 2 档:闭嘴
+        st["tok"] = {"in": int(total * 0.9), "out": total - int(total * 0.9),
+                     "cached": int(total * 0.75)}
+        note = A._budget_note(st)
+        assert bool(note) == expect, f"累计 {total} 时该{'说' if expect else '不说'},实际:{note!r}"
+        if note:
+            assert str(total) in note, f"没报累计量:{note}"
+            paid = st["tok"]["in"] - st["tok"]["cached"] + st["tok"]["out"]
+            assert str(paid) in note and paid != total, (
+                f"计费量该跟累计量分开报(缓存吃掉了大头),实际:{note}")
+
+def test_the_session_budget_is_actually_wired_into_the_repl():
+    """判定函数写对了、没人调用,是这类改动最容易的死法。
+
+    `once()`(`-p` 一次性模式)故意不挂:跑完即退,`/compact` 和「开新会话」都无从谈起,
+    在那儿提醒等于只制造噪音。这条判据只要求交互式 `repl` 挂上。"""
+    import inspect
+    import agent as A
+    assert "_budget_note(state)" in inspect.getsource(A.repl), (
+        "repl 里没有调用 _budget_note —— 提醒永远不会出现")
+
+
 def test_maybe_compact(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())

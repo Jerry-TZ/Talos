@@ -190,6 +190,11 @@ def _env_block() -> str:
 REFLECT_AFTER = 5    # after a task with >= this many tool calls, auto-run a learning pass
 COMPACT_AT = 30000   # ponytail: char-count proxy for tokens; compact history past this (add tiktoken for precision)
 MAX_STEPS = int(os.environ.get("TALOS_MAX_STEPS", "100"))  # loop safety cap (guards against 空转)
+# MAX_STEPS 管的是**单轮**。会话累计没人管 —— 一个会话可以跨轮无限攒下去,而长会话的
+# 成本是超线性的:每多一轮,前面所有内容都要再过一遍(缓存吃掉大部分,没吃掉的那部分是
+# 乘出来的)。阈值不是拍的:40 个真实会话里,累计越过 20 万的有 8 个(20%),而它们吃掉了
+# **91%** 的费用;越过 50 万的 5 个,吃掉 79%。20 万这条线正好把「贵的那类」分出来。
+SESSION_BUDGET = int(os.environ.get("TALOS_SESSION_BUDGET", "200000"))   # 累计 in+out 每过这么多提醒一次
 # 一次 API 调用最多等多久。没有它时用的是 SDK 默认的 600 秒 **加上 SDK 自己的 2 次重试**,
 # 外面 _chat 又套了 3 次 —— 最坏情况一个多小时才报错,而屏幕上只有一个转圈,
 # 「拥塞」和「彻底卡死」完全分不出来。实测被这个坑了两次。
@@ -963,6 +968,7 @@ STATE_INHERIT = ("mode", "allow", "view",    # 子轮该按同样的权限和显
 STATE_SHARED = ("tok", "trace")              # 汇总:子轮的消耗算在父这次请求头上
 STATE_LOCAL = ("capped", "last_tok", "last_calls",   # 只描述"刚刚这一轮"
                "since_reflect", "reads",             # 只在顶层那份 state 上累
+               "budget_said",                        # 预算说到第几档:子轮继承了就会各说各的
                "sys_hash", "sys_prev", "sys_now")    # 缓存仪表,同样不跨层
 
 _CHILD_KEYS = STATE_INHERIT + STATE_SHARED
@@ -2709,6 +2715,30 @@ def _due_for_reflection(state: dict, corrected: bool) -> bool:
     state["since_reflect"] = state.get("since_reflect", 0) + state.get("last_calls", 0)
     return corrected or state["since_reflect"] >= REFLECT_AFTER
 
+def _budget_note(state: dict) -> str:
+    """会话累计跨过一档 `SESSION_BUDGET` 时该说的话;没跨过返回空串。
+
+    **每档只说一次。** 每轮都说的告警等于没有告警 —— figcheck.py 那次就是:一个**正确**
+    的哈希告警每次启动都响,响了两周被当成噪音划过去,真出事那次也一起被划过去了。
+    所以这里记住说到第几档(`budget_said`),只在跨进下一档时开口。
+
+    **报两个数,因为只报一个会误导。** 累计 `in+out` 是模型实际看过的量,而其中八成命中
+    了缓存 —— 只报累计,会把一个正常的长会话说得像失控;只报计费量,又看不出上下文有
+    多沉。实测 40 个真实会话缓存命中 82~88%,两个数差着五六倍。"""
+    t = state.get("tok") or {}
+    total = t.get("in", 0) + t.get("out", 0)
+    if SESSION_BUDGET <= 0:                       # 设成 0 = 关掉,别让提醒本身成为负担
+        return ""
+    tier = total // SESSION_BUDGET
+    if tier <= state.get("budget_said", 0):
+        return ""
+    state["budget_said"] = tier
+    paid = t.get("in", 0) - t.get("cached", 0) + t.get("out", 0)
+    return (f"⚠️ 本会话累计 {total} tok(其中计费约 {paid},其余命中缓存)。"
+            "长会话的成本是超线性的 —— 每多一轮,前面所有内容都要再过一遍。"
+            "接着做就 `/compact` 压一下,能收尾就开个新会话。")
+
+
 def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
@@ -2871,6 +2901,9 @@ def repl(resume=None) -> None:
         if _tk.get("in") or _tk.get("out"):
             ui.note(f"🎫 本轮 {_tk.get('steps', 1)} 次调用 · {_tk['in']}+{_tk['out']}={_tk['in'] + _tk['out']} tok"
                     + (f" · 缓存命中 {_tk['cached']}" if _tk.get("cached") else ""))
+        _budget = _budget_note(state)          # 只在跨档那一轮开口,见 _budget_note
+        if _budget:
+            ui.note(_budget)
         _corr = _is_correction(task)
         _due = _due_for_reflection(state, _corr)
         if state.pop("capped", False):                 # hit the step cap: it was flailing, so whatever it
