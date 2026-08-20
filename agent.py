@@ -105,8 +105,10 @@ def _dotenv_secrets(env: dict) -> dict:
     就是 `_EXFIL` 那种表演。但 **`.env` 的内容本身是闭集**:它带进来什么,这儿当场就
     知道。所以除了 Talos 自己要读要印的 `TALOS_*`,一律当秘密。
 
-    长度下限是为了别糊花正常输出(`TALOS_PROVIDER=deepseek` 那种),顺带跟 `_scrub`
-    的窗口对齐 —— 比 `_RUN` 短的值本来也进不了窗口那一轮。
+    长度下限是为了别糊花正常输出(`TALOS_PROVIDER=deepseek` 那种)。**它只挡短值,
+    挡不住长值的常见子串** —— 第一版把这里的结果并进了 `_KEYS`,于是滑窗拿
+    `DATABASE_URL` 的 10 字符片段去抹,`postgresql`、`localhost:` 这些正常输出里的词
+    当场被抹成「这是你的 API key」。所以这些值走单独一张 `_ENV_SECRETS`,只做整值匹配。
 
     天花板:记的是**文件里**那份值。真环境变量覆盖掉 `.env` 的时候,shell 里那份不在
     这儿 —— 那是用户在 `.env` 之外自己设的,不归这条管。"""
@@ -119,7 +121,12 @@ def _dotenv_secrets(env: dict) -> dict:
 # pop 掉等于把用户的 `gh` 和 `psql` 一起弄坏。所以这里只买「回不来」,不买「看不见」;
 # 盲发(`curl -d $GITHUB_TOKEN ...`)是 `_EXFIL` 的活。判据:
 # tests/test_tools.py::test_a_secret_that_is_not_a_provider_key_is_scrubbed_too
-_KEYS.update({k: v for k, v in _dotenv_secrets(_DOTENV).items() if k not in _KEYS})
+#
+# **单独一张表,不并进 `_KEYS`** —— 因为这两类值该用**不同的匹配方式**,合表就分不开了。
+# provider key 是无结构的随机串,拿它的连续片段去匹配几乎不会误伤;而 `.env` 里的值
+# 多半是**有结构的基础设施串**,`postgresql://user:pw@localhost:5432/app` 的任意 10 个
+# 连续字符里,`postgresql`、`localhost:` 都是正常输出里天天出现的东西。见 `_scrub`。
+_ENV_SECRETS = {k: v for k, v in _dotenv_secrets(_DOTENV).items() if k not in _KEYS}
 
 SYSTEM = (
     "You are Talos, a minimal coding agent working inside the user's project "
@@ -1192,9 +1199,27 @@ def _scrub(s: str) -> str:
         # 天花板 ③ 的收窄:整值匹配挡不住「往 key 中间插一个换行」。所以连续 _RUN 个
         # 字符也抹。`len(v) < _RUN` 时这个 range 是空的 —— 短的假 key 不参与,不会拿
         # 一两个字符去糊满整份输出(CI 那次就是被一个单字符假 key 抹花的)。
+        #
+        # **滑窗只给 provider key 用。** provider key 是无结构的随机串,它的任意 10 个
+        # 连续字符不会是正常输出里的词。`.env` 里的值不是 —— 见下面那一段。
         for i in range(len(v) - _RUN + 1):
             if v[i:i + _RUN] in s:
                 s = s.replace(v[i:i + _RUN], mark)
+    # **`.env` 的秘密只做整值匹配,没有滑窗。** 第一版把它们并进 `_KEYS` 一起走滑窗,
+    # 结果:`.env` 里有一行 `DATABASE_URL=postgresql://user:pw@localhost:5432/app`(几乎
+    # 每个项目都有),于是 `postgresql`(一个普通英文单词,正好 10 字符)和 `localhost:`
+    # 都被抹成「这是你的 API key」,`API_BASE=https://...` 让无关的第三方 URL 被抹掉
+    # 前十个字符。模型收到的工具输出被静默改写,还贴上一句假话 —— `edit_file` 会因此
+    # 报「找不到原文」,而模型照着抹花的内容写回去就把标记落进真文件。
+    #
+    # 这个害处**被上面那段旧注释原样预言过**(「会把 deepseek 一起抹掉,毁正常输出」),
+    # 而我当时只反驳了它的一半:短值那半靠 `len(v) >= _RUN` 挡住了,**长值的常见子串
+    # 那半没想到**。留下的天花板写明白:**被切开的 `GITHUB_TOKEN` 抹不掉。** 换来的是
+    # 「正常输出一个字都不动」—— 前者要一次刻意的攻击,后者是每次运行都在发生的确定损害。
+    # 判据:test_a_dotenv_secret_never_mangles_normal_output。
+    for v in _ENV_SECRETS.values():
+        if v and v in s:
+            s = s.replace(v, mark)
     return s
 
 def run_tool(name: str, args: dict) -> tuple[str, bool]:
@@ -2715,6 +2740,26 @@ def _due_for_reflection(state: dict, corrected: bool) -> bool:
     state["since_reflect"] = state.get("since_reflect", 0) + state.get("last_calls", 0)
     return corrected or state["since_reflect"] >= REFLECT_AFTER
 
+def _workspace_refusal(new: str) -> str:
+    """`/workspace <路径>` 该不该拒?返回拒绝理由,空串表示放行。
+
+    **启动那条路早就为这一档做过下移**(见 HOME / WORKSPACE 那段注释):`WORKSPACE == HOME`
+    时 `_in_workspace` 只问「在不在 WORKSPACE 里」,于是 `agent.py`、`recall.py` 自己也
+    落进牢笼内 —— 模型能覆写正在跑的那个循环,而且 `.talos/`(明文会话日志)、`.venv/`、
+    `.git/` 一起变成可读(workspace 那一支在 `_NO_READ_DIRS` 检查**之前**就 return 了)。
+
+    **而 `/workspace` 原来是直接赋值,把那道闸整个绕开。** 启动路径守得住、运行时命令
+    守不住,同一条不变式两条进入路径只补了一条 —— 又是 JUDGING 第六节那句「立完一道闸,
+    先问这片面还有几条路」。而「拿 Talos 改 Talos」恰恰是最容易敲出这一句的场景。
+
+    抽成函数是为了能测:原来这段逻辑长在 `repl()` 的命令分支里,判据够不着。"""
+    if os.path.realpath(new) == HOME:
+        return (f"拒绝:{new} 就是 Talos 自己的目录。工作区设成它,模型就能覆写正在跑的"
+                f"循环(agent.py / recall.py),`.talos/` 里的明文会话日志也一起变成可读。"
+                f"要在这儿干活就用 `/workspace {os.path.join(new, 'workspace')}`,"
+                "跟启动时的默认档一致;真要改源码,请你自己动手。")
+    return ""
+
 def _budget_note(state: dict) -> str:
     """会话累计跨过一档 `SESSION_BUDGET` 时该说的话;没跨过返回空串。
 
@@ -2811,6 +2856,10 @@ def repl(resume=None) -> None:
             new = os.path.realpath(arg)
             if not os.path.isdir(new):
                 ui.note(f"没有这个目录:{new}")
+                continue
+            refuse = _workspace_refusal(new)
+            if refuse:
+                ui.note(refuse)
                 continue
             globals()["WORKSPACE"] = new
             os.chdir(new)                              # 相对路径跟着一起搬,和启动时一致

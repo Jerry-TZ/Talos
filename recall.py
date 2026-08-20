@@ -502,9 +502,20 @@ def forget(items: list) -> None:
     if facts and os.path.exists(MEMORY_FILE):
         with open(MEMORY_FILE, encoding="utf-8") as f:
             lines = f.readlines()
-        with open(MEMORY_FILE, "w", encoding="utf-8") as f:   # 比对时要先去掉来源标记
-            f.writelines(ln for ln in lines
-                         if strip_tag(ln.strip().lstrip("-*# ").strip())[0] not in facts)
+        # **文本相同还不够,来源也要对得上。** `dead()` 的承诺是「只提议删 Talos 自己写的,
+        # 你手写的事实它无权判断」—— 而这一步原来只比对去掉标记后的**文本**,于是
+        # memory.md 里同一句话有两行(你先手写了一条,复盘后来又记了一遍,这是自然顺序)
+        # 时,一条 `/forget` 把两行一起删了,屏幕还打「已遗忘 1 条」。
+        # 提议那一侧认来源,执行这一侧不认,等于那条承诺只写在 docstring 里。
+        # 判据:tests/test_memory.py::test_forget_never_touches_a_line_you_wrote_yourself
+        def _doomed(ln: str) -> bool:
+            body, src, _born = strip_tag(ln.strip().lstrip("-*# ").strip())
+            # 判据跟 `dead()` 那一侧逐字一致:`src == "user"` 就是无标记 = 你手写的。
+            # 第一版这儿写的是 `bool(src)`,而 `strip_tag` 给无标记行返回的是 `"user"`
+            # 不是空串 —— 于是这道检查恒为真,修了个寂寞。反向验证逮到的。
+            return body in facts and src != "user"
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            f.writelines(ln for ln in lines if not _doomed(ln))
     for p in glob.glob(os.path.join(SKILLS_DIR, "*.md")):
         try:
             with open(p, encoding="utf-8") as f:

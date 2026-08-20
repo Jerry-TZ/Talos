@@ -942,6 +942,51 @@ def test_provenance_decides_what_forget_may_touch(ws):
     left = open(R.MEMORY_FILE, encoding="utf-8").read()
     assert "xyzzy" in left and "qwerty" not in left     # 手写的留着,复盘的删掉
 
+def test_forget_never_touches_a_line_you_wrote_yourself(ws):
+    """`dead()` 承诺「只提议删 Talos 自己写的」,而 `forget()` 原来不认来源。
+
+    真事的形状:memory.md 里同一句话有两行 —— 你先手写了一条,复盘后来又记了一遍
+    (这是**自然顺序**,反过来不触发,因为 `_dedupe` 留最后一个当代表)。跑一次
+    `/forget`:`dead()` 只提议那条带标记的,`forget()` 按去掉标记后的**文本**匹配,
+    把两行一起删了,屏幕还打「已遗忘 1 条」。**提议那一侧认来源,执行这一侧不认,
+    等于那条承诺只写在 docstring 里。**
+
+    第一版修复用 `bool(src)` 判来源,而 `strip_tag` 给无标记行返回的是 `"user"`
+    不是空串 —— 那道检查恒为真,修了个寂寞,反向验证当场逮到。所以这条判据断言的是
+    **行还在**,不是「代码里有一句检查」。"""
+    import recall as R
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 用户偏好 xyzzy plugh\n"
+                "- 用户偏好 xyzzy plugh  <!-- reflect 2026-01-01 -->\n")
+    for _ in range(10):
+        R.recall("完全不相关的查询 zzz")
+    d = R.dead(min_seen=8)
+    assert len(d) == 1, f"dead() 该只提议那条复盘写的,实际 {d}"
+    R.forget(d)
+    left = [ln for ln in open(R.MEMORY_FILE, encoding="utf-8").read().splitlines() if ln.strip()]
+    assert len(left) == 1, (
+        f"提议删 1 条,实际删了 {2 - len(left)} 条 —— 你手写的那行被连坐了。剩下:{left}")
+    assert "reflect" not in left[0], "删错了那条:留下的应该是无标记(你手写)的那行"
+
+
+def test_switching_the_workspace_cannot_unlock_the_source_tree(ws):
+    """`/workspace <HOME>` 不许把「模型改不了自己正在跑的循环」这道闸拆掉。
+
+    启动那条路专门做过下移(`test_the_default_workspace_is_never_the_source_tree` 钉着),
+    而运行时的 `/workspace` 原来是直接 `globals()["WORKSPACE"] = new`,一行检查都没有。
+    同一条不变式两条进入路径,只补了一条。**而「拿 Talos 改 Talos」正是最容易敲出
+    `/workspace <仓库根>` 的场景。**
+
+    断言拒绝理由里带得出路(`workspace` 子目录),不只是「不行」—— 一道只会拒绝、
+    不给出路的闸,上一次的教训是把问题冻在原地(见「已经超限的技能允许变短」那条)。"""
+    import agent as A
+    assert A._workspace_refusal(A.HOME), "把工作区设成 HOME 居然放行了 —— 源码就可写了"
+    assert "workspace" in A._workspace_refusal(A.HOME), "拒了但没给出路"
+    assert not A._workspace_refusal(os.path.join(A.HOME, "workspace")), \
+        "正常的子目录被误拒了"
+    assert not A._workspace_refusal(ws), "临时工作区被误拒了"
+
+
 def test_stale_memory_is_flagged_by_time(ws):
     """曾经有用但很久没再想起 —— 用量看不出来,只有时间能。"""
     import json

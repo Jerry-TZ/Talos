@@ -1025,15 +1025,54 @@ def test_a_secret_that_is_not_a_provider_key_is_scrubbed_too(ws, monkeypatch):
         f.write("TALOS_PROVIDER=deepseek\nGITHUB_TOKEN=" + TOKEN + "\n")
     r = subprocess.run(
         [sys.executable, "-c", "import agent, os, sys;"
-         "sys.stdout.write(repr(sorted(k for k, v in agent._KEYS.items() if v == sys.argv[1])))",
+         "sys.stdout.write(repr(sorted(k for k, v in agent._ENV_SECRETS.items() if v == sys.argv[1])))",
          TOKEN],
         cwd=fake, capture_output=True, text=True,
         env=dict(os.environ, PYTHONPATH=os.path.dirname(A.__file__),
                  TALOS_WORKSPACE=fake))
     assert r.returncode == 0, "import agent 就崩了,这条判据什么也没验:" + r.stderr[-800:]
     assert "GITHUB_TOKEN" in r.stdout, (
-        "`.env` 里的 GITHUB_TOKEN 没进 _KEYS —— 挑选规则对了,但没接上去,"
+        "`.env` 里的 GITHUB_TOKEN 没进 _ENV_SECRETS —— 挑选规则对了,但没接上去,"
         "于是 `echo %GITHUB_TOKEN%` 的输出照样明文回到对话里。stdout=" + r.stdout)
+
+
+def test_a_dotenv_secret_never_mangles_normal_output(ws, monkeypatch):
+    """抹除的**假阳性**一侧 —— 上面那条只测了「该抹的抹掉了」。
+
+    真事,而且是这套判据自己放进去的:`.env` 的值并进 `_KEYS` 之后跟着走了 `_scrub`
+    的 10 字符滑窗。于是一行几乎每个项目都有的
+
+        DATABASE_URL=postgresql://user:pw@localhost:5432/app
+
+    让 `postgresql`(一个普通英文单词,正好 10 字符)和 `localhost:` 在**任何**工具输出里
+    被换成「[已抹掉:这是你的 API key]」。模型收到的东西被静默改写,还贴了一句假话:
+    `edit_file` 因此报「找不到原文」,而模型照着抹花的内容写回去,标记就落进真文件。
+
+    **这个害处被它替换掉的那段注释原样预言过**(「会把 deepseek 一起抹掉,毁正常输出」)。
+    当时只反驳了一半:短值那半靠 `len(v) >= _RUN` 挡住,长值的常见子串那半没想到。
+    所以这条判据钉的是**两侧**:正常输出一个字不动,整值命中照样抹。
+
+    留下的天花板写在 `_scrub` 里:**被切开的 `.env` 秘密抹不掉。** 那要一次刻意的攻击,
+    而误伤是每次运行都在发生的确定损害 —— 两害相权。"""
+    import agent as A
+    monkeypatch.setattr(A, "_KEYS", {"deepseek": "sk-" + "a1b2c3d4e5" * 4})
+    monkeypatch.setattr(A, "_ENV_SECRETS", {
+        "DATABASE_URL": "postgresql://user:pw@localhost:5432/app",
+        "API_BASE": "https://api.internal.example.com/v1"})
+
+    for clean in ("Server listening on http://localhost:5432 (press Ctrl+C)",
+                  "conftest.py: could not connect, is postgresql running?",
+                  "curl https://api.example.org/ok",
+                  "def apply(self): return self.host"):
+        assert A._scrub(clean) == clean, (
+            "正常输出被抹花了 —— 模型收到的不是它请求的东西,而且被贴上一句假话:\n  "
+            + A._scrub(clean))
+
+    # 该抹的两侧都还在
+    assert "已抹掉" in A._scrub("DB=postgresql://user:pw@localhost:5432/app"), \
+        ".env 秘密的整值命中没抹掉"
+    assert "已抹掉" in A._scrub("sk-a1b2c3d4e5a1b2c3d4e5\na1b2c3d4e5a1b2c3d4e5"), \
+        "被切开的 provider key 没抹掉 —— 滑窗该只对 _KEYS 生效,不是被一起删了"
 
 
 def _boom(key):
