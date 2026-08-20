@@ -312,9 +312,13 @@ def test_unapproved_tool_is_quarantined_not_executed(ws):
     import agent as A
     A.create_tool("legit", "TOOL={'description':'d','parameters':{},'required':[]}\n"
                            "def run(a): return 'ok'\n")
-    # 模拟带外投放:直接往 tools/ 写一个没经 create_tool 的文件
-    with open(os.path.join(A.TOOLS_DIR, "planted.py"), "w", encoding="utf-8") as f:
-        f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
+    # **不是「带外投放」—— `write_file` 自己就够得着 TOOLS_DIR。** `_in_workspace` 明写
+    # 放开「agent 的大脑」(skills/tools/memory),原来这儿用裸 open() 模拟外人投放,
+    # 把真实路径说小了:模型按一次 `a` 会话放行 write_file 之后,每一次写都不再显示代码,
+    # 而 create_tool **刻意不支持**会话放行。两条路写出的文件一模一样 —— 拦住它的从来
+    # 不是「谁写的」,是**摘要写不进去**(test_approval_manifest_is_not_writable_by_file_tools)。
+    A.write_file(os.path.join(A.TOOLS_DIR, "planted.py"),
+                 "TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
     loaded = A.load_dynamic_tools()
     assert "legit" in loaded and "planted" not in loaded      # 批准的加载,投放的隔离
 
@@ -440,6 +444,44 @@ def test_create_tool_preview_is_never_clipped():
     out = ui.console.end_capture()
     assert "MARKER_AT_END" in out and "…" not in out.split("MARKER_AT_END")[0][-200:]
     assert "进程内立即执行" in out                     # 也要说清批准意味着什么
+
+def test_the_brain_door_is_open_for_tools_and_shut_for_the_loop():
+    """生产拓扑下,写路径够得着的**恰好**是哪几样 —— fixture 测不出来。
+
+    `ws` 把 TOOLS_DIR 设成 WORKSPACE **里面**的 d/tools,于是「工具目录可写」在测试里
+    永远成立,而且成立的理由是错的(它落在 workspace 那一支上)。真实布局里 TOOLS_DIR
+    是 HOME 的兄弟目录,靠 `_in_workspace` 里 `_under(full, TOOLS_DIR)` 那一句单独放开 ——
+    把那句删掉,全套判据照绿,而模型从此改不了自己写过的工具。跟
+    test_the_default_workspace_is_never_the_source_tree 同一类:**fixture 的拓扑不是
+    生产的拓扑**,差别正好落在没人看的那一格。
+
+    两样一起断言,因为这道门的价值在于它**只开一半**:
+      工具目录  可写   —— 大脑归它,create_tool 写进去的东西它得能改;
+      agent.py  不可写 —— 它改不了自己正在跑的那个循环。
+
+    那个「可写」之所以不等于「可执行」,是因为文件和摘要是两把钥匙、这道门只交出一把 ——
+    但那半边**故意不写进这条判据**。反向验证证的:把 `_in_workspace` 里对批准清单的专门
+    拒绝整个关掉,加上第三条断言照样绿 —— 生产布局里清单落在 `HOME/.talos/`,本来就在
+    牢笼外,换个理由一样被拒。那道专门拒绝只在 HOME==WORKSPACE 的默认布局下承重,判据是
+    test_approval_manifest_is_not_writable_by_file_tools(它跑在 `ws` 里,清单正好落在
+    WORKSPACE 内)。**会绿,但不是因为它说的那个原因 —— 那种断言不如不写。**
+
+    子进程跑:HOME / WORKSPACE / TOOLS_DIR 是导入时定死的模块级常量,monkeypatch
+    造不出这个场景。"""
+    import subprocess, sys, os
+    home = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    env.pop("TALOS_WORKSPACE", None)                 # 正是默认布局这一档要测
+    helper = ("def _ok(agent, p):\n"
+              "    try: agent._in_workspace(p); return True\n"
+              "    except ValueError: return False\n")
+    code = ("import agent, os;"
+            "print(_ok(agent, os.path.join(agent.TOOLS_DIR, 'x.py')),"
+            "      _ok(agent, os.path.join(agent.HOME, 'agent.py')))\n")
+    p = subprocess.run([sys.executable, "-c", helper + code],
+                       cwd=home, env=env, capture_output=True, text=True)
+    assert p.stdout.split() == ["True", "False"], (
+        "大脑那道门开错了(工具目录 / agent.py 应为 可写 / 不可写):" + p.stdout + p.stderr)
 
 def test_approval_manifest_is_not_writable_by_file_tools(ws):
     """清单决定启动时执行什么。默认 HOME==WORKSPACE 时,普通编辑不能给自己发批准。"""
