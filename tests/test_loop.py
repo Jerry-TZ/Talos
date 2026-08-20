@@ -103,6 +103,40 @@ def test_reflection_recalls_on_the_task_not_on_the_reflection_prompt(ws, monkeyp
               {"mode": "bypass", "allow": set()})
     assert asked == ["统计 data/ 里每个 csv 的缺失率"]
 
+def test_the_reflection_prompt_says_it_is_not_the_user_talking(ws, monkeypatch):
+    """复盘指令是当成 `role="user"` 追加进去的 —— 于是它自己的内容看起来就是用户刚说的话。
+
+    `REFLECT_PROMPT` 里写着「只写用户**明确说出口**的偏好、约束、纠正」,而这道自查
+    **被它自己的载体绕过去了**:同一段提示词里还写着「assert 验证脚本一律留着 —— 后者是
+    结论可复核的凭据」,那句话在模型眼里跟用户的话没有区别。
+
+    真事:用户按了一次 `n` 拒绝删除一个验证脚本,复盘往 memory.md 写下
+
+        - 用户明确要求:含 assert 的验证脚本是结论可复核的凭据,一律保留不删(曾拒绝删除 …)
+
+    「结论可复核的凭据」是 `REFLECT_PROMPT` 里的**原话**。**模型没有幻觉,它在照办** ——
+    一次 `n` 加上一句系统规则,被合成了一条永久的「用户明确要求」。memory.md 每轮全量注入,
+    这条假归因会一直生效(能救回来:它带 reflect 来源标记,`/forget` 提得动)。
+
+    这是同一片面上的第四条路:技能正文、往事、memory.md 三处都标了「不是用户指令」
+    (test_memory_lines_that_look_like_instructions_are_dropped /
+    test_injected_memories_say_they_are_not_instructions),而**提示词自己**没标。
+
+    两条一起断言:载体确实是 `user`(所以这句免责才有必要),以及那句免责在。哪天有人
+    把载体改成 `system`,第一条会红 —— 那时该有人来决定这句还留不留,而不是静悄悄地飘着。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    seen = []
+    monkeypatch.setattr(A, "agent_turn", lambda c, m, msgs, st, **kw: seen.append(msgs) or "")
+    A.reflect(None, "m", [{"role": "user", "content": "统计 csv 缺失率"}],
+              {"mode": "bypass", "allow": set()})
+    last = seen[0][-1]
+    assert last["role"] == "user" and A.REFLECT_PROMPT in last["content"], (
+        "复盘提示词的载体变了 —— 下面那句免责是为 role=user 写的,先决定它还要不要")
+    assert "不是用户说的话" in A.REFLECT_PROMPT, (
+        "REFLECT_PROMPT 没有声明自己不是用户的话 —— 它里面的主张会被写成「用户明确要求」")
+
+
 def test_max_steps_cap(ws, monkeypatch):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())
