@@ -327,6 +327,40 @@ def test_modified_approved_tool_is_re_quarantined(ws):
         f.write("\n# tampered\n")
     assert "t" not in A.load_dynamic_tools()
 
+def test_the_quarantine_notice_says_which_kind_of_quarantine_it_is(ws, monkeypatch):
+    """隔离**为什么**发生,得写在给人看的那句话里 —— 上面两条只验了「没加载」。
+
+    真事:`figcheck.py` 的告警每次启动都响,响了两周,我一直当噪音划过去。
+    去查才发现哈希锁是对的 —— 14 个工具 13 个哈希对得上,它对不上:**批准之后
+    内容被改过**,正是这把锁存在的全部理由。我读漏了,因为那句话把两种情况
+    揉成了「不是 create_tool 造的,**或**造好后被改过」。
+
+    这两种严重性差得远:
+    · 没批准过 —— tools/ 里冒出个陌生 .py(clone 带的、别的进程写的)。要看一眼。
+    · **批准后被改过** —— 这文件是你自己批的,之后变了。你没动过它就是篡改。
+    代码分得清(`name in approved` 就是判据),消息里给扔了。**守卫是对的,
+    关于守卫的那句话不精确** —— 而没人查那句话,于是真报警被当成噪音磨掉。
+
+    判据钉的是**用词**,不是行为:行为那两条已经有人管了。"""
+    import agent as A
+    notes = []
+    monkeypatch.setattr(A, "ui", type("U", (), {"note": staticmethod(notes.append)})())
+
+    A.create_tool("changed", "TOOL={'description':'d','parameters':{},'required':[]}\n"
+                             "def run(a): return '1'\n")
+    with open(os.path.join(A.TOOLS_DIR, "changed.py"), "a", encoding="utf-8") as f:
+        f.write("\n# tampered\n")
+    with open(os.path.join(A.TOOLS_DIR, "stranger.py"), "w", encoding="utf-8") as f:
+        f.write("TOOL={'description':'d','parameters':{},'required':[]}\ndef run(a): return 'x'\n")
+
+    A.load_dynamic_tools()
+    assert notes, "两个文件被隔离了,却一句话都没跟用户说"
+    msg = notes[-1]
+    assert "changed.py(批准后被改过)" in msg, (
+        "「批准后被改过」是这把锁真正要拦的那一种,必须单独说出来,"
+        "不能跟「没批准过」揉成一个『或』。实际说的是:" + msg)
+    assert "stranger.py(没批准过)" in msg, "陌生文件那一种也得写清楚。实际:" + msg
+
 def test_read_file_refuses_oversized(ws, monkeypatch):
     """#7:read_file 不设防会被超大文件 OOM(它是 read 类,不过权限门)。"""
     import agent as A

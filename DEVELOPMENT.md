@@ -150,7 +150,7 @@ def check_permission(state, cls, name, args):                       # 决策 + �
 
 ```bash
 python agent.py --selfcheck        # 零依赖、零网络、零 key。改完先跑这个
-python -m pytest tests/ -q         # 214 条。CI 跑 ubuntu/windows × 3.10/3.13
+python -m pytest tests/ -q         # 215 条。CI 跑 ubuntu/windows × 3.10/3.13
 ```
 
 `--selfcheck` 覆盖 4 个工具的读/写/改、`edit_file` 的"找不到 / 不唯一"两种报错、
@@ -190,7 +190,7 @@ set TALOS_MAX_STEPS=12
 | **行为类** | **模型读到守卫那条消息之后干什么** | ❌ 必须用你真在用的那个 |
 
 「拒绝之后会不会改用 `python -c` 绕路」是那个具体模型的性格,换了模型不算数。
-而**行为类正是 live 测试唯一还值钱的部分** —— 管道通不通,214 条判据已经免费覆盖了。
+而**行为类正是 live 测试唯一还值钱的部分** —— 管道通不通,215 条判据已经免费覆盖了。
 
 四条短任务,同一个会话里连着跑(冒烟验管道,不验能力,同会话前缀命中省一大截;
 **基准对比必须新会话**,否则第二轮会捞到第一轮自己写的技能):

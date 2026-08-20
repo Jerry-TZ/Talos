@@ -910,11 +910,18 @@ def load_dynamic_tools() -> list:
             except Exception:
                 pass
         else:
-            quarantined.append(name)
+            # **两种情况分开写。** 代码这儿就知道是哪一种(`name in approved`),
+            # 揉成一句「没批准过**或**被改过」等于把信息扔了 —— 而两者严重性差得远:
+            # 陌生文件要看一眼,而「批准后被改过」是这把锁存在的**全部理由**。
+            # 真事:figcheck.py 的告警每次启动都响、响了两周,被当成噪音划过去;
+            # 去查才发现 14 个工具 13 个哈希都对,就它被改过。**守卫是对的,
+            # 关于守卫的那句话不精确,于是真报警被磨成了噪音。**
+            quarantined.append(name + ("(批准后被改过)" if name in approved else "(没批准过)"))
     if quarantined and ui is not None:
-        ui.note(f"⚠️ 已隔离 {len(quarantined)} 个未批准的工具(不会执行): {', '.join(quarantined)}。"
-                "它们不是通过 create_tool 造的,或造好后被改过。"
-                "自己看过确认可信,就跑 `python agent.py --approve-tools` 批准。")
+        ui.note(f"⚠️ 已隔离 {len(quarantined)} 个工具(不会执行): {', '.join(quarantined)}。"
+                "括号里是原因:「批准后被改过」是这把锁真正要拦的那一种 —— "
+                "你自己没动过它,就当成篡改来查。"
+                "看过确认可信,再跑 `python agent.py --approve-tools` 批准。")
     return loaded
 
 # ── delegation: spawn a sub-agent (广度, not 深度) ─────────────────────────────
