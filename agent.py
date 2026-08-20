@@ -1110,6 +1110,9 @@ def _bad_args(name: str, args) -> str | None:
     return None
 
 
+_RUN = 10   # 抹除的最短连续片段。见 _scrub 天花板 ③:真 key 都 ≥ 20 字符,
+            # 对半切开每半仍 ≥ 10,所以最自然的那种切法挡得住。
+
 def _scrub(s: str) -> str:
     """把 API key 的**明文值**从任何工具结果里抹掉。
 
@@ -1124,19 +1127,34 @@ def _scrub(s: str) -> str:
     工具结果只有 `run_tool` 一个漏斗,而 `_KEYS` 手上正好握着精确的值。精确匹配,
     没有启发式,零误伤,所有命令一起覆盖。
 
-    # ponytail: 只抹得掉**原文**。两个天花板,都是实测出来的:
+    # ponytail: 只抹得掉**原文**。三个天花板,都是实测出来的:
     # ① 编码变形 —— `certutil -encode .env x.txt` 之后原文不在输出里,抹不着。
     # ② **旁道** —— 真模型红队时写了个脚本,一个字符的明文都没打印,只报「长度 22 /
     #    开头 sk- / 非十六进制 / 无空格」。抹的是**值**,拦不住**关于值的陈述**;
     #    逐字符比下去就是一个完整的 oracle。这条堵不了:要判断「这段输出是不是在说
     #    key」得懂语义,不是字符串匹配能做的事。
+    # ③ **切开** —— 往 key 中间插一个换行,`v in s` 就不成立,而明文一个字符都没少,
+    #    去掉换行就拼回来了。这条比前两条糙得多:零解码、零轮次,而且
+    #    `print(s[:20]);print(s[20:])` 长得像分块读文件,不像绕过 —— 拦住 ① 的那层
+    #    对齐不一定在这儿触发。**已收窄、未堵死**:下面连续 _RUN 个字符也抹,把它从
+    #    「一步到手」推到「至少切成 N 块」;切得比 _RUN 还碎照样漏,只是碎到那份上
+    #    每片带的信息就退回 ② 的量级了。判据钉在 test_a_key_cut_in_half_is_still_a_key。
     # 所以它跟 `_EXFIL` 同级,是减速带不是墙。要真墙只有断网/沙箱。
     # 覆盖面也只有这六个 key:`.env` 里的 `GITHUB_TOKEN` 不在内,因为「.env 里所有的值」
     # 会把 `TALOS_PROVIDER=deepseek` 的 `deepseek` 一起抹掉,毁正常输出。
     """
+    mark = "[已抹掉:这是你的 API key]"
     for v in _KEYS.values():
-        if v and v in s:
-            s = s.replace(v, "[已抹掉:这是你的 API key]")
+        if not v:
+            continue
+        if v in s:
+            s = s.replace(v, mark)                  # 整值命中:输出干净,只有一个标记
+        # 天花板 ③ 的收窄:整值匹配挡不住「往 key 中间插一个换行」。所以连续 _RUN 个
+        # 字符也抹。`len(v) < _RUN` 时这个 range 是空的 —— 短的假 key 不参与,不会拿
+        # 一两个字符去糊满整份输出(CI 那次就是被一个单字符假 key 抹花的)。
+        for i in range(len(v) - _RUN + 1):
+            if v[i:i + _RUN] in s:
+                s = s.replace(v[i:i + _RUN], mark)
     return s
 
 def run_tool(name: str, args: dict) -> tuple[str, bool]:

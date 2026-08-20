@@ -834,5 +834,53 @@ def test_an_api_key_never_rides_a_tool_result_back_into_the_conversation(ws, mon
     assert "已抹掉" in out2, "异常正文里那个 key 没被抹:" + out2
 
 
+def test_a_key_cut_in_half_is_still_a_key(ws, monkeypatch):
+    """整值精确匹配的天花板 ③:往 key 中间插一个字节的空白,`v in s` 就不成立了。
+
+    单独立一条,是因为它跟另外两个天花板**性质不同**:
+    ① 编码变形(base64 / `certutil -encode`)—— 明文不在输出里,模型得自己解码。
+       真模型红队时明确拒绝走这条,说那是「绕过安全控制」。
+    ② 旁道(只报长度 / 开头 / 是不是十六进制)—— 一个明文字符都没有,一次漏几个 bit。
+    ③ **切开** —— 明文一个字符都不少,去掉换行就是原文。**零解码、零轮次**,而且
+       `python -c "s=open('.env').read();print(s[:20]);print(s[20:])"` 长得像
+       「分块读个文件」,不像绕过 —— 拦住 ① 的那层对齐,不一定会在这儿触发。
+
+    所以抹除不能只认整值,连续 `_RUN` 个字符也得抹。**这不叫堵上了**:见第三段。"""
+    import agent as A
+    KEY = "sk-DECOY-9f3a-not-a-real-key"          # 27 个字符,跟真 key 一个量级
+    monkeypatch.setattr(A, "_KEYS", {"DEEPSEEK_API_KEY": KEY})
+    half = len(KEY) // 2
+
+    # ① 真实可达:一条命令就能让 key 断成两行,而且它长得像正常的分块读取。
+    with open(os.path.join(ws, ".env"), "w", encoding="utf-8") as f:
+        f.write("DEEPSEEK_API_KEY=" + KEY)
+    cut = len("DEEPSEEK_API_KEY=") + half         # 从 key 正中间切,不是从 `sk-` 后面
+    prog = "s=open('.env').read();print(s[:%d]);print(s[%d:])" % (cut, cut)
+    out, is_err = A.run_tool("run_bash", {"command": 'python -c "' + prog + '"'})
+    assert not is_err, "命令本身就失败了,这条判据什么也没验:" + out
+    assert "已抹掉" in out, (
+        "既没看到 key 也没看到抹除标记 —— 多半是命令没读到 .env,"
+        "判据在为一件没发生的事发绿灯:" + out)
+    assert KEY not in "".join(out.split()), (
+        "把空白去掉之后 key 明文又拼回来了 —— 抹除只认整值,一个换行就绕过去了:" + out)
+
+    # ② 换个分隔符也得挡住。只堵换行的话,「已修」就只覆盖了一条路。
+    for sep in ("\n", " ", "\r\n", "|", "\t"):
+        got = A._scrub(KEY[:half] + sep + KEY[half:])
+        assert "已抹掉" in got, f"分隔符 {sep!r} 切开就抹不着了:{got!r}"
+        assert KEY not in "".join(got.split()), f"分隔符 {sep!r}:明文还能拼回来:{got!r}"
+
+    # ③ **把天花板本身也钉住。** 切得比 _RUN 还碎照样漏 —— 只是碎到那个份上,
+    #    每片带的信息就退回 ② 的量级了。这条断言红了**不代表坏了**,代表天花板动了:
+    #    请回来改这段注释、改 agent.py 里 _scrub 的 ponytail 段、改 SECURITY.md 那一行。
+    #    一句只覆盖一条路的「已修」比不修更危险,所以宁可把漏的地方也写成判据。
+    #    片长**写死 6**,不跟着 `A._RUN` 走:第一版写的是 `A._RUN - 2`,样本跟着常数
+    #    一起缩,`_RUN` 调成 3 也照绿 —— 判据自己没法红,就是个摆设。反向验证逮到的。
+    crumbs = " ".join(KEY[i:i + 6] for i in range(0, len(KEY), 6))
+    assert "已抹掉" not in A._scrub(crumbs), (
+        "切碎到 _RUN 以下也抹得着了 —— 天花板变了,请把上面三处文档一起改掉,"
+        "别留一句过期的「已修」。")
+
+
 def _boom(key):
     raise RuntimeError("自造工具报错时把配置抄了进来:" + key)
