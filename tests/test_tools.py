@@ -1,5 +1,7 @@
 """工具 + 工作目录限制 + 省token(截断/分页)+ 自造工具。"""
 import os
+import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -880,6 +882,82 @@ def test_a_key_cut_in_half_is_still_a_key(ws, monkeypatch):
     assert "已抹掉" not in A._scrub(crumbs), (
         "切碎到 _RUN 以下也抹得着了 —— 天花板变了,请把上面三处文档一起改掉,"
         "别留一句过期的「已修」。")
+
+
+def test_a_secret_that_is_not_a_provider_key_is_scrubbed_too(ws, monkeypatch):
+    """`.env` 里不止 provider key。`GITHUB_TOKEN` 是仓库写权限,漏了比漏 LLM key 更贵。
+
+    `_KEYS` 只装 `PROVIDERS` 表里那 6 个名字。别的东西 `_load_dotenv` 照样塞进
+    `os.environ`,**而且不 pop** —— 于是 `echo %GITHUB_TOKEN%` 一句话拿到明文,
+    `_scrub` 又完全不认识它。实测(假 token):子进程看得见 ✔,抹除不认识 ✘。
+
+    **这不是没人写。** SECURITY.md 那条早就点名了:「范围仅限 Talos 自己的六个 key
+    —— 你环境里的 `GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY` 照样被子进程继承。这是
+    故意的:『像密钥的变量名』是个开集,黑名单在那儿只是表演;`PROVIDERS` 是闭集,
+    枚举得完。」**这个理由对,但它把两样东西说成了一样。** `os.environ` 确实是开集
+    —— 用户 shell 里 export 什么谁也不知道,那一半至今没盖住(见本条末尾)。可
+    `.env` 不是:它带进来什么,`_load_dotenv` 当场逐行看着,**是个闭集**。而
+    `.env.example` 正是文档推荐用户填配置的地方(「就不用每次在终端 $env:... 手动
+    设了」)—— **最常走的那条路,恰好是能枚举的那条**。
+
+    所以规则反着写、挂**名字**不挂值:「像不像密钥」看值才是开集(`GITHUB_TOKEN`
+    里有 TOKEN,`DATABASE_URL` 一个提示字都没有,里面照样躺着密码);而「`.env`
+    带进来的、除了 Talos 自己要读要印的 `TALOS_*`」是闭的。
+
+    **不 pop,只抹。** provider key 能 pop 是因为没人需要它进子进程(请求是 Talos
+    自己发的);`GITHUB_TOKEN` / `DATABASE_URL` 放在 .env 里**就是给子进程用的**,
+    pop 掉等于把 `gh` 和 `psql` 一起弄坏。所以这里只买「回不来」,不买「看不见」。
+    盲发(`curl -d $GITHUB_TOKEN ...`)是 `_EXFIL` 的活,不是这条的。
+
+    **盖不住的那半照旧、也不假装盖住了**:shell 里 export 的 `GITHUB_TOKEN` 不经过
+    `.env`,这条判据管不着,实测仍是明文回到对话里。SECURITY.md 那句话在那一半上
+    是对的 —— 开集就是开集。"""
+    import agent as A
+    TOKEN = "ghp-DECOY-repo-write-token-1111"
+    monkeypatch.setenv("GITHUB_TOKEN", TOKEN)
+    # **按生产的路子建 _KEYS**,不是手工塞一个进去 —— 手工塞等于预设了修复:
+    # 真正漏的地方是 `.env` 的 GITHUB_TOKEN **压根进不了** _KEYS。这样写,
+    # 挑选规则一旦漏掉它,下面那条端到端断言也跟着红。
+    monkeypatch.setattr(A, "_KEYS", A._dotenv_secrets({"GITHUB_TOKEN": TOKEN}))
+
+    cmd = "echo %GITHUB_TOKEN%" if os.name == "nt" else "echo $GITHUB_TOKEN"
+    out, is_err = A.run_tool("run_bash", {"command": cmd})
+    assert not is_err, "命令本身就失败了,这条判据什么也没验:" + out
+    assert "已抹掉" in out, (
+        "既没看到 token 也没看到抹除标记 —— 多半是 echo 根本没取到变量,"
+        "判据在为一件没发生的事发绿灯:" + out)
+    assert TOKEN not in out, "GITHUB_TOKEN 明文从 run_bash 回到了对话里:" + out
+
+    # 挑值的规则本身:名字是开集,`.env` 的内容是闭集,所以按后者挑。
+    got = A._dotenv_secrets({
+        "TALOS_PROVIDER": "deepseek",              # Talos 自己的配置,正常输出里会出现
+        "TALOS_MODEL": "deepseek-v4-flash",        # 够长,但名字说明它不是秘密
+        "GITHUB_TOKEN": TOKEN,                     # 名字里有 TOKEN
+        "DATABASE_URL": "postgres://u:pw3333@h/db",  # 名字里一个提示字都没有
+        "EDITOR": "vim",                           # 太短:抹了会把正常输出糊花
+    })
+    assert set(got) == {"GITHUB_TOKEN", "DATABASE_URL"}, (
+        "挑错了。TALOS_* 是 Talos 自己要印的,短值抹了会糊花正常输出;"
+        f"剩下的一律当秘密。实际挑出:{sorted(got)}")
+
+    # 上面两段测的都是**规则**。把规则接到 `_KEYS` 上的是一句模块级语句,删掉它
+    # 整个修复无声蒸发,而两段都还绿。所以这儿真起一个进程 import 一次。
+    # 不能靠本机的 `.env`:CI 上没有、本机上有 —— 上一次 CI 四格全红就是栽在这个差别上。
+    fake = os.path.join(ws, "envprobe")
+    os.makedirs(fake, exist_ok=True)
+    with open(os.path.join(fake, ".env"), "w", encoding="utf-8") as f:
+        f.write("TALOS_PROVIDER=deepseek\nGITHUB_TOKEN=" + TOKEN + "\n")
+    r = subprocess.run(
+        [sys.executable, "-c", "import agent, os, sys;"
+         "sys.stdout.write(repr(sorted(k for k, v in agent._KEYS.items() if v == sys.argv[1])))",
+         TOKEN],
+        cwd=fake, capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=os.path.dirname(A.__file__),
+                 TALOS_WORKSPACE=fake))
+    assert r.returncode == 0, "import agent 就崩了,这条判据什么也没验:" + r.stderr[-800:]
+    assert "GITHUB_TOKEN" in r.stdout, (
+        "`.env` 里的 GITHUB_TOKEN 没进 _KEYS —— 挑选规则对了,但没接上去,"
+        "于是 `echo %GITHUB_TOKEN%` 的输出照样明文回到对话里。stdout=" + r.stdout)
 
 
 def _boom(key):

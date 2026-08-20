@@ -43,6 +43,10 @@ import time
 # 判据不是"这个变量危不危险",是"**项目文件该不该说了算**"。这两个都不该。
 _DOTENV_NEVER = ("TALOS_AUTOTEST", "TALOS_AUTOCOMMIT", "TALOS_HOME", "TALOS_WORKSPACE")
 
+_RUN = 10     # 抹除的最短连续片段。见 _scrub 天花板 ③:真 key 都 ≥ 20 字符,对半
+              # 切开每半仍 ≥ 10,所以最自然的那种切法挡得住。也是 .env 值的长度下限。
+_DOTENV = {}  # `.env` 带进来的全部键值,给下面挑秘密用
+
 def _load_dotenv(path: str = ".env") -> None:
     """Load KEY=VALUE lines from a .env file into the environment (real env vars win),
     so you set provider + key ONCE in .env instead of every shell session.
@@ -59,7 +63,9 @@ def _load_dotenv(path: str = ".env") -> None:
                 if k.upper() in _DOTENV_NEVER:
                     skipped.append(k)
                     continue
-                os.environ.setdefault(k, v.strip().strip('"').strip("'"))
+                v = v.strip().strip('"').strip("'")
+                os.environ.setdefault(k, v)      # 真环境变量优先
+                _DOTENV[k] = v                   # 记的是**文件里**那份:`type .env` 打出来的就是它
     if skipped:
         # ASCII only: this runs before stdout is reconfigured to UTF-8, and a GBK console
         # would raise UnicodeEncodeError on the way out — crashing at the very first step.
@@ -90,6 +96,30 @@ PROVIDER = os.environ.get("TALOS_PROVIDER", "claude").lower()
 # 挡不住 create_tool —— 进程内 exec 的代码照样读得到 _KEYS。加密同理:存储形态
 # 换不掉运行时形态,主进程必须握着明文才发得出请求。这里买的是「子进程看不见」。
 _KEYS = {e: os.environ.pop(e) for e, _, _ in PROVIDERS.values() if e in os.environ}
+
+def _dotenv_secrets(env: dict) -> dict:
+    """`.env` 带进来的、不该出现在工具结果里的值。
+
+    **按名字挑,而且规则是反着写的。** 「这个名字像不像密钥」是开集:`GITHUB_TOKEN`
+    里有 TOKEN,`DATABASE_URL` 一个提示字都没有,里面照样躺着密码 —— 追着名字列白名单
+    就是 `_EXFIL` 那种表演。但 **`.env` 的内容本身是闭集**:它带进来什么,这儿当场就
+    知道。所以除了 Talos 自己要读要印的 `TALOS_*`,一律当秘密。
+
+    长度下限是为了别糊花正常输出(`TALOS_PROVIDER=deepseek` 那种),顺带跟 `_scrub`
+    的窗口对齐 —— 比 `_RUN` 短的值本来也进不了窗口那一轮。
+
+    天花板:记的是**文件里**那份值。真环境变量覆盖掉 `.env` 的时候,shell 里那份不在
+    这儿 —— 那是用户在 `.env` 之外自己设的,不归这条管。"""
+    return {k: v for k, v in env.items()
+            if not k.upper().startswith("TALOS_") and len(v) >= _RUN}
+
+
+# **不 pop,只抹。** provider key 能 pop,是因为没人需要它进子进程 —— 请求是 Talos
+# 自己在进程内发的。`GITHUB_TOKEN` / `DATABASE_URL` 放进 `.env` **就是给子进程用的**,
+# pop 掉等于把用户的 `gh` 和 `psql` 一起弄坏。所以这里只买「回不来」,不买「看不见」;
+# 盲发(`curl -d $GITHUB_TOKEN ...`)是 `_EXFIL` 的活。判据:
+# tests/test_tools.py::test_a_secret_that_is_not_a_provider_key_is_scrubbed_too
+_KEYS.update({k: v for k, v in _dotenv_secrets(_DOTENV).items() if k not in _KEYS})
 
 SYSTEM = (
     "You are Talos, a minimal coding agent working inside the user's project "
@@ -1109,9 +1139,6 @@ def _bad_args(name: str, args) -> str | None:
                     f"也没有内容可以让用户在权限提示里看见。{_schema_hint(name)}")
     return None
 
-
-_RUN = 10   # 抹除的最短连续片段。见 _scrub 天花板 ③:真 key 都 ≥ 20 字符,
-            # 对半切开每半仍 ≥ 10,所以最自然的那种切法挡得住。
 
 def _scrub(s: str) -> str:
     """把 API key 的**明文值**从任何工具结果里抹掉。
