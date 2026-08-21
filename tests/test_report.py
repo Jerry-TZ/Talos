@@ -169,3 +169,37 @@ def test_the_report_survives_no_data_and_bad_lines(ws, monkeypatch):
         f.write('{"q": "c"}\n')                                          # 什么都没有
     html = MR.build()
     assert "注入过技能正文</b> n=1" in html, f"脏行把好行也带走了:{html[-600:]}"
+
+
+def test_the_rot_checker_cannot_be_fooled_by_a_nearby_unrelated_name():
+    """`memory_rot.py` 判「这条行号今天还对吗」,候选名字**只能取紧贴括号前面那一小段**。
+
+    第一版拿整行的标识符去比。而它要查的那两条记忆各提了十几个名字
+    (`check_permission` / `_policy` / `bypass` / `acceptEdits` / `run_bash` / …),
+    在一个 3100 行的文件里,**任何一个数字附近总能找到其中之一** —— 于是两条
+    确实已经失效 396~538 行的声明,被它判成了「成立」。手查的结果对不上才发现。
+
+    **一条没有区分力的判据,和没有判据是一回事,而它看起来像有。** 这是这个项目
+    第三次栽在同一个形状上(第三十九、四十二节:代码没错,关于数据的那句话错了)。
+
+    判据构造成最容易骗过它的样子:一条**声明错行号**的记忆,里面塞满真实存在的名字,
+    其中一个恰好就在被声明的那一行附近。宽进的那一版会说「成立」。"""
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "benchmarks", "selflearn"))
+    import memory_rot as M
+
+    lines = M._src("agent.py")
+    assert lines, "agent.py 读不到,这条判据没法成立"
+    # 找一个真实存在的调用点,把它的行号安到**另一个**名字头上 —— 经典的「腐烂」形状:
+    # 名字是真的、行号是真的,只是它们不再是同一回事。
+    real = next(i for i, ln in enumerate(lines, 1) if "_prune_old_tool_results(" in ln)
+    fake = ("agent.py 权限判定:check_permission(约%d行)—— 附近还有 _prune_old_tool_results、"
+            "maybe_compact、run_bash、spawn_subagent、_policy 一起工作" % real)
+    got = M.check_line_claims(fake)
+    assert got, "没解析出行号声明"
+    n, name, fname, actual, ok = got[0]
+    assert name == "check_permission", f"取错了名字:{name}(该取紧贴括号前面那个)"
+    assert not ok, (f"把一条错的行号判成了成立 —— 它拿附近**别的**名字交了差。"
+                    f"声明 {n},而 check_permission 实际在 {actual}")

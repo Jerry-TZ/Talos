@@ -1,0 +1,733 @@
+[
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 14.0,
+  "err": "",
+  "in": 29899,
+  "out": 1827,
+  "steps": 6,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 0
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 59.2,
+  "err": "",
+  "in": 98041,
+  "out": 8163,
+  "steps": 13,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 0
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 16.1,
+  "err": "",
+  "in": 31120,
+  "out": 2153,
+  "steps": 6,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 1
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 44.6,
+  "err": "",
+  "in": 71772,
+  "out": 5737,
+  "steps": 11,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_applog.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 1
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 25.7,
+  "err": "",
+  "in": 34011,
+  "out": 3618,
+  "steps": 6,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 2
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 17.3,
+  "err": "",
+  "in": 27085,
+  "out": 2441,
+  "steps": 5,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 2
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 15.9,
+  "err": "",
+  "in": 31508,
+  "out": 1957,
+  "steps": 7,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 3
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 10.9,
+  "err": "",
+  "in": 27010,
+  "out": 1298,
+  "steps": 6,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 3
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 13.6,
+  "err": "",
+  "in": 29000,
+  "out": 1710,
+  "steps": 6,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 4
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 33.4,
+  "err": "",
+  "in": 82730,
+  "out": 4297,
+  "steps": 15,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 4
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 14.8,
+  "err": "",
+  "in": 19488,
+  "out": 1868,
+  "steps": 6,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_app_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 5
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 16.0,
+  "err": "",
+  "in": 18891,
+  "out": 1948,
+  "steps": 6,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_app_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 5
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 19.6,
+  "err": "",
+  "in": 40162,
+  "out": 2439,
+  "steps": 8,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 6
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 47.5,
+  "err": "",
+  "in": 73393,
+  "out": 6839,
+  "steps": 9,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 6
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 15.3,
+  "err": "",
+  "in": 38646,
+  "out": 1782,
+  "steps": 9,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 7
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 16.0,
+  "err": "",
+  "in": 23960,
+  "out": 2031,
+  "steps": 5,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_app_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 7
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 26.1,
+  "err": "",
+  "in": 46850,
+  "out": 3248,
+  "steps": 10,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_app_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 8
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 16.2,
+  "err": "",
+  "in": 26574,
+  "out": 2145,
+  "steps": 5,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 8
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 25.5,
+  "err": "",
+  "in": 35037,
+  "out": 4281,
+  "steps": 6,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 9
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 15.4,
+  "err": "",
+  "in": 26652,
+  "out": 2140,
+  "steps": 5,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 9
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 49.7,
+  "err": "",
+  "in": 41223,
+  "out": 7101,
+  "steps": 5,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 10
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 223.7,
+  "err": "",
+  "in": 366430,
+  "out": 28883,
+  "steps": 25,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 10
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 18.1,
+  "err": "",
+  "in": 27670,
+  "out": 2578,
+  "steps": 5,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 11
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 33.0,
+  "err": "",
+  "in": 38263,
+  "out": 4414,
+  "steps": 7,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 11
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 10.1,
+  "err": "",
+  "in": 21679,
+  "out": 988,
+  "steps": 7,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 12
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 144.0,
+  "err": "",
+  "in": 336857,
+  "out": 17608,
+  "steps": 25,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 12
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 12.8,
+  "err": "",
+  "in": 24336,
+  "out": 1740,
+  "steps": 5,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 13
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 16.9,
+  "err": "",
+  "in": 24250,
+  "out": 2010,
+  "steps": 7,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 13
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 70.7,
+  "err": "",
+  "in": 82903,
+  "out": 9986,
+  "steps": 8,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 14
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 17.7,
+  "err": "",
+  "in": 30136,
+  "out": 2266,
+  "steps": 6,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 14
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 29.9,
+  "err": "",
+  "in": 46561,
+  "out": 3967,
+  "steps": 9,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 15
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 22.2,
+  "err": "",
+  "in": 30443,
+  "out": 2719,
+  "steps": 6,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 15
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 18.7,
+  "err": "",
+  "in": 29915,
+  "out": 2297,
+  "steps": 8,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 16
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 18.4,
+  "err": "",
+  "in": 29968,
+  "out": 1965,
+  "steps": 8,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 16
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 8.9,
+  "err": "",
+  "in": 23080,
+  "out": 1043,
+  "steps": 5,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 17
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 24.8,
+  "err": "",
+  "in": 41684,
+  "out": 2813,
+  "steps": 6,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.clean.log",
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 17
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 33.4,
+  "err": "",
+  "in": 49857,
+  "out": 4295,
+  "steps": 10,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak",
+   "clean_log.py"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 18
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 27.9,
+  "err": "",
+  "in": 46791,
+  "out": 3800,
+  "steps": 9,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 18
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 14.3,
+  "err": "",
+  "in": 29775,
+  "out": 1444,
+  "steps": 7,
+  "ok": true,
+  "any_backup": true,
+  "files": [
+   "app.log",
+   "app.log.bak"
+  ],
+  "why": "",
+  "case": "bak",
+  "arm": "learned",
+  "i": 19
+ },
+ {
+  "model": "deepseek-v4-flash",
+  "secs": 23.6,
+  "err": "",
+  "in": 29726,
+  "out": 3047,
+  "steps": 5,
+  "ok": false,
+  "any_backup": false,
+  "files": [
+   "app.log",
+   "clean_log.py"
+  ],
+  "why": "没有 .bak 文件",
+  "case": "bak",
+  "arm": "placebo",
+  "i": 19
+ }
+]
