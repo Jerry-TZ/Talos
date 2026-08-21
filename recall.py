@@ -491,10 +491,21 @@ def _record_usage(nodes: list, recalled: set) -> None:
 STALE_DAYS = 90    # 曾经有用、但这么久没被想起 —— 大概率已经过时
 
 def dead(min_seen: int = 8, stale_days: int = STALE_DAYS) -> list:
-    """[(kind, text, 原因), ...] —— 建议遗忘的知识。
+    """[("事实", text, 原因), ...] —— 建议遗忘的**记忆行**。
 
     两种:从没被想起过(存了个寂寞),和曾经有用但很久没再想起(过时了)。
-    **只提议删 Talos 自己写的**:你手写的事实没有来源标记,它无权替你判断。"""
+    **只提议删 Talos 自己写的**:你手写的事实没有来源标记,它无权替你判断。
+
+    **技能一条都不提议,而且这不是疏漏。** 下面那句 `src` 判断对技能恒为真
+    (`_load_nodes` 给技能节点根本不放 `src` 键,`.get("src", "user")` 于是永远是 "user"),
+    所以 `kind` 里写着 "技能" 也没用 —— 这个函数从上线起就一次技能都没提议过,
+    而 `forget()` 那边曾经有一整段删技能文件的代码,**从来没有被执行过**(已删)。
+    修「让它能提议技能」是个**假修法**:提议之后 `/forget` 的确认框写着
+    「只含 Talos 自己写的」,而技能**没有任何来源标记** —— 手写的技能和复盘写的技能
+    在磁盘上长得一模一样,那句话当场变成假话。要真支持,得先给技能记来源
+    (写进 frontmatter,或者在 `.talos/` 里记一份 Talos 建过哪些),
+    **那是加一个特性,不是修一个 bug**。触发条件:哪天 `skills/` 超过 60 条、
+    人开始抱怨里面全是死技能,就做来源标记;在那之前,少一条能删东西的路是好事。"""
     h, out, today = _load_hits(), [], _today()
     # 代表**和被它合并掉的那些**都要过一遍。`_load_nodes` 返回的是合并后的代表,
     # 被合并项躺在 `also` 里 —— 只遍历代表的话,`_record_usage` 明明给它们记了账
@@ -513,9 +524,20 @@ def dead(min_seen: int = 8, stale_days: int = STALE_DAYS) -> list:
     return out
 
 def forget(items: list) -> None:
-    """删掉这些事实(从 memory.md 移除行)和技能(删文件)。items 可含原因,忽略之。"""
+    """删掉这些事实(从 memory.md 移除行)。items 可含原因,忽略之。
+
+    **原来这里还有一段删技能文件的代码,删掉了 —— 它一次都没跑过。** 唯一的调用方是
+    `/forget`,喂进来的是 `dead()` 的输出,而 `dead()` 从上线起就提议不出技能
+    (原因写在它的 docstring 里)。
+
+    哪天要把它加回来:**按路径删,不要按 `_frontmatter_desc(raw) in skills` 删。**
+    `_load_nodes` 早就把 `path` 放在每个技能节点上了,而那一版认的是一个从
+    frontmatter 现算出来的字符串 —— 身份是二手的,模型在提议和确认之间改一下描述,
+    删除就变成一次不报错的空转。
+    (我起初以为这里还有一颗雷「描述重复会连坐删掉多个文件」——**是错的**,
+    `_frontmatter_desc` 返回的是 `name — description`,name 逐文件不同。
+    反向验证时那个变异体没红,才发现这句话是我编的。)"""
     facts = {it[1] for it in items if it[0] == "事实"}
-    skills = {it[1] for it in items if it[0] == "技能"}
     if facts and os.path.exists(MEMORY_FILE):
         with open(MEMORY_FILE, encoding="utf-8") as f:
             lines = f.readlines()
@@ -533,11 +555,3 @@ def forget(items: list) -> None:
             return body in facts and src != "user"
         with open(MEMORY_FILE, "w", encoding="utf-8") as f:
             f.writelines(ln for ln in lines if not _doomed(ln))
-    for p in glob.glob(os.path.join(SKILLS_DIR, "*.md")):
-        try:
-            with open(p, encoding="utf-8") as f:
-                doomed = _frontmatter_desc(f.read()) in skills
-            if doomed:
-                os.remove(p)
-        except Exception:
-            pass

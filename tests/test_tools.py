@@ -1077,3 +1077,91 @@ def test_a_dotenv_secret_never_mangles_normal_output(ws, monkeypatch):
 
 def _boom(key):
     raise RuntimeError("自造工具报错时把配置抄了进来:" + key)
+
+
+def test_edit_file_writes_back_in_the_encoding_it_read(ws):
+    """改一个字,不许顺手把整个文件的编码换掉。
+
+    PowerShell 的 `>` 默认写 UTF-16LE,不少编辑器给 UTF-8 加 BOM。`edit_file` 原来
+    读得对(`_read_full` 专门处理过这两种),**写回时一律 utf-8 无 BOM** —— 一次编辑之后
+    PowerShell 再读那份日志就是乱码,而屏幕上只说了一句 `edited`。
+    `_read_full` 的 docstring 当年已经写着「别把乱码写回原文件」,**想到了内容,没想到编码。**
+
+    判据是**字节级**的:解码之后比对会让这个 bug 完全隐形 —— 两边解出来都是同一串文本。"""
+    import agent as A, os
+    for enc, bom in (("utf-16", b"\xff\xfe"), ("utf-8-sig", b"\xef\xbb\xbf"), ("utf-8", b"")):
+        p = os.path.join(ws, "note-%s.txt" % enc)
+        with open(p, "w", encoding=enc, newline="") as f:
+            f.write("旧值 = 1\n第二行\n")
+        A.edit_file(p, "旧值 = 1", "新值 = 2")
+        raw = open(p, "rb").read()
+        assert raw.startswith(bom), \
+            f"{enc} 的文件被 edit 之后 BOM/字节序标记没了(开头是 {raw[:4]!r})—— 编码被换掉了"
+        assert open(p, encoding=enc).read().startswith("新值 = 2"), f"{enc}: 内容没改对"
+
+
+def test_a_dotenv_line_with_no_key_does_not_take_the_whole_program_down(tmp_path):
+    """`.env` 里手滑写成 `=value`(等号在行首)—— 原来整个 `import agent` 当场失败。
+
+    `os.environ.setdefault("", v)` 在 Windows 上抛 `ValueError: illegal environment
+    variable name`,而 `_load_dotenv()` 是在**模块导入时**跑的、外面没有 try。
+    于是 Talos 连启动都启动不了,而 traceback 指着 `os.environ` 那一行,
+    **看不出病根是 `.env` 里的哪一行**。"""
+    import agent as A, os
+    p = tmp_path / ".env"
+    p.write_text("=oops\nTALOS_DEMO_OK=1\n", encoding="utf-8")
+    A._load_dotenv(str(p))                                   # 不许抛
+    assert os.environ.get("TALOS_DEMO_OK") == "1", "跳过坏行之后,后面的行还得照常读进来"
+    os.environ.pop("TALOS_DEMO_OK", None)
+    assert "" not in os.environ
+
+
+def test_a_quoted_search_string_is_not_mistaken_for_a_bash_command(ws, monkeypatch):
+    """引号里的是**要搜的字符串**,不是要执行的命令。
+
+    `findstr /c:"$(" app.js`(在 js 里找 jQuery 的 `$(`)和 `findstr "| grep" notes.txt`
+    都是完全合法的 cmd,原来被这道闸一律拒掉 —— 而拒绝的话术是「这是 cmd.exe,不是 bash」,
+    模型照着改也改不出能跑的命令来。
+
+    另一半同样重要:**引号外面的照旧要拦。** 只断言前一半的话,把整条 `_BASHISM` 删掉
+    也会绿。"""
+    import agent as A
+    monkeypatch.setattr(A, "WORKSPACE", ws)
+    for ok in ('findstr /c:"$(" app.js', 'findstr "| grep" notes.txt', 'echo "ls -la" > x.txt'):
+        A.run_bash(ok)                                       # 不许抛
+    for bad in ("echo hi & pwd", "dir | wc -l", "cat notes.txt", "echo $(dir)"):
+        try:
+            A.run_bash(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"`{bad}` 是真的 bashism,这道闸放过去了")
+
+
+def test_a_tool_whose_required_is_not_a_list_is_refused_at_registration(ws, monkeypatch):
+    """`required` / `parameters` 的**值**是模型现写的,写歪了有三种死法,都要在注册这一步拦。
+
+    `'required': None` 最狠:`_bad_args` 里 `for k in None` 抛 TypeError,而 `_bad_args`
+    **跑在 `run_tool` 的 try 之外**(它必须在 `check_permission` 之前)—— 整轮当场没了。
+    `'required': 'path'` 不崩,更阴:`_bad_args` 逐字符迭代,回给模型
+    「少了必填参数 ['p','a','t','h']」,一句它没法照着改的话。
+    两者再加 dict,还都会被 `tool_specs()` 原样发给接口,严格的 provider 直接 400。"""
+    import agent as A, os
+    monkeypatch.setattr(A, "TOOLS_DIR", ws)
+    monkeypatch.setattr(A, "TOOLS", dict(A.TOOLS))
+    for i, bad in enumerate(('"path"', "None", '{"path": 1}', "42")):
+        p = os.path.join(ws, "bad%d.py" % i)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write("TOOL = {'description': 'd', 'parameters': {'path': {'type': 'string'}}, "
+                    "'required': %s}\ndef run(args): return 'ok'\n" % bad)
+        try:
+            A._load_tool(p)
+        except ValueError as e:
+            assert "required" in str(e), f"required={bad} 拒对了,但报错没告诉模型该改哪个键"
+            continue
+        raise AssertionError(f"required={bad} 被注册进去了 —— 下游三处各有一种坏法")
+    # 正常的那个照旧过 —— 只断言上面的话,把这道检查写成 `raise` 也会绿
+    good = os.path.join(ws, "good.py")
+    with open(good, "w", encoding="utf-8") as f:
+        f.write("TOOL = {'description': 'd', 'parameters': {'path': {'type': 'string'}}, "
+                "'required': ['path']}\ndef run(args): return 'ok'\n")
+    assert A._load_tool(good) == "good"

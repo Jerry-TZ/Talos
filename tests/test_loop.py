@@ -709,6 +709,40 @@ def test_prune_old_tool_results():
     A._prune_old_tool_results(m2)
     assert recent["content"] == "Y" * 1000                       # 最近的不动
 
+
+def test_reading_less_can_cost_more_than_reading_more():
+    """这道闸只省略 **>600 字符**的工具输出 —— 门槛底下的一条都不省,于是它们整轮都在被
+    重发,累计量随步数**没有上限**;门槛上面的最多只有最近 8 条消息在场,是个常数。
+
+    量出来的(`benchmarks/context/resend_cost.py`:脚本化模型 + 真的 `agent_turn`,
+    步数固定 32,只动每次 `read_file` 回来多少):
+
+    | 单次读回 | 整轮实际发出 |
+    |---|---|
+    | 501 字符(门槛底下) | 591,503 |
+    | 1002 字符(门槛上面) | 459,775 |
+
+    **读回来的量翻一倍,整轮反而少发 22%。** 这是第十九节「让模型少读省不下钱」缺的那半:
+    省不下钱**不是**因为「重发不在乎大小」,而是因为有两道机制在抵消读取量(这道门槛
+    和 `maybe_compact`)—— 而其中一道带门槛,门槛底下方向是反的。
+
+    判据不跑 agent 循环:跑一遍要一整套假客户端,而同一件事剪完数一次字符就能钉住 ——
+    **同样长的历史,小输出剩下的比大输出多。**"""
+    import agent as A
+    def hist(size):
+        return [m for _ in range(40) for m in
+                ({"role": "assistant", "content": ""}, {"role": "tool", "content": "Z" * size})]
+    small, big = hist(500), hist(1000)
+    A._prune_old_tool_results(small)
+    A._prune_old_tool_results(big)
+    s, b = A._ctx_chars(small), A._ctx_chars(big)
+    assert s > b, (f"读一半的量剪完剩 {s} 字符,读两倍的剩 {b} —— 门槛的反常不见了。"
+                   f"门槛(现在 600)动过的话,这条要连同 FINDINGS 里那两个数一起重量。")
+    # 小的那份**一条都没被省略**,这才是它没有上限的原因 —— 只断言 s > b 的话,
+    # 把门槛调到 0(全省略)也可能碰巧还满足,而那是完全另一种行为。
+    assert not any(m["content"].startswith("[已省略") for m in small if m["role"] == "tool"), \
+        "门槛底下的工具输出被省略了 —— 那这条判据测的就不是它原本要测的那件事"
+
 def test_chat_retries_on_busy(monkeypatch):
     import agent as A
     monkeypatch.setattr(A.time, "sleep", lambda *a: None)
@@ -1587,3 +1621,36 @@ def test_pages_counts_lines_the_same_way_the_pager_splits_them(ws, monkeypatch):
         real = len(open(p, encoding="utf-8", errors="replace").read().splitlines())
         want = max(1, -(-real // A.READ_MAX_LINES))
         assert A._pages(p) == want, f"分隔符 {sep!r}: _pages={A._pages(p)} 而真实要翻 {want} 次"
+
+
+def test_a_capped_reflection_does_not_eat_the_next_turns_reflection(ws, monkeypatch):
+    """复盘自己撞了步数上限,赔掉的是**下一轮**的学习。
+
+    `state["capped"]` 只描述「刚刚这一轮」。repl 的顺序是:先 `state.pop("capped")` 决定
+    这一轮要不要复盘,**然后**才调 `reflect()` —— 而 `reflect()` 原来把同一个 `state`
+    递进内层 `agent_turn`。复盘撞顶写上的 `capped=True` 于是没人来 pop,一直留到下一轮:
+    下一轮干干净净跑完,却被打上「⏭ 这轮撞了步数上限,跳过复盘」。
+
+    `_child_state` 本来就是为这件事写的(它的注释里举的例子就是 `capped`),
+    只是当时只挂到了 `spawn_subagent` 那条路上 —— **同一条不变式两条路,只守了一条。**
+
+    判据直接断在 `state` 上,不断在屏幕输出上:那句提示是给人看的,而真正决定行为的是
+    这个键还在不在。"""
+    import agent as A
+    monkeypatch.setattr(A, "MAX_STEPS", 2)
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "_tag_new_memory", lambda *a, **k: 0)
+    monkeypatch.setattr(A, "_known_skills", lambda *a, **k: "")
+    monkeypatch.setattr(A, "_skill_stat", lambda *a, **k: ())
+    # 每一步都要一次工具调用 —— 于是复盘这一轮必然撞 MAX_STEPS
+    spin = [_msg(tool_calls=[_tc("read_file", '{"path": "nope.txt"}')]) for _ in range(9)]
+    # `tok` / `trace` 先摆上 —— 真实顺序里 repl 是先跑完一轮 `agent_turn`(它 setdefault
+    # 出这两个)才叫复盘的,而 `_child_state` 只搬**已经存在**的键。少了这一步测的就是
+    # 一个现实里到不了的状态。
+    state = {"mode": "bypass", "allow": set(), "view": "normal", "asked": "t",
+             "tok": {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0}, "trace": []}
+    A.reflect(_Client(spin), "m", [{"role": "user", "content": "干了点活"}], state)
+    assert not state.get("capped"), \
+        "复盘撞顶把 capped 留在了父 state 上 —— 下一轮会被误判成「撞了上限」而跳过复盘"
+    # 而复盘的 token 仍然要算进这次请求的总账(`tok` 是 STATE_SHARED,按引用共享)
+    assert state["tok"]["steps"] >= 2, "复盘的消耗没算进父的总账 —— 隔离隔过头了"

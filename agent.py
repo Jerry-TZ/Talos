@@ -60,6 +60,13 @@ def _load_dotenv(path: str = ".env") -> None:
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 k = k.strip()
+                if not k:
+                    # `=foo` 这样的一行:`os.environ.setdefault("", ...)` 在 Windows 上抛
+                    # `ValueError: illegal environment variable name`,而这个函数是在
+                    # **模块导入时**跑的、外面没有 try —— 于是 `.env` 里一个手滑的空键
+                    # 让 `import agent` 整个失败,Talos 连启动都启动不了,
+                    # 而 traceback 指的是 `os.environ`,不是那一行。跳过就够了。
+                    continue
                 if k.upper() in _DOTENV_NEVER:
                     skipped.append(k)
                     continue
@@ -516,7 +523,17 @@ BASH_MAX_CHARS = 4000  # cap run_bash output sent to the model
 READ_MAX_BYTES = 25 * 1024 * 1024   # refuse to slurp a multi-GB file into RAM (read_file is ungated)
 
 def _read_full(path: str) -> str:
-    """Read a text file, tolerating what Windows tools actually produce.
+    return _read_full_enc(path)[0]
+
+def _read_full_enc(path: str) -> tuple:
+    """Read a text file, tolerating what Windows tools actually produce. -> (文本, 编码名)。
+
+    **编码要跟着文本一起返回**,因为 `edit_file` 读完还要写回去:它原来拿到的只有文本,
+    写回时 `write_file` 一律 utf-8 —— 于是**改一个字,顺手把整个文件的编码换掉**。
+    PowerShell 的 `>` 默认写 UTF-16LE,一份这样的日志被 edit 一次就变成 UTF-8,
+    再被 PowerShell 读回去就是乱码;带 BOM 的 UTF-8 同理,BOM 被静默剥掉。
+    下面这段 docstring 当年已经想到「别把乱码写回原文件」了,**没想到把编码写回错**。
+    判据:tests/test_tools.py::test_edit_file_writes_back_in_the_encoding_it_read
 
     PowerShell's `>` writes UTF-16LE by default, and plenty of editors add a
     UTF-8 BOM — decode those properly rather than crashing (or worse, handing
@@ -553,7 +570,7 @@ def _read_full(path: str) -> str:
     with open(full, "rb") as f:
         b = f.read(READ_MAX_BYTES + 1)
     if b[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 first: it is full of NUL bytes
-        return b.decode("utf-16", errors="replace")
+        return b.decode("utf-16", errors="replace"), "utf-16"
     if b"\x00" in b[:8192]:
         # Decoding this would hand back mojibake the model reads as content — it once
         # "verified" a .docx that way and never noticed it had read nothing.
@@ -561,7 +578,10 @@ def _read_full(path: str) -> str:
             f"{path} 是二进制文件,read_file 读不了。用对应的库在 run_bash 里读,例如 "
             "docx: `python -c \"import docx; print(docx.Document('f.docx').tables[0].rows[0].cells[0].text)\"`;"
             "xlsx 用 openpyxl、图片用 PIL。想改它也不能用 edit_file —— 用库写。")
-    return b.decode("utf-8-sig", errors="replace")
+    # `utf-8-sig` 解码时会吃掉 BOM;编码时会写回 BOM。**所以这两个名字不能混用** ——
+    # 一份没有 BOM 的文件如果报成 "utf-8-sig",写回去就凭空多一个 BOM。按开头三字节分。
+    return (b.decode("utf-8-sig", errors="replace"),
+            "utf-8-sig" if b[:3] == b"\xef\xbb\xbf" else "utf-8")
 
 def read_file(path: str, offset: int = 0, limit=None) -> str:
     lines = _read_full(path).splitlines(keepends=True)
@@ -637,7 +657,9 @@ def _autocommit(full: str) -> str:
 
 _VERIFY_NAME = re.compile(r"^(verify|validate|check)[\w-]*\.py$", re.IGNORECASE)
 
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
+    # `encoding` **不在工具 schema 里**(TOOLS 里的 properties 是单独写的),模型看不见也
+    # 传不了 —— 它只服务一个调用方:`edit_file` 要把文件按原来的编码写回去。
     full = _in_workspace(path)
     # Only the first SKILL_BODY_MAX characters of a skill are ever injected, so a long one
     # delivers its frontmatter, its "when to use" list, and half a code block cut off inside a
@@ -676,7 +698,7 @@ def write_file(path: str, content: str) -> str:
                          "代码,跑两遍一致什么也证明不了 —— 把你**将要报告的那个数字**写进 assert("
                          "分组之和 == 总数 这类不变量最好),或者别叫 verify/check/validate。")
     os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
-    with open(full, "w", encoding="utf-8", newline="") as f:
+    with open(full, "w", encoding=encoding, newline="") as f:
         f.write(content)                                # newline="": no \n -> \r\n translation, so
     # Every .py write used to append a nudge: "next time use create_tool instead". Measured over
     # 6 real tasks it fired 12 times and converted 0, so it is gone rather than reworded. By the
@@ -686,7 +708,7 @@ def write_file(path: str, content: str) -> str:
     return f"wrote {len(content)} chars to {path}"      # what the model wrote is what edit_file reads back
 
 def edit_file(path: str, old: str, new: str) -> str:
-    text = _read_full(path)                             # FULL read — a truncated read would corrupt the edit
+    text, enc = _read_full_enc(path)                    # FULL read — a truncated read would corrupt the edit
     if old not in text and "\r\n" in text:
         # Models emit \n; a file written on Windows by anything else holds \r\n. Retry in the
         # file's own line endings rather than reporting "not found" on text that is right there.
@@ -699,7 +721,8 @@ def edit_file(path: str, old: str, new: str) -> str:
                          "old 必须和文件里的字符完全一致(包括缩进和空行)")
     if n > 1:
         raise ValueError(f"`old` string is not unique ({n} matches) — add more surrounding context")
-    write_file(path, text.replace(old, new, 1))     # 被拒会抛,不会静默变成 "edited"
+    # `enc` 原样带回去 —— 改一个字不该顺手换掉整个文件的编码。见 `_read_full_enc`。
+    write_file(path, text.replace(old, new, 1), enc)   # 被拒会抛,不会静默变成 "edited"
     return f"edited {path}"
 
 # cmd.exe silently does something else with these, or errors uselessly. Name the equivalent.
@@ -707,6 +730,7 @@ _BASHISM = re.compile(
     r"\$\("                                                  # command substitution, anywhere
     r"|(?:^|[|&;]\s*)(ls|pwd|cat|grep|wc|head|tail|awk|sed|uniq|touch|which|export|source)\b",
     re.IGNORECASE)                                           # …the rest only in command position
+_QUOTED = re.compile(r'"[^"\n]*"')     # 成对的双引号段 —— 里面是搜索串,不是命令,见 run_bash
 _BASH_HINTS = {
     "wc": "数行数用 `find /c /v \"\"`。", "ls": "列目录用 `dir`。", "pwd": "当前目录用 `chdir`。",
     "cat": "看文件用 read_file 工具。", "grep": "搜内容用 `findstr`。", "export": "设变量用 `set`。",
@@ -733,7 +757,14 @@ def run_bash(command: str) -> str:
     # for now; real isolation (WSL2/Docker) is a later step, if ever needed.
     import subprocess
     if os.name == "nt":
-        bashism = _BASHISM.search(command)
+        # **先把双引号里的内容挖空再找。** 引号里的是**要搜的字符串**,不是要执行的命令 ——
+        # `findstr /c:"$(" app.js`(在 js 里找 jQuery 的 `$(`)和 `findstr "| grep" notes.txt`
+        # 原来都被这道闸拒了,而它们是完全合法的 cmd。挖空而不是删掉,是为了让偏移量不变,
+        # 报错里 `bashism.group(0)` 指的还是原命令里那一段。
+        # 引号不成对时(`echo "$(`)剩下的部分照旧被扫 —— 拿不准就拦,这道闸的代价是
+        # 模型换个写法,漏掉的代价是一条静默跑歪的命令。
+        bashism = _BASHISM.search(_QUOTED.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"',
+                                              command))
         if bashism:
             hint = _BASH_HINTS.get(bashism.group(1) or bashism.group(0), "")
             raise ValueError(f"这是 cmd.exe,不是 bash —— `{bashism.group(0)}` 用不了。{hint}"
@@ -820,6 +851,24 @@ def _load_tool(path: str) -> str:
         # providers silently guessed their way past and strict ones reject outright.
         required = required or props.get("required", [])
         props = props["properties"]
+    # **形状也要查,不只是「在不在」。** 上面那两条只保证 `TOOL` 是 dict、`run` 能调,
+    # 而 `required` / `parameters` 的**值**是模型现写的,三种写歪的方式各有各的死法:
+    #   `'required': 'path'`  → `_bad_args` 逐字符迭代,回给模型「少了必填参数
+    #                            ['p','a','t','h']」—— 一句它没法照着改的话
+    #   `'required': None`    → `_bad_args` 里 TypeError,而它**跑在 run_tool 的 try 之外**
+    #                            (见 `_bad_args` 的 docstring:必须在 check_permission 之前),
+    #                            整轮当场没了
+    #   两者 + dict           → `tool_specs()` 把它原样发给接口,严格的 provider 直接 400
+    # 都在注册这一步拦掉:一个地方,四个下游全好了。报错沿用上面那条 —— 模型见过一次的
+    # 格式,第二次照着补最省事。
+    if not isinstance(props, dict) or not isinstance(required, list) \
+            or not all(isinstance(k, str) for k in required):
+        raise ValueError(
+            f"工具 {name} 的 TOOL 形状不对:'parameters' 必须是参数名到 schema 的**字典**,"
+            f"'required' 必须是**参数名字符串的列表**(没有必填参数就写 [])。"
+            f"收到的是 parameters={type(props).__name__} / required={required!r}。\n"
+            "TOOL = {'description': '一句话说明何时用', 'parameters': {'参数名': {'type': 'string'}}, "
+            "'required': ['参数名']}\n请改正后重新调用 create_tool。")
     TOOLS[name] = (mod.run, props, required, meta["description"], "bash")
     return name
 
@@ -2518,9 +2567,21 @@ def reflect(client, model: str, messages: list, state: dict) -> str:
     # 压缩简报。agent_turn 里算 query 用的就是 reversed,这里跟它对齐。
     task = next((m["content"] for m in reversed(messages)        # the request that started all this,
                  if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
+    # **复盘也是一轮内层 `agent_turn`,和 `spawn_subagent` 完全同一个形状** —— 所以走同一份
+    # 状态隔离。原来直接把 `state` 递进去,而 `state` 里混着「只描述刚刚这一轮」的字段:
+    # 复盘自己撞 MAX_STEPS 会写 `state["capped"] = True`,而 repl 是在**调用复盘之前**就把
+    # `capped` pop 掉的 —— 那个标记于是一直留到**下一轮**,下一轮干干净净跑完,却被打上
+    # 「⏭ 这轮撞了步数上限,跳过复盘」。一次撞顶,赔掉的是**下一轮**的学习。
+    # `state["reads"]` 同理:复盘读的文件会记到下一轮的账上。
+    #
+    # `_child_state` 本来就是为这件事写的 —— 它的注释里举的例子**就是 capped** ——
+    # 只是当时只挂到了 `spawn_subagent` 那条路上。**同一条不变式两条路,只守了一条**,
+    # 今天第四次了(见第四十二、四十五、四十六节)。JUDGING 第六节:立完一道闸,
+    # 先问这片面还有几条路。判据:tests/test_loop.py::test_a_capped_reflection_does_not_
+    # eat_the_next_turns_reflection
     out = agent_turn(client, model,
                      messages + [{"role": "user", "content": REFLECT_PROMPT + _known_skills(task)}],
-                     state, query=task)                          # not REFLECT_PROMPT itself
+                     _child_state(state), query=task)            # not REFLECT_PROMPT itself
     n = _tag_new_memory(before)
     if n and ui is not None:
         ui.note(f"📝 memory.md 新增 {n} 条,已标记来源(手写的行不会被 /forget 建议删除)")

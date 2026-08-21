@@ -1705,3 +1705,54 @@ def test_a_leading_dot_does_not_walk_past_the_credential_gate(ws, monkeypatch):
         os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
         A.write_file(p, "x = 1\n")
         assert A.read_file(p).strip() == "x = 1"
+
+
+def test_forget_never_deletes_a_skill_file(ws):
+    """`/forget` 只动 `memory.md` 的行,**一个技能文件都不碰** —— 而且这是刻意的。
+
+    原来 `forget()` 里有一整段删技能文件的代码,**从上线起一次都没跑过**:唯一的调用方
+    喂进来的是 `dead()` 的输出,而 `dead()` 里那句 `n.get("src", "user") == "user"` 对技能
+    恒为真(`_load_nodes` 给技能节点根本不放 `src` 键),于是技能永远进不了候选。
+
+    **修「让它能提议技能」是假修法**:`/forget` 的确认框写着「只含 Talos 自己写的」,
+    而技能没有任何来源标记 —— 手写的和复盘写的在磁盘上一模一样,那句话当场变成假话。
+    要真支持得先给技能记来源,那是加特性。这条判据钉的就是「在来源标记做出来之前,
+    这条路是关着的」。
+
+    喂进去的技能文本用的是 `_frontmatter_desc` 的**真实格式**(`name — description`),
+    不是随手编的一句描述 —— 编的那种喂进去,把删除代码原样加回来这条判据也不会红,
+    等于什么都没钉住。(这一条是反向验证逮出来的:第一版就是编的。)"""
+    import os, recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    p = os.path.join(R.SKILLS_DIR, "alpha.md")
+    raw = "---\nname: alpha\ndescription: 用于:统计 grue 的出没次数\n---\n步骤\n"
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(raw)
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 一条 Talos 自己记的事实 <!-- reflect 2026-01-01 -->\n")
+
+    R.forget([("技能", R._frontmatter_desc(raw), "从没被想起"),
+              ("事实", "一条 Talos 自己记的事实", "从没被想起")])
+    assert os.path.exists(p), \
+        "技能文件被 /forget 删了 —— 而技能没有来源标记,确认框里那句「只含 Talos 自己写的」担不起"
+    assert "一条 Talos 自己记的事实" not in open(R.MEMORY_FILE, encoding="utf-8").read(), \
+        "事实那条路被一起关掉了 —— forget 该做的事没做"
+
+
+def test_dead_never_proposes_something_forget_would_refuse_to_delete(ws):
+    """提议的那一侧和执行的那一侧必须对得上 —— 这是 `forget` 里那条来源检查的同一个形状。
+
+    `dead()` 现在只产 `"事实"`。哪天有人给它加回技能,这条判据会红,提醒他:
+    `forget()` 那边没有删技能的路,加了提议就等于加了一个**点头之后什么也没发生**的确认框。"""
+    import os, recall as R
+    os.makedirs(R.SKILLS_DIR, exist_ok=True)
+    with open(os.path.join(R.SKILLS_DIR, "s.md"), "w", encoding="utf-8") as f:
+        f.write("---\nname: s\ndescription: 用于:数 grue\n---\n步骤\n")
+    with open(R.MEMORY_FILE, "w", encoding="utf-8") as f:
+        f.write("- 一条从没被想起过的事实 <!-- reflect 2026-01-01 -->\n")
+    R.recall("完全不相干的问题")                        # 攒 seen,不攒 hits
+    h = R._load_hits()
+    for k in list(h):
+        h[k] = {**h[k], "seen": 99} if isinstance(h[k], dict) else h[k]
+    assert {kind for kind, _t, _w in R.dead(min_seen=1)} <= {"事实"}, \
+        "dead() 提议了非「事实」的东西,而 forget() 只会删事实 —— 点了头也不会发生任何事"
