@@ -1116,6 +1116,7 @@ def test_a_dotenv_line_with_no_key_does_not_take_the_whole_program_down(tmp_path
     assert "" not in os.environ
 
 
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe 特有")
 def test_a_quoted_search_string_is_not_mistaken_for_a_bash_command(ws, monkeypatch):
     """引号里的是**要搜的字符串**,不是要执行的命令。
 
@@ -1124,7 +1125,13 @@ def test_a_quoted_search_string_is_not_mistaken_for_a_bash_command(ws, monkeypat
     模型照着改也改不出能跑的命令来。
 
     另一半同样重要:**引号外面的照旧要拦。** 只断言前一半的话,把整条 `_BASHISM` 删掉
-    也会绿。"""
+    也会绿。
+
+    `skipif` 是补上去的 —— 这道闸整个包在 `run_bash` 的 `if os.name == "nt":` 里面,
+    在 Linux 上 `cat notes.txt` 本来就是合法命令、本来就不该拦,于是第二个循环必红。
+    **紧挨着的三条判据各自都带着守卫**(两条 `skipif`、一条早返回),我加这条时一条都没看,
+    于是 CI 的两个 ubuntu 格子红了两轮,而我本机四步全绿 —— workflow 的注释就写着
+    「**凡是只在我本机跑过的判据,都要当成没跑过**」,这次就是那句话本身。"""
     import agent as A
     monkeypatch.setattr(A, "WORKSPACE", ws)
     for ok in ('findstr /c:"$(" app.js', 'findstr "| grep" notes.txt', 'echo "ls -la" > x.txt'):
