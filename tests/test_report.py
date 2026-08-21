@@ -46,6 +46,40 @@ def _write(d, name, rows):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def test_the_benchmark_measures_the_same_gate_the_agent_runs(monkeypatch):
+    """benchmark 的正文闸门必须和 `recall.recall()` 逐字一致,否则它量的不是这个 agent。
+
+    `recall.py` 2026-08-10 (b367126) 把竞争者从 `top`(= `ranked[:k]`)改成了完整排名,
+    注释里写清了原因:挂在 `top` 上,「这条技能够不够可信」就取决于一个跟它无关的参数 ——
+    展示几条。**那次修复没落进 benchmark。** 于是同一份排名,正式代码 abstain、
+    尺子却报「注入了」—— 一把量错的尺子会让任何后续改动的 A/B 结论都不可信。
+
+    这里复现的正是 recall.py 那段注释里写的场景:两条技能 0.60 / 0.59(落差 1.02,
+    远低于 `BODY_LEAD`),中间隔着四条事实。第二名被 `k=5` 截断挤掉时
+    `len(skill_rank) < 2` 成立,退化成 `BODY_FLOOR` 绝对门槛,0.60 >= 0.35 → 注入。
+    断言的是**行为**(注入了几条),不是「代码里写的是 ranked 还是 top」。
+
+    是外部复核对着公开仓库读出来的 —— 我自己写了那段注释,却没去看尺子那一侧。"""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "benchmarks", "recall"))
+    import recall
+    import recall_benchmark as B
+
+    nodes = [{"kind": "技能", "text": "A", "body": "A body", "path": "skills/a.md"}]
+    nodes += [{"kind": "事实", "text": f"f{i}"} for i in range(4)]
+    nodes += [{"kind": "技能", "text": "B", "body": "B body", "path": "skills/b.md"}]
+    ranked = [(0.60, 0), (0.58, 1), (0.57, 2), (0.56, 3), (0.55, 4), (0.59, 5)]
+    monkeypatch.setattr(recall, "_load_nodes", lambda *a, **k: nodes)
+    monkeypatch.setattr(B, "_rank", lambda *a, **k: ranked)
+
+    got = B._predict(recall, "q", "current", k=5)["injected_skills"]
+    assert got == [], (
+        f"第二名技能被 k=5 挤出展示范围,尺子就放行了正文({got})—— "
+        "而 recall.recall() 在同一份排名上会 abstain(0.60 / 0.59 = 1.02 < BODY_LEAD)。"
+        "落差判据的全部价值在于它跟「展示几条」无关。")
+
+
 def test_the_report_groups_by_the_turn_not_by_the_question(ws, monkeypatch):
     """外部复查逮到的那条:上一版用 `q` 去跟检索行对,而 `q` 是**问题**的哈希不是**轮**的。
 

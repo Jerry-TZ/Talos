@@ -35,6 +35,30 @@ def ws(tmp_path, monkeypatch):
     return os.path.realpath(d)
 
 @pytest.fixture(autouse=True)
+def _no_test_ever_writes_the_real_talos(tmp_path, monkeypatch):
+    """把三个「追加式落盘」的路径无条件指向 tmp —— 不管这条测试要不要 `ws`。
+
+    `ws` 里已经有这三行了,但 **`ws` 是按需申请的**:一条不写 `ws` 参数的测试什么保护都
+    没有。`test_a_tool_that_does_not_exist_never_reaches_the_permission_prompt` 和
+    `test_a_subagent_hitting_the_step_cap_does_not_cancel_the_parents_reflection` 就是
+    这样 —— 它们只要 `monkeypatch`,却顺着 `agent` 的循环间接调到了 `recall.recall()`。
+    于是**跑一次 pytest 往真实的 `.talos/recall_trace.jsonl` 追加 3 行**,四周下来 949 行,
+    占了整份轨迹的 76%。我拿这份轨迹算过检索效果并且发布了结论,那份结论因此是错的。
+
+    `ws` 的注释当时把病因写成「枚举永远落后一步」,补法是往清单里再加一条(`CACHE_TRACE`)。
+    **诊断偏了半步**:这次漏的 `TRACE_FILE` 早就在清单里了,漏的是**另一条进入路径** ——
+    同一条不变式两条路,只守了「申请了 ws」那条。JUDGING 第六节:立完一道闸,先问这片面
+    还有几条路。所以这道闸挂在 autouse 上,和 `_keys_stay_put` 一样,不给测试选择的余地。
+
+    判据:tests/test_memory.py::test_no_fixture_is_needed_to_keep_tests_off_the_real_talos"""
+    import agent
+    import recall
+    d = str(tmp_path)
+    monkeypatch.setattr(recall, "TRACE_FILE", os.path.join(d, "recall_trace.jsonl"))
+    monkeypatch.setattr(recall, "HITS_FILE", os.path.join(d, "hits.json"))
+    monkeypatch.setattr(agent, "CACHE_TRACE", os.path.join(d, "cache_trace.jsonl"))
+
+@pytest.fixture(autouse=True)
 def _keys_stay_put():
     """任何测试都不许把 `agent._KEYS` 弄脏,弄脏了当场点名是谁。
 

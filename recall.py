@@ -386,6 +386,23 @@ def recall(query: str, k: int = 5, blocked=None, keep_fact=None, sink=None) -> s
             for a in n.get("also", ())[:2]:
                 out.append(f"- [{a['kind']} · 关键词与上一条完全相同,内容不同] {a['text']}"
                            + (f"(read_file `{a['path']}` 看正文)" if a.get("path") else ""))
+        elif n["kind"] == "技能":
+            # **只给名字,不重复描述。** `retrieve()` 把**每一条**技能的描述都放进了
+            # system prompt(见 agent.py 的 docstring:"Skills contribute only their
+            # one-line description"),所以这里再写一遍描述是**同一份提示词里说两遍**。
+            # 量过:74 个真实查询,recall 发出的 183 行事实/技能行,**183 行都能在
+            # system prompt 里逐字找到**;单是技能描述就占 recall 输出的 46%,
+            # 平均每轮 387 字 —— 而 `recalled` 按当前任务捞、每轮都变,故意放在稳定前缀
+            # **之后**(见 agent.py 那段缓存注释),这些字节**每轮都按全价付**。
+            #
+            # 那为什么不整行删掉?因为这一行还带着 system prompt 没有的信息:
+            # **「这几条跟你现在这个任务相关」**。描述是重复的,名字是指针。删指针要拿
+            # 真任务量,删重复不用 —— 内容仍在同一份提示词里逐字可得,这是纯删除。
+            # 省下的其实只有约 1% 的付费 token(recall 整体 ≤2.1%),**所以理由不是省钱,
+            # 是别在一份提示词里把同一句话说两遍**:模型没法知道那是一句话还是两个证据。
+            # 判据:tests/test_memory.py::test_recall_does_not_repeat_what_the_system_prompt_already_says
+            out.append(f"- [技能] {os.path.basename(n['path'])[:-3]}"
+                       if n.get("path") else f"- [技能] {_with_merged(n)}")
         else:
             # **往事也要标边界,而且比技能更需要。** 上面给技能正文标了「不是用户指令」,
             # 理由是「文件内容不是授权」;往事是**上一个任务的用户原话**,常常本来就是

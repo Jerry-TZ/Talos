@@ -942,6 +942,62 @@ def test_provenance_decides_what_forget_may_touch(ws):
     left = open(R.MEMORY_FILE, encoding="utf-8").read()
     assert "xyzzy" in left and "qwerty" not in left     # 手写的留着,复盘的删掉
 
+def test_recall_does_not_repeat_what_the_system_prompt_already_says(ws):
+    """`recall()` 不许再写一遍 `retrieve()` 已经逐字写进 system prompt 的技能描述。
+
+    `retrieve()` 的 docstring 写着 "Skills contribute only their one-line description",
+    也就是**每一条**技能的描述本来就常驻 system prompt。而 `recall()` 原来对没拿到正文的
+    技能也打印 `名字 — 描述` —— **同一份提示词里同一句话说两遍**,模型没法知道那是一句话
+    还是两个证据。量过:74 个真实查询,recall 发出的 183 行事实/技能行,**183 行都能在
+    system prompt 里逐字找到**;单是技能描述就占 recall 输出的 46%,平均每轮 387 字,
+    而 `recalled` 每轮都变、故意放在稳定前缀之后,这些字节**每轮全价付**。
+
+    **名字要留着。** 描述是重复的,名字是指针 —— 它带着 system prompt 没有的信息:
+    「这几条跟你现在这个任务相关」。所以断言是两条:描述不在、名字在。
+    只断言前一条的话,**整行删掉也会绿**,而那会连指针一起删掉。"""
+    import agent as A
+    import recall as R
+    os.makedirs(os.path.join(ws, "skills"), exist_ok=True)
+    for name, desc, body in (
+            ("zork-report", "用于:给 zork 做 grue 统计报告", "1. 打开 zork\n2. 数 grue\n"),
+            ("zork-cleanup", "用于:清理 zork 的 grue 残留", "1. 清 grue\n")):
+        with open(os.path.join(ws, "skills", name + ".md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: %s\ndescription: %s\n---\n%s" % (name, desc, body))
+
+    assert "grue 统计报告" in A.retrieve(), \
+        "前提没成立:retrieve() 本来就该把每条技能的描述放进 system prompt"
+
+    out = R.recall("给 zork 做 grue 统计报告")
+    assert "zork-report" in out, \
+        "技能名不见了 —— 「这条跟你现在的任务相关」这个指针也跟着没了"
+    for dup in ("grue 统计报告", "清理 zork 的 grue 残留"):
+        head = out.split(dup)[0] if dup in out else ""
+        if dup in out and "[技能正文" not in head[-300:]:
+            raise AssertionError(
+                "recall 又写了一遍描述「%s」,而它已经逐字在 system prompt 里。"
+                "\n实际输出:\n%s" % (dup, out))
+
+
+def test_no_fixture_is_needed_to_keep_tests_off_the_real_talos():
+    """**这条测试自己不要 `ws`** —— 那正是它要钉的那条路。
+
+    真事:两条只要 `monkeypatch` 的测试顺着 agent 的循环间接调到了 `recall.recall()`,
+    于是每跑一次 pytest 就往**真实的** `.talos/recall_trace.jsonl` 追加 3 行。四周攒了
+    949 行,占整份轨迹 76%。而那份轨迹是我用来算「哪条技能被检索到」的样本,我拿它
+    发布过结论 —— 结论因此是错的。**测试污染的不是数据,是判断力。**
+
+    断言的是「路径不在真实 .talos 底下」,不是「有没有那个 fixture」:后者摘掉 autouse
+    还会绿(fixture 名还在文件里),前者当场红。"""
+    import agent
+    import recall
+    real = os.path.realpath(os.path.join(recall.HOME, ".talos"))
+    for mod, attr in ((recall, "TRACE_FILE"), (recall, "HITS_FILE"), (agent, "CACHE_TRACE")):
+        p = os.path.realpath(getattr(mod, attr))
+        assert not p.startswith(real), (
+            f"{mod.__name__}.{attr} 还指着真实的 .talos({p})—— "
+            "一条不要 ws 的测试跑一次就会往生产轨迹里写。")
+
+
 def test_forget_never_touches_a_line_you_wrote_yourself(ws):
     """`dead()` 承诺「只提议删 Talos 自己写的」,而 `forget()` 原来不认来源。
 

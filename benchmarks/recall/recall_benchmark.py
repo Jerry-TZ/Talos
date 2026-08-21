@@ -399,7 +399,15 @@ def _predict(recall, query: str, algorithm: str, k: int = 5) -> dict:
     nodes = recall._load_nodes()
     ranked = _rank(recall, nodes, query, algorithm)
     top = ranked[:k]
-    skill_rank = [(score, i) for score, i in top if nodes[i].get("path")]
+    # **竞争者从完整排名里取,不从 `top` 里取 —— 和 `recall.recall()` 逐字一致。**
+    # 原来这行是 `for score, i in top`,而正式代码 2026-08-10 (b367126) 就已经改掉了:
+    # 挂在 `top` 上,「这条技能够不够可信」的取值就取决于一个跟它毫无关系的参数 ——
+    # 展示几条。四条无关的事实把真正的第二名挤出 top-5,`len(skill_rank) < 2` 成立,
+    # 退化成 `BODY_FLOOR` 绝对门槛,于是注入;而正式代码在同一份排名上会 abstain。
+    # **一条规则两处实现,修复只落进了其中一处** —— 而这一处正是用来给那条规则打分的尺子。
+    # 是外部复核对着仓库读出来的,不是我自己发现的。判据:
+    # tests/test_report.py::test_the_benchmark_measures_the_same_gate_the_agent_runs
+    skill_rank = [(score, i) for score, i in ranked if nodes[i].get("path")]
     lead = bool(skill_rank) and (
         skill_rank[0][0] >= recall.BODY_FLOOR if len(skill_rank) < 2
         else skill_rank[0][0] >= recall.BODY_LEAD * skill_rank[1][0]
