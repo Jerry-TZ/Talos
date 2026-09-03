@@ -1654,3 +1654,37 @@ def test_a_capped_reflection_does_not_eat_the_next_turns_reflection(ws, monkeypa
         "复盘撞顶把 capped 留在了父 state 上 —— 下一轮会被误判成「撞了上限」而跳过复盘"
     # 而复盘的 token 仍然要算进这次请求的总账(`tok` 是 STATE_SHARED,按引用共享)
     assert state["tok"]["steps"] >= 2, "复盘的消耗没算进父的总账 —— 隔离隔过头了"
+
+
+def test_a_providers_private_fields_survive_the_replay_of_a_tool_call():
+    """回放历史时**不许把模型给的字段抄丢** —— 抄丢的那一下不报错,下一轮才 400。
+
+    真事:Gemini 3.x 把 `thought_signature` 挂在 `tool_calls[i].extra_content.google`,
+    并且下一轮必须原样回传。上一版只抄 id/type/function 三项,于是**第一次工具调用成功、
+    文件也写出来了**,死在第二轮回放的时候:「Function call is missing a thought_signature」。
+    症状指着工具,病灶在历史 —— 这类错最贵,因为它把人引到错的地方去查。
+
+    所以判据钉的是「**没抄丢**」而不是「抄了 thought_signature」:枚举要留哪些字段
+    永远落后一个 provider,下一家换个名字这条判据就又是绿的。"""
+    import json
+    import types
+    import agent as A
+
+    sig = {"google": {"thought_signature": "sig-xyz"}}
+    c = types.SimpleNamespace(id="c1", function=types.SimpleNamespace(name="write_file", arguments="{}"),
+                              model_extra={"extra_content": sig})
+    e = A._tool_call_entry(c)
+    assert e["extra_content"] == sig, f"provider 私有字段被抄丢了:{e}"
+    json.dumps(e)                       # 它还要能落进会话 JSONL,pydantic 对象落不进去
+
+    class _Pydanticish:                 # SDK 有时给的是模型对象而不是 dict
+        def model_dump(self):
+            return sig
+    c2 = types.SimpleNamespace(id="c2", function=types.SimpleNamespace(name="f", arguments="{}"),
+                               model_extra={"extra_content": _Pydanticish()})
+    assert A._tool_call_entry(c2)["extra_content"] == sig
+    json.dumps(A._tool_call_entry(c2))
+
+    # 没有私有字段的 provider(绝大多数)不许因此多出键来 —— 多出来的键会被原样发回去
+    plain = A._tool_call_entry(_tc("read_file", '{"path":"a"}'))
+    assert set(plain) == {"id", "type", "function"}, f"给没有 extra 的 provider 加了料:{plain}"

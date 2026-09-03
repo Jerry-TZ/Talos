@@ -1905,6 +1905,28 @@ GOAL_JUDGE_PROMPT = (
     '{"ok": true/false, "reason": "一句话", "impossible": true/false}'
 )
 
+def _tool_call_entry(c) -> dict:
+    """把 SDK 的 tool_call 转回**能重新发出去**的 dict —— 连它挂在上面的 provider 私有字段。
+
+    上一版只抄 id/type/function 三项,而 Gemini 3.x 把 `thought_signature` 放在
+    `tool_calls[i].extra_content.google` 里,并且**下一轮必须原样回传**,否则整轮 400:
+    「Function call is missing a thought_signature in functionCall parts」。
+    症状很误导:第一次工具调用成功、文件也写出来了,死在**第二轮**回放历史的时候 ——
+    看起来像工具坏了,其实是历史被抄丢了一个字段。
+
+    所以这里**不枚举要留哪些字段,而是留下模型给的整块**(除了我们自己重建的那几个)。
+    枚举合法字段永远落后一个 provider —— 跟 `_EXFIL` 那条注释是同一句话。
+    留下来的东西还要能落进会话 JSONL,所以 pydantic 对象一律 dump 成普通 dict。"""
+    out = {"id": c.id, "type": "function",
+           "function": {"name": c.function.name, "arguments": c.function.arguments}}
+    extra = getattr(c, "model_extra", None) or {}
+    for k, v in extra.items():
+        if k in out:
+            continue
+        dump = getattr(v, "model_dump", None)
+        out[k] = dump() if callable(dump) else v
+    return out
+
 def _json_object(text: str):
     """从模型输出里抠出第一个 JSON 对象 —— 它常常裹在 ```json 里或带一句前言。"""
     m = re.search(r"\{.*\}", text or "", re.S)
@@ -2488,11 +2510,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
 
         entry = {"role": "assistant", "content": msg.content or ""}   # record the assistant turn
         if tool_calls:
-            entry["tool_calls"] = [
-                {"id": c.id, "type": "function",
-                 "function": {"name": c.function.name, "arguments": c.function.arguments}}
-                for c in tool_calls
-            ]
+            entry["tool_calls"] = [_tool_call_entry(c) for c in tool_calls]
         messages.append(entry)
 
         if not tool_calls:                              # model wants to stop THIS ROUND
