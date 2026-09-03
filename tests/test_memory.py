@@ -1006,8 +1006,10 @@ def test_no_fixture_is_needed_to_keep_tests_off_the_real_talos():
     还会绿(fixture 名还在文件里),前者当场红。"""
     import agent
     import recall
+    import session
     real = os.path.realpath(os.path.join(recall.HOME, ".talos"))
-    for mod, attr in ((recall, "TRACE_FILE"), (recall, "HITS_FILE"), (agent, "CACHE_TRACE")):
+    for mod, attr in ((recall, "TRACE_FILE"), (recall, "HITS_FILE"), (agent, "CACHE_TRACE"),
+                      (session, "SESS_DIR")):     # once() 开始写会话之后新增的那条路
         p = os.path.realpath(getattr(mod, attr))
         assert not p.startswith(real), (
             f"{mod.__name__}.{attr} 还指着真实的 .talos({p})—— "

@@ -2937,6 +2937,7 @@ def once(task: str, mode: str = "bypass") -> str:
     Defaults to bypass because nobody is at the keyboard to answer a permission prompt."""
     global ui
     import console_ui as ui
+    import session as S
     client, model = make_client()
     load_dynamic_tools()
     # 无人值守正是「说完成了但没完成」代价最大的地方 —— 没人在读 transcript,而 EXAM 就跑在
@@ -2944,6 +2945,10 @@ def once(task: str, mode: str = "bypass") -> str:
     state = {"mode": mode, "allow": set(), "view": "normal", "asked": task,
              "goal": os.environ.get("TALOS_GOAL", "").strip() or None}
     messages: list = [{"role": "user", "content": task}]
+    # **跑批也要留下轨迹。** 上一版这条路一个会话都不开(`S.` 的调用全在 `repl()` 里),
+    # 于是上面那句「没人在读 transcript」成了真的:不是没人读,是**没有可读的东西**。
+    # EXAM 和 benchmarks 都跑在这条路上,跑完不可回溯 —— 而这正是最该回溯的一条路。
+    sess = S.Session.new(batch=True)
     try:
         result = agent_turn(client, model, messages, state, top=True)
     except KeyboardInterrupt:
@@ -2952,6 +2957,13 @@ def once(task: str, mode: str = "bypass") -> str:
     except Exception as e:                        # unattended: report and exit non-zero, don't traceback
         ui.error(e)
         sys.exit(1)
+    finally:
+        # 崩掉和被中断的那一份**最值钱**,所以存在 finally 里,不在成功路径上。
+        try:
+            sess.save(messages)
+            ui.note(f"会话 {sess.sid} · 存于 .talos/sessions/")
+        except Exception as e:                    # 存不下来不许把原来那个错误顶掉
+            ui.note(f"⚠️ 会话没存下来:{e}")
     ui.answer(result)
     t = state.get("last_tok") or {}
     if t.get("in") or t.get("out"):

@@ -292,3 +292,57 @@ def test_old_format_migration(ws):
     og.save(og.load())                        # 保存时补标题、重命名、删旧文件
     assert not os.path.exists(os.path.join(S.SESS_DIR, old + ".jsonl"))
     assert "__" in os.path.basename(og.path)
+
+
+def test_a_batch_run_never_becomes_what_continue_lands_on(ws, monkeypatch):
+    """`--continue` 只回到人自己的会话 —— 跑批的不许把它抢走。
+
+    `once()` 现在每跑一次留一个会话,而 EXAM 和 benchmarks 一轮能跑几十次,
+    它们的时间戳永远比人最后一次对话新。不隔开的话 `--continue` 就变成「续上刚才那个
+    benchmark」,而且是**静默**变的:banner 照样印一个会话号,人得读到第二句才发现接错。
+
+    但**不能靠藏起来隔开**:`recall.py` 和 `benchmarks/recall/` 都是平铺 glob
+    `sessions/*.jsonl`,挪进子目录这两边就都瞎了 —— 而「跑批的轨迹要能被捞到」
+    正是加这个功能的理由。所以隔的只有 `latest_sid` 一处,别的一律照旧。"""
+    import glob
+    import session as S
+    human = S.Session.new()
+    human.save([{"role": "user", "content": "人自己开的"}])
+    batch = S.Session.new(batch=True)                      # 后写 → mtime 更新
+    batch.save([{"role": "user", "content": "跑批开的"}])
+
+    assert S.latest_sid() == human.sid, "--continue 落到跑批会话上了"
+    # 平铺可见:换成子目录这一条当场红,而红的地方正是语料抽取会瞎掉的地方
+    assert len(glob.glob(os.path.join(S.SESS_DIR, "*.jsonl"))) == 2
+    assert len(S.list_sessions()) == 2, "跑批的从 /history 里消失了 —— 它该被看见,只是不该被续上"
+    # 点名就打得开:隔开的是「默认落在哪」,不是「够不够得着」
+    assert S.open_session(batch.sid).load()[0]["content"] == "跑批开的"
+    assert S.resolve(batch.sid) == batch.sid
+
+
+def test_an_unattended_run_that_crashes_still_leaves_its_transcript(ws, monkeypatch):
+    """崩掉的那一份最值钱,所以 `save` 挂在 `finally` 上,不在成功路径上。
+
+    `once()` 的注释写着「无人值守正是『说完成了但没完成』代价最大的地方 ——
+    没人在读 transcript」。上一版这条路**一个会话都不开**,所以那句话是真的:
+    不是没人读,是没有可读的东西。而崩溃退出(`sys.exit(1)`)恰恰是最需要回读的一次。
+
+    判据钉的是 `finally` 而不是 `save` 存在:把 `save` 挪回成功路径,这条当场红。"""
+    import agent as A
+    import session as S
+    from test_loop import _ui                           # 唯一的跨文件复用,理由同 test_goal
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "make_client", lambda: (object(), "m"))
+    monkeypatch.setattr(A, "load_dynamic_tools", lambda: [])
+
+    def boom(*a, **k):
+        raise RuntimeError("对面炸了")
+    monkeypatch.setattr(A, "agent_turn", boom)
+
+    with pytest.raises(SystemExit) as e:
+        A.once("这一轮会崩")
+    assert e.value.code == 1
+
+    rows = S.list_sessions()
+    assert len(rows) == 1, f"崩掉的那一轮什么都没留下:{rows}"
+    assert S.open_session(rows[0][0]).load()[0]["content"] == "这一轮会崩"

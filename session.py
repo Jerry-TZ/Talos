@@ -17,6 +17,7 @@ import warnings
 
 HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
 SESS_DIR = os.path.join(HOME, ".talos", "sessions")   # sessions follow the agent, not the cwd
+BATCH = "batch-"     # 跑批(`once()`)会话的 slug 前缀 —— 见 `list_sessions` 的注释
 
 def _slug(text: str, n: int = 24) -> str:
     """把第一句 prompt 压成文件名安全的短标题(保留中英数字)。"""
@@ -41,12 +42,13 @@ def _claim(sid: str) -> str:
     return os.path.join(SESS_DIR, sid + ".claim")
 
 class Session:
-    def __init__(self, sid: str, slug: str = ""):
+    def __init__(self, sid: str, slug: str = "", batch: bool = False):
         self.sid = sid
         self.slug = slug
+        self.batch = batch          # 只影响首次 save 起的名字;之后身份就写在文件名里了
 
     @classmethod
-    def new(cls) -> "Session":
+    def new(cls, batch: bool = False) -> "Session":
         """秒级时间戳**不保证唯一**,而这里的 id 是会话的全部身份。
 
         同一秒起两个会话就是同一个 sid。两个文件都写得出来(slug 不同),
@@ -100,7 +102,7 @@ class Session:
                 pass                                       # 号被别人占着(同进程或另一个进程)
             else:
                 if _path_for(sid) is None:                 # 抢到了,再确认盘上没有同名会话
-                    return cls(sid)
+                    return cls(sid, batch=batch)
                 os.remove(_claim(sid))                     # 这个号已经属于一个落了盘的会话
             n += 1
             sid = f"{base}-{n}"
@@ -119,7 +121,7 @@ class Session:
         它只是**安静地少了后半段**。删除是这个项目里唯一没有撤销的动作,顺序不能反。"""
         old = self.path
         if not self.slug:                                  # 首次保存 → 用第一句 prompt 起名
-            self.slug = _slug(_first_user(messages))
+            self.slug = (BATCH if self.batch else "") + _slug(_first_user(messages))
         os.makedirs(SESS_DIR, exist_ok=True)
         tmp = self.path + ".tmp"                           # 不以 .jsonl 结尾,不会被任何 glob 捡走
         try:
@@ -199,11 +201,19 @@ def open_session(sid: str) -> "Session | None":
         return None
     return Session(*_parse_name(path))
 
-def list_sessions() -> list:
-    """[(sid, mtime, title, n_msgs), ...] newest first."""
+def list_sessions(batch: bool | None = None) -> list:
+    """[(sid, mtime, title, n_msgs), ...] newest first。`batch=False` 只要人自己开的会话。
+
+    跑批和人开的会话**同住一个目录、同一套命名**,区别只在 slug 前缀。这是刻意的:
+    `recall.py:149` 和 `benchmarks/recall/recall_benchmark.py` 都是平铺 glob
+    `sessions/*.jsonl`,**放进子目录这两边就都看不见了** —— 而「无人值守跑完什么都不留」
+    要修的正是这个:跑批的轨迹要能被往事检索捞到、能被燃尽表抽成语料。
+    需要区分的只有一处(`latest_sid`),所以区分做在名字上,不做在目录上。"""
     rows = []
     for path in glob.glob(os.path.join(SESS_DIR, "*.jsonl")):
         sid, slug = _parse_name(path)
+        if batch is not None and slug.startswith(BATCH) != batch:
+            continue
         first, n = "", 0
         # 坏行**跳过**,不是就此不数。上一版把 `json.loads` 放在 `try` 里、`except` 在整个
         # 循环外面:第 3 行坏掉,后面 96 行一条都不数,`/history` 报 3 条而 `load()` 读回 99 条。
@@ -267,5 +277,11 @@ def delete(sid: str) -> bool:
     return bool(targets) and not _exact(sid)
 
 def latest_sid() -> str | None:
-    rows = list_sessions()
+    """`--continue` / 不带参数的 `--view` 落在哪。**跳过跑批的。**
+
+    一次 EXAM 或 benchmark 能留下几十条会话,而它们的时间戳永远比人最后一次对话新 ——
+    不跳的话 `--continue` 就变成「续上刚才那个跑批」,而且是**静默**变的:
+    banner 照样印一个会话号,人要读到第二句才发现接错了地方。
+    `resolve()` 不跳,所以 `--resume <id>` / `--view <id>` 照样打得开跑批的那些。"""
+    rows = list_sessions(batch=False)
     return rows[0][0] if rows else None

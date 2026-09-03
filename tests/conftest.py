@@ -53,10 +53,16 @@ def _no_test_ever_writes_the_real_talos(tmp_path, monkeypatch):
     判据:tests/test_memory.py::test_no_fixture_is_needed_to_keep_tests_off_the_real_talos"""
     import agent
     import recall
+    import session
     d = str(tmp_path)
     monkeypatch.setattr(recall, "TRACE_FILE", os.path.join(d, "recall_trace.jsonl"))
     monkeypatch.setattr(recall, "HITS_FILE", os.path.join(d, "hits.json"))
     monkeypatch.setattr(agent, "CACHE_TRACE", os.path.join(d, "cache_trace.jsonl"))
+    # **第三条路,同一天补的**:`once()` 原来一个会话都不开,所以 SESS_DIR 只在 `ws` 里
+    # 挡着就够了。现在它每跑一次写一个会话文件 —— 一条不要 `ws` 却调到 `once()` 的测试
+    # 就会往真实的 `.talos/sessions/` 里塞垃圾,而那批文件正是往事检索和燃尽表的语料。
+    # 上面那段说「枚举永远落后一步」,这就是下一步:**加功能等于给这片面新开一条路。**
+    monkeypatch.setattr(session, "SESS_DIR", os.path.join(d, "sessions"))
 
 @pytest.fixture(autouse=True)
 def _keys_stay_put():
