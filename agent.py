@@ -1987,6 +1987,7 @@ def evaluate_goal(client, model: str, goal: str, messages: list, state: dict) ->
     conv = [{"role": "user", "content":
              f"完成条件:\n{goal}\n\n工作区文件:\n{_workspace_listing()}\n\n"
              f"干活模型的对话记录(次要证据):\n{_goal_transcript(messages)}"}]
+    nudged = False                    # 「没给 JSON」只回问一次,理由见下面那段
     for _ in range(GOAL_MAX_READS):
         try:
             resp = _chat(client, model=judge_model, tools=specs,
@@ -2004,7 +2005,21 @@ def evaluate_goal(client, model: str, goal: str, messages: list, state: dict) ->
         if not calls:
             data = _json_object(msg.content or "")
             if data is None:
-                return "error", f"判断器没返回 JSON:{(msg.content or '')[:200]}"
+                # **把活干对了、格式没给对**就丢掉结论,是这道闸最贵的一种失败。
+                # 真事(FINDINGS 五十三):判断器读完 5 个 ini、逐条列出 18 个冲突键
+                # (规格要 3),分析完全正确 —— 只因为没裹 JSON,整段被扔进 error 出口。
+                # 而那一轮恰好是十一轮真跑里**唯一一次真有违规可抓**的。
+                # 复用已有的读预算再问一次,不新开重试机制;**只问一次**:每次重问都要把
+                # 整段对话重发一遍,而这一轮的 conv 是按百万 token 计的。
+                # 再不给就照旧 error —— 回问失败仍然走「不宣称成功」,不会因此漏判成 ok。
+                if nudged:
+                    return "error", f"判断器没返回 JSON:{(msg.content or '')[:200]}"
+                nudged = True
+                conv.append({"role": "assistant", "content": msg.content or ""})
+                conv.append({"role": "user", "content":
+                             "只输出一个 JSON 对象,不要任何解释、不要代码块围栏:"
+                             '{"ok": true/false, "reason": "一句话", "impossible": true/false}'})
+                continue
             if data.get("impossible"):
                 return "impossible", str(data.get("reason") or "判断器认为目标已不可能达成")
             if data.get("ok"):
@@ -2465,7 +2480,20 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             # 「历史都还在」是假的:`_prune_old_tool_results` 每轮把旧的大块工具输出原地
             # 换成「已省略」,`maybe_compact` 还会把头部换成摘要。会话能接着走,但早先
             # 读到的内容不一定还在。
-            return (f"(已到 {MAX_STEPS} 步上限,停下了。会话还能接着走,不过早先的大块工具输出"
+            # 目标闸挂在「模型这轮不再调工具」那个出口上,**够不着这里** —— 而这条路正是
+            # 它最该管的一条:真事(FINDINGS 五十三)glm-4.6v 撞满 100 步,产物冲突键 9 个
+            # (规格要 3)、五个文件的键值对全部超范围,而对话里最后一句是它自己的
+            # verify 打印的「验证通过!所有条件都满足」。
+            # **这里不补一次判断器调用**:撞上限的那一轮已经烧了百万级 token,再追加一次
+            # 判断只为讲一件出口措辞已经暗示了的事,代价和收益不成比例。
+            # 但**闭口不谈是不行的**:上一版这句话只说「说「继续」就接着做」,而人凭什么
+            # 知道该不该继续?加一句「目标一次都没被检查过」—— 零 API 开销,
+            # 而且它守的是同一条不变式:**没判断过就别让人以为判断过了。**
+            goal_note = (f"⚠️ 目标**一次都没被检查过**(判断器挂在正常收尾那个出口上,"
+                         f"撞上限走不到)—— 别把「跑满了」当成「做完了」。目标:{state['goal']}\n\n"
+                         if state.get("goal") and top else "")
+            return (goal_note
+                    + f"(已到 {MAX_STEPS} 步上限,停下了。会话还能接着走,不过早先的大块工具输出"
                     f"可能已经被裁剪或压成摘要了 —— 直接说「继续」就接着做,"
                     f"或者拆小些重来;想放宽上限设 TALOS_MAX_STEPS。)")
         if steps == MAX_STEPS - 4:                     # let it land the plane instead of being cut mid-flight

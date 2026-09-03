@@ -286,3 +286,65 @@ def test_json_object_tolerates_fences_and_preamble():
     assert A._json_object("完全没有 json") is None
     assert A._json_object('{"坏的": ') is None
     assert A._json_object("[1,2,3]") is None            # 数组不是对象
+
+
+def test_a_correct_verdict_that_forgot_the_json_wrapper_is_asked_again_not_thrown_away(ws, monkeypatch):
+    """判断器**把活干对了、格式没给对**,不许当场丢掉结论。
+
+    真事(FINDINGS 五十三):glm-4.6v 当判断器,读完 5 个 ini、逐条列出 18 个冲突键
+    (规格要 3),分析完全正确 —— 只因为没裹 JSON 就被扔进 error 出口。
+    而那一轮恰好是十一轮真跑里**唯一一次真有违规可抓**的:这道闸咬到了,然后掉在地上。
+
+    只回问一次,不是无限重试:每次重问都要把整段 conv 重发,而那一轮是按百万 token 计的。
+    """
+    script = [
+        _msg(content="做完了"),                                   # 干活的说停
+        _msg(content="我读了 5 个 ini,冲突键有 18 个,规格要 3 个。"),  # 判断器:对的,但没给 JSON
+        _judge(ok=False, reason="冲突键 18 个,规格要 3"),           # 回问之后给了
+        _msg(content="改好了"),                                   # 被打回去,再收工
+        _judge(ok=True, reason="现在是 3 个"),
+    ]
+    out, state, _ = _run(monkeypatch, script, goal="冲突键恰好 3 个")
+    assert state["goal_checks"] == 2, "回问那次没接上,或者被算成了两轮独立检查"
+    assert "✅ 目标达成" in out
+    assert "没返回 JSON" not in out, f"正确的结论被格式问题扔掉了:{out}"
+
+
+def test_a_second_formatting_failure_stops_instead_of_burning_the_whole_read_budget(ws, monkeypatch):
+    """回问一次就够;再不给就照旧 error。
+
+    判据钉的是**只回问一次** —— 不设上限的话,一个从不输出 JSON 的模型会把整个
+    读预算烧成六次全量重发。而回问失败仍然走「不宣称成功」,不会因此漏判成 ok。"""
+    script = [_msg(content="做完了")] + [_msg(content="它就是不给 JSON")] * 6
+    out, state, _ = _run(monkeypatch, script, goal="随便什么目标")
+    assert "没返回 JSON" in out and "不宣称成功" in out
+    assert "✅ 目标达成" not in out
+    assert state["goal_tok"]["calls"] == 2, \
+        f"判断器调了 {state['goal_tok']['calls']} 次 —— 该是 1 次原始 + 1 次回问"
+
+
+def test_hitting_the_step_cap_must_say_the_goal_was_never_checked(ws, monkeypatch):
+    """撞步数上限那个出口**够不着目标闸**,所以它必须自己说出来。
+
+    真事(FINDINGS 五十三):glm-4.6v 撞满 100 步,产物冲突键 9 个(规格要 3)、
+    五个文件的键值对全部超范围,而对话里最后一句是它自己的 verify 打印的
+    「验证通过!所有条件都满足」。闸一次都没跑,出口只说「说「继续」就接着做」——
+    **人凭什么知道该不该继续。**
+
+    这里**不补一次判断器调用**:撞上限那轮已经烧了百万级 token。
+    补的是零开销的那一半:没判断过就别让人以为判断过了。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "MAX_STEPS", 3)
+    spin = _msg(tool_calls=[_tc("run_bash", '{"command":"echo x"}')])
+    out = A.agent_turn(_Client([spin] * 10), "m", [{"role": "user", "content": "x"}],
+                       {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "冲突键恰好 3 个"},
+                       top=True)
+    assert "上限" in out
+    assert "一次都没被检查过" in out, f"撞上限了却对目标闭口不谈:{out}"
+    assert "冲突键恰好 3 个" in out, "没把目标本身报出来,人还得回去翻自己设过什么"
+
+    # 没设目标的那条路不许因此多出噪音
+    plain = A.agent_turn(_Client([spin] * 10), "m", [{"role": "user", "content": "x"}],
+                         {"mode": "bypass", "allow": set(), "view": "quiet"}, top=True)
+    assert "一次都没被检查过" not in plain, f"没设目标也在喊:{plain}"
