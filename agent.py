@@ -214,6 +214,16 @@ SESSION_BUDGET = int(os.environ.get("TALOS_SESSION_BUDGET", "200000"))   # 累�
 # 「拥塞」和「彻底卡死」完全分不出来。实测被这个坑了两次。
 # 300 秒是留给长生成的:air 档小模型写两万字符的文件真的要几分钟,砍太短会误杀。
 CHAT_TIMEOUT = float(os.environ.get("TALOS_TIMEOUT", "300"))
+# **连接超时必须和读超时分开。** 上一版只有一个总超时:代理没配好(墙内跑 Gemini/OpenAI
+# 最常见的第一次失败)表现为**静默卡 300 秒**,而 `_chat` 还会重试一次 —— 人盯着光标
+# 等十分钟才看到一句 timeout。实测过:同一条命令,经 talos.bat(它设代理)秒级拿到 429,
+# 直接跑 agent.py(没代理)挂满 300 秒一个字都没有。
+# 「等不到回答」和「压根连不上」是两件事,前者要留够时间(air 档写两万字符真要几分钟),
+# 后者十秒足够 —— 合成一个数就只能迁就慢的那一边,而代价全落在最需要提示的那个人身上。
+# 默认 5 而不是 10:实测这个数是**按地址**乘的(generativelanguage 有 8 个 A/AAAA 记录,
+# connect=10 实测等 80.1 秒)。而握手本身:代理在本机是毫秒级,真要 5 秒才握上手的链路
+# 后面也没法用。宁可这条稍紧,反正连不上会当场说清楚原因,不像超时那样一声不吭。
+CONNECT_TIMEOUT = float(os.environ.get("TALOS_CONNECT_TIMEOUT", "5"))
 SLOW_CALL = float(os.environ.get("TALOS_SLOW_CALL", "15"))   # 超过这么久的调用才报耗时
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
@@ -234,7 +244,10 @@ def make_client():
     # max_retries=0 是有意的:重试归 _chat 管。SDK 默认自己重试 2 次,而 _chat 外面还有 3 次,
     # 两层相乘 = 最多 6 趟,每趟都可能等满超时 —— 而且 SDK 那两次是静默的,ui.note 里的
     # 「模型繁忙,Ns 后重试」根本不会打印,于是它看起来就是卡死。一处重试,一处可见。
-    return (OpenAI(api_key=key, base_url=base_url, timeout=CHAT_TIMEOUT, max_retries=0),
+    import httpx                                   # openai 自己的依赖,不是新增的一个
+    # 连不上十秒就说,别拿等长生成的耐心去等一个根本打不通的地址(见 CONNECT_TIMEOUT)。
+    timeout = httpx.Timeout(CHAT_TIMEOUT, connect=CONNECT_TIMEOUT)
+    return (OpenAI(api_key=key, base_url=base_url, timeout=timeout, max_retries=0),
             os.environ.get("TALOS_MODEL") or default_model)
 
 # ── tools: just plain Python functions ────────────────────────────────────────
@@ -2092,6 +2105,21 @@ def _chat(client, **kwargs):
             # CHAT_TIMEOUT,重试三遍就是三遍注定失败 —— 默认 300s 下,一次失败要 15 分钟
             # 才告诉你。推理模型上这是常态,不是意外。只给它一次机会。
             timeouts += ("timed out" in s or "timeout" in s)
+            # **连不上 ≠ 对面忙,不重试。** 上面那条「掉线常常下一秒就通」说的是
+            # `APIConnectionError`(连接被拒/被断,几毫秒就回来);连接**超时**是另一回事:
+            # 每次要烧满 `CONNECT_TIMEOUT × 主机的地址条数`,重一次就是再等一遍。
+            # 判据按 `__cause__` 的类型,**不按字符串**:openai 把它包成 `APITimeoutError`,
+            # 文本是 `'Request timed out.'` —— 里面一个和「连接」有关的词都没有。
+            if "Connect" in type(e.__cause__).__name__:
+                if ui is not None:
+                    ui.note(f"⚠️ 连不上 {kwargs.get('model', '')} 的服务器 —— "
+                            f"{CONNECT_TIMEOUT:g}s 内没握上手,不重试(重试只是再等一遍)。\n"
+                            f"   墙内最常见的原因是**没设代理**:Windows 的「系统代理」只写注册表,"
+                            f"Python 不读它,要的是 HTTP(S)_PROXY 环境变量"
+                            f"(talos.bat 里的 TALOS_PROXY 那一行就是干这个的)。\n"
+                            f"   注意 httpx 的连接超时是**按地址**算的:多 A 记录的主机会乘上去,"
+                            f"所以真实等待≈{CONNECT_TIMEOUT:g}s × 地址条数。")
+                raise
             if attempt < 2 and transient and timeouts < 2:
                 if ui is not None:
                     ui.note(f"模型繁忙,{2 ** attempt}s 后重试 ({attempt + 1}/2)…")

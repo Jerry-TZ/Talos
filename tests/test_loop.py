@@ -890,7 +890,11 @@ def test_the_client_bounds_how_long_one_call_can_hang(monkeypatch):
     monkeypatch.setenv("ZHIPUAI_API_KEY", "k")
     monkeypatch.setattr(A, "PROVIDER", "glm")
     A.make_client()
-    assert seen["timeout"] == A.CHAT_TIMEOUT
+    # 预算是**两个**数,不是一个:「等不到回答」要留够(air 档写两万字符真要几分钟),
+    # 「压根连不上」不该也等那么久 —— 上一版合成一个 300s,代理没配好就静默卡五分钟。
+    t = seen["timeout"]
+    assert t.connect == A.CONNECT_TIMEOUT and t.read == A.CHAT_TIMEOUT, \
+        f"连接和读用了同一个预算:{t}"
     assert seen["max_retries"] == 0            # 重试归 _chat 管,别两层相乘
 
 def test_a_resumed_task_still_gets_its_learning_pass():
@@ -1835,3 +1839,64 @@ def test_the_payload_is_not_part_of_the_key_but_everything_else_is():
     k3 = A._stall_key("read_file", {"path": "a.txt", "offset": 0})
     k4 = A._stall_key("read_file", {"path": "a.txt", "offset": 200})
     assert k3 != k4, "offset 被并进同一个键 —— 翻页读会被误伤"
+
+
+def test_the_connect_budget_is_separate_from_the_read_budget(monkeypatch):
+    """「等不到回答」和「压根连不上」是两件事,合成一个数就只能迁就慢的那一边。
+
+    上一版只有一个总超时 300s:代理没配好(墙内跑 Gemini/OpenAI 最常见的第一次失败)
+    表现为**静默卡 300 秒**,`_chat` 还会重试一次 —— 人盯着光标等十分钟才看到一句
+    timeout。实测同一条命令:经 talos.bat(它设代理)秒级拿到 429,直接跑挂满 300 秒。"""
+    import agent as A
+    monkeypatch.setitem(A._KEYS, "DEEPSEEK_API_KEY", "x")
+    monkeypatch.setattr(A, "PROVIDER", "deepseek")
+    client, _ = A.make_client()
+    assert client.timeout.connect == A.CONNECT_TIMEOUT
+    assert client.timeout.read == A.CHAT_TIMEOUT
+    assert client.timeout.connect < client.timeout.read, "连接和读用了同一个预算"
+
+
+def test_a_connect_timeout_is_not_retried_but_a_busy_server_is(monkeypatch):
+    """连不上 ≠ 对面忙。**连接超时不重试,重试只是再等一遍。**
+
+    每次连接尝试要烧满 `CONNECT_TIMEOUT × 主机的地址条数`
+    (实测 generativelanguage 有 8 个 A/AAAA 记录,connect=10 等了 80.1 秒),
+    重一次就是再等一遍 —— 实测 163 秒,改完 41 秒。
+
+    判据按 `__cause__` 的**类型**,不按字符串:openai 把它包成 `APITimeoutError`,
+    文本是 `'Request timed out.'` —— 里面一个和「连接」有关的词都没有。
+    钉住这一点,是因为字符串判据在这儿看起来一样能跑,而它永远不会成立。"""
+    import types
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+
+    class ConnectTimeout(Exception):      # 只有类名要紧,判据看的就是它
+        pass
+
+    def _boom(cause):
+        def go(**kw):
+            e = Exception("Request timed out.")     # 文本里没有「connect」——故意的
+            e.__cause__ = cause()
+            raise e
+        return go
+
+    n = {"c": 0}
+    def counted(cause):
+        inner = _boom(cause)
+        def go(**kw):
+            n["c"] += 1
+            inner(**kw)
+        return types.SimpleNamespace(chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=go)))
+
+    with pytest.raises(Exception):
+        A._chat(counted(ConnectTimeout), model="m", messages=[])
+    assert n["c"] == 1, f"连接超时被重试了 {n['c']} 次 —— 每次都要再等满一轮"
+
+    class SomethingBusy(Exception):
+        pass
+    n["c"] = 0
+    monkeypatch.setattr(A.time, "sleep", lambda *_: None)   # 别真睡
+    with pytest.raises(Exception):
+        A._chat(counted(SomethingBusy), model="m", messages=[])
+    assert n["c"] > 1, "对面忙那条路也不重试了 —— 这条闸开过头了"
