@@ -16,6 +16,16 @@ REM get to wonder why editing .env changed nothing.  Set it here only to pin
 REM one launcher to one model.  glm-5.2 | glm-4.6 | glm-4.5-air | glm-4.7-flash
 set "TALOS_MODEL="
 
+REM Proxy.  Windows' "system proxy" toggle only writes the REGISTRY -- browsers read
+REM it, but Python's httpx does NOT.  So the browser reaches Gemini/OpenAI and Talos
+REM times out, which looks like a broken key.  Set the port your proxy listens on.
+REM EMPTY = no proxy.  An already-set HTTP(S)_PROXY wins, same rule as .env.
+set "TALOS_PROXY=http://127.0.0.1:7897"
+if defined TALOS_PROXY (
+    if not defined HTTPS_PROXY set "HTTPS_PROXY=%TALOS_PROXY%"
+    if not defined HTTP_PROXY  set "HTTP_PROXY=%TALOS_PROXY%"
+)
+
 REM Run after every .py edit, so a break is reported by the step that caused it.
 REM Empty = off. Only this line can set it; an installed skill cannot.
 set "TALOS_AUTOTEST="

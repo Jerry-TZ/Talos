@@ -1688,3 +1688,30 @@ def test_a_providers_private_fields_survive_the_replay_of_a_tool_call():
     # 没有私有字段的 provider(绝大多数)不许因此多出键来 —— 多出来的键会被原样发回去
     plain = A._tool_call_entry(_tc("read_file", '{"path":"a"}'))
     assert set(plain) == {"id", "type", "function"}, f"给没有 extra 的 provider 加了料:{plain}"
+
+
+@pytest.mark.parametrize("args,rc,frag", [
+    (["--model", "glm/glm-4.6", "--list"],  0, ""),                  # 换家 + 换型号
+    (["--model", "glm-4.6", "--list"],      0, ""),                  # 只换型号,留在当前家
+    (["--model", "xx/yy", "--list"],        1, "未知 provider"),      # 打错家名要当场说
+    (["--model", "--list"],                 1, "--model 要一个值"),   # 漏了值,别把 --list 当模型名
+    (["--model", "glm/", "--list"],         1, "--model 要一个值"),   # 斜杠后面空着
+])
+def test_switching_model_from_the_command_line(args, rc, frag):
+    """`--model gemini/gemini-3.5-flash` —— 换一次模型不改任何文件、不留 shell 状态。
+
+    为什么需要它:`talos.bat` 里那行 `set "TALOS_MODEL="` 在 cmd 里是**删除**,
+    所以从 shell 继承进来的 `TALOS_MODEL` 会被它静默清掉 —— 「临时覆盖一次」那条路
+    本来是不通的,而且不通得没有任何提示。
+
+    判据里那两条**报错**的比两条成功的更重要:`--model --list` 要是把 `--list` 当成模型名
+    吞掉,人看到的是「模型不存在」,而真正的错是漏了一个值 —— 又一次「症状指着错的地方」。"""
+    import os
+    import subprocess
+    import sys
+    r = subprocess.run([sys.executable, "agent.py"] + args,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    assert r.returncode == rc, f"{args} 返回码 {r.returncode},期望 {rc}\n{r.stdout}{r.stderr}"
+    if frag:
+        assert frag in (r.stdout + r.stderr), f"{args} 没说清错在哪:{r.stdout}{r.stderr}"

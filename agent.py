@@ -3369,6 +3369,23 @@ if __name__ == "__main__":
     except Exception:
         pass
     argv = sys.argv[1:]
+    # `--model gemini/gemini-3.5-flash` 换一次模型,不改任何文件、不留 shell 状态。
+    # **provider 写在斜杠前面,不从模型名去猜** —— 猜的那张前缀表每来一家新模型就落后一次
+    # (gemma 是 Google、glm 和 gemma 都以 g 开头),而猜错的代价是拿着 A 家的 key 去打 B 家。
+    # 斜杠省略就只换模型、留在当前 provider(同一家换大小号,最常见的用法)。
+    # 这条必须排在所有其它 flag 前面:它要在 -p / --continue 拿到 argv 之前把自己摘出去。
+    if "--model" in argv or "-m" in argv:
+        i = argv.index("--model" if "--model" in argv else "-m")
+        spec = argv[i + 1] if len(argv) > i + 1 else ""
+        prov, _, name = spec.rpartition("/")
+        if not name or name.startswith("-"):
+            raise SystemExit("--model 要一个值:`--model glm-4.6`,或 `--model glm/glm-4.6` 连 provider 一起换")
+        if prov and prov.lower() not in PROVIDERS:
+            raise SystemExit(f"未知 provider: {prov}。可选: {', '.join(PROVIDERS)}")
+        if prov:
+            PROVIDER = prov.lower()
+        os.environ["TALOS_MODEL"] = name
+        del argv[i:i + 2]
     if "--selfcheck" in argv:
         _selfcheck()
     elif "--approve-tools" in argv:
