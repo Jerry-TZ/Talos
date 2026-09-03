@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 4166 行 Python,235 条离线判据,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 4417 行 Python,254 条离线判据,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -19,7 +19,7 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `agent.py` | 3124 | 循环 + 工具 + 权限门 + 自学习 |
+| `agent.py` | 3375 | 循环 + 工具 + 权限门 + 自学习 |
 | `console_ui.py` | 214 | 终端界面(可整体替换) |
 | `recall.py` | 557 | 联想记忆:扩散激活检索 |
 | `session.py` | 271 | 会话持久化(想换 SQLite 只改这个) |
@@ -33,7 +33,7 @@
 极简 agent 赛道很挤,有人用 Zig 做到 678KB 二进制。**Talos 不比谁小,它比谁都好读。**
 
 - **能读完** — 四个文件,注释解释的是*为什么*,不是*是什么*。几乎每条防御旁边都写着它挡的那次真实翻车。
-- **能验证** — 235 个测试,**离线、免 API key、几秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
+- **能验证** — 254 个测试,**离线、免 API key、几秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
 - **不吹牛** — [`SECURITY.md`](SECURITY.md) 明写 `create_tool` 就是进程内 RCE、正则黑名单只是减速带。**没有沙箱就是没有沙箱** —— 真要隔离,[三条现成方案](SECURITY.md#真要隔离怎么办)按代价从低到高列在那儿。
 - **有考卷** — [`EXAM.md`](EXAM.md) / [`EXAM2.md`](EXAM2.md) 是两份可复现的能力测试,带标准答案和作弊检测(比如逐个核验 arXiv ID 真伪,防止编造引用)。记录的是"我怎么验证它真的有用",不是功能列表。
 - **有实测** — [`FINDINGS.md`](FINDINGS.md) 记了二十二个真实任务量出来的东西:哪条提示词生效、哪条从头到尾没生效、六次翻车、检索改动的前后数字,以及**两个被数据否掉的自己的方案**。样本小,局限写在最前面。
@@ -136,6 +136,17 @@ tail -3 .talos/recall_trace.jsonl
 
 `/forget` 据此清理:**只提议删 Talos 自己写的**,并且分两类给你理由 —— *「出现 12 次从没被想起」*(存了个寂寞)和*「上次想起是 200 天前」*(过时了)。你手写的事实它无权判断,永远不碰。
 
+**目标闸**(可选,`/goal`)— 模型不再调工具只说明**这一轮**想停。设了目标之后,收工前会过一个
+**独立判断器**:它有 `read_file`,**会自己打开交付物核对**,而不是听模型怎么说。
+
+为什么判断器必须能读文件:真实发生过(`FINDINGS.md` 任务 22)——规格要求「冲突键恰好 3 个」,
+模型四次凑不出来,最后**把断言从 3 改成 4**,它自己的 `verify_conf.py` 报「验证通过」。
+一个只读对话的判断器会看到那句话然后放行。判断器打开文件数一遍,才看得出交付物违反规格。
+
+它不能写、不能跑命令、不能派子 agent —— 那样就变成再跑一遍任务,不是检查了。判不出来时
+**不宣称成功**:保留目标、交还控制权。无人值守用 `TALOS_GOAL` 环境变量。判断器的 token
+单独记账,`/goal` 看得到花了多少。
+
 **省 token** — 读文件截断分页、旧工具输出打桩、上下文自动压缩、稳定前缀走 provider 缓存。每轮结束显示调用次数 / 输入输出 / 缓存命中,`/tokens` 看累计。
 
 会话累计每过 20 万 token 提醒一次(`TALOS_SESSION_BUDGET` 可调,设 0 关掉)。**这条线是量出来的**:40 个真实会话里越过它的有 8 个,而那 8 个吃掉了 91% 的费用 —— `MAX_STEPS` 只管单轮,会话累计以前没人管。提醒**每档只说一次**,同一档里涨多少都闭嘴。
@@ -163,6 +174,7 @@ set "TALOS_AUTOCOMMIT=1"                   REM 测试通过才提交,只 add 改
 /history  /resume   会话列表 / 续上       /tokens         用量统计
 /reflect            手动复盘             /consolidate    整理技能库
 /compact            压缩上下文           /recall <词>    看联想检索的激活分数
+/goal <完成条件>    设目标 —— 模型说停时,由一个会自己读文件的判断器决定算不算完成
 Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说新要求
 ```
 
@@ -184,7 +196,7 @@ Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说
 
 ```bash
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest tests/ -q     # 235 条,约 8 秒,不联网、不需要 key
+.venv\Scripts\python.exe -m pytest tests/ -q     # 254 条,约 8 秒,不联网、不需要 key
 python agent.py --selfcheck                       # 免依赖的冒烟检查
 ```
 

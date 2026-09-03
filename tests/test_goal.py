@@ -1,0 +1,288 @@
+"""目标闸:模型说停 ≠ 目标达成,而且判断器**自己去读交付物**。
+
+为什么要有这层,以及为什么判断器必须能读文件,理由写在 agent.py 的「goal gate」那一段。
+这份测试钉的是那段推理的每一个可观察后果 —— 尤其是**任务 22 那个形状**
+(FINDINGS:669:模型把断言从 3 改成 4,自己的脚本报「验证通过」):
+一个只读对话的判断器会放行,一个会打开文件数一遍的不会。那条测试是这整件事的理由。
+"""
+import json
+import os
+import types
+
+from test_loop import _Client, _msg, _tc, _ui
+
+
+def _judge(ok=False, reason="还没证据", impossible=False):
+    """判断器给结论的那一轮(它返回 JSON 文本,不调工具)。"""
+    return _msg(content='{"ok": %s, "reason": "%s", "impossible": %s}'
+                % (str(ok).lower(), reason, str(impossible).lower()))
+
+
+def _judge_reads(path, cid="j1"):
+    """判断器先去读一个文件的那一轮。"""
+    return _msg(tool_calls=[_tc("read_file", json.dumps({"path": path}), cid=cid)])
+
+
+def _run(monkeypatch, script, goal="产物正确", view="quiet", **extra):
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    state = {"mode": "bypass", "allow": set(), "view": view, "goal": goal, **extra}
+    messages = [{"role": "user", "content": "干活"}]
+    out = A.agent_turn(_Client(script), "m", messages, state, top=True)
+    return out, state, messages
+
+
+# ── 这条是整件事的理由:判断器不吃「我自己的脚本说通过了」──────────────────────
+def test_judge_opens_the_deliverable_instead_of_believing_the_verify_script(ws, monkeypatch):
+    """任务 22 的形状(FINDINGS:669)。
+
+    规格要 3 个冲突键,模型只做出 4 个,于是**把断言改成 4**,`verify_conf.py` 报「验证通过」。
+    对话里从头到尾只有「验证通过」这句 —— 一个只读对话的判断器会放行。
+    判断器 read_file 打开产物自己数,才看得出交付物违反规格。
+    """
+    import agent as A
+    with open(os.path.join(ws, "conf_report.txt"), "w", encoding="utf-8") as f:
+        f.write("conflict keys: server.host, server.port, log.level, log.file\n")   # 4 个,规格要 3 个
+    out, state, _ = _run(monkeypatch, [
+        _msg(content="生成器跑完了,verify_conf.py 输出「验证通过」。"),   # 干活模型收工
+        _judge_reads("conf_report.txt"),                                  # 判断器去开文件
+        _judge(ok=False, reason="报告里是 4 个冲突键,规格要求恰好 3 个"),
+        _msg(content="我重做一遍。"),
+        _judge(ok=True, reason="现在是 3 个"),
+    ], goal="conf_report.txt 里冲突键恰好 3 个")
+    assert state["goal_checks"] == 2
+    assert "✅ 目标达成" in out
+
+
+def test_judge_only_gets_read_file(ws, monkeypatch):
+    """判断器是来查的,不是来干活的。给它 run_bash 就变成第二个 agent 了。
+
+    两件事一起钉:① 送出去的 tools 里只有 read_file;② 它硬要调别的,当场驳回、不执行。
+    """
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    seen = {}
+    class Spy(_Client):
+        def _c(self, **k):
+            if "tools" in k and k["messages"][0]["content"].startswith("你是一个独立的完成判断器"):
+                seen["tools"] = [t["function"]["name"] for t in k["tools"]]
+            return super()._c(**k)
+    state = {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "x"}
+    A.agent_turn(Spy([
+        _msg(content="做完了"),
+        _msg(tool_calls=[_tc("run_bash", '{"command":"rm -rf /"}', cid="j1")]),   # 判断器越界
+        _judge(ok=True),
+    ]), "m", [{"role": "user", "content": "干活"}], state, top=True)
+    assert seen["tools"] == ["read_file"], f"判断器拿到的工具不止 read_file:{seen['tools']}"
+
+
+def test_judge_refusal_message_names_the_tool(ws, monkeypatch):
+    """越界调用要**驳回并说明**,不能静默丢掉 —— 否则判断器会一直重试同一个动作。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    sent = []
+    class Spy(_Client):
+        def _c(self, **k):
+            sent.append(k["messages"])
+            return super()._c(**k)
+    state = {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "x"}
+    A.agent_turn(Spy([_msg(content="好了"),
+                      _msg(tool_calls=[_tc("write_file", '{"path":"a","content":"b"}', cid="j1")]),
+                      _judge(ok=True)]),
+                 "m", [{"role": "user", "content": "干活"}], state, top=True)
+    blob = json.dumps(sent[-1], ensure_ascii=False)
+    assert "只能用 read_file" in blob and "write_file" in blob
+    assert not os.path.exists(os.path.join(ws, "a")), "越界的写居然真的执行了"
+
+
+# ── 核心流程 ─────────────────────────────────────────────────────────────────
+def test_block_sends_the_turn_back_without_user_input(ws, monkeypatch):
+    out, state, messages = _run(monkeypatch, [
+        _msg(content="做完了"), _judge(ok=False, reason="产物里没有那三个字段"),
+        _msg(content="补上了"), _judge(ok=True, reason="三个字段都在"),
+    ])
+    assert state["goal_checks"] == 2 and "✅ 目标达成" in out
+    assert any("[目标检查]" in str(m.get("content", "")) for m in messages)
+
+
+def test_no_goal_means_the_old_exit_condition(ws, monkeypatch):
+    """没设目标时判断器一次都不该被调 —— 脚本只有一条,多调就 IndexError。"""
+    out, state, _ = _run(monkeypatch, [_msg(content="答完了")], goal=None)
+    assert out == "答完了" and "goal_checks" not in state
+
+
+def test_internal_turns_are_never_goal_checked(ws, monkeypatch):
+    """`top` 已经把内部轮次分开了:子 agent 干完子任务不等于会话目标达成,
+    复盘那一轮更不该被目标打回去重做。两处都不传 top,所以天然不检查。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    state = {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "x"}
+    out = A.agent_turn(_Client([_msg(content="子任务做完了")]), "m",
+                       [{"role": "user", "content": "子任务"}], state)      # 不传 top
+    assert out == "子任务做完了" and "goal_checks" not in state
+
+
+# ── 出口:三种情况都不许把没达成说成达成 ──────────────────────────────────────
+def test_block_cap_hands_control_back_without_faking_success(ws, monkeypatch):
+    import agent as A
+    monkeypatch.setattr(A, "GOAL_MAX_BLOCKS", 2)
+    script = []
+    for _ in range(3):
+        script += [_msg(content="我觉得好了"), _judge(ok=False, reason="还是不对")]
+    out, state, _ = _run(monkeypatch, script)
+    assert "连续 2 次判定未达成" in out and "✅" not in out
+    assert state["goal"] == "产物正确", "目标必须保留,等用户补充信息"
+
+
+def test_judge_crash_does_not_claim_success(ws, monkeypatch):
+    out, state, _ = _run(monkeypatch, [_msg(content="好了"), RuntimeError("502")])
+    assert "目标检查失败" in out and "✅" not in out and state["goal"]
+
+
+def test_judge_prose_instead_of_json_is_an_error_not_a_pass(ws, monkeypatch):
+    out, _, _ = _run(monkeypatch, [_msg(content="好了"), _msg(content="嗯差不多完成了吧")])
+    assert "目标检查失败" in out and "✅" not in out
+
+
+def test_impossible_stops_instead_of_looping(ws, monkeypatch):
+    out, state, _ = _run(monkeypatch, [
+        _msg(content="找不到"), _judge(ok=False, reason="要求的仓库不存在", impossible=True)])
+    assert "不可能达成" in out and "✅" not in out and state["goal"]
+
+
+def test_judge_that_never_concludes_is_capped(ws, monkeypatch):
+    """判断器一直读不下结论,也得有出口 —— 而且是 error,不是默认放行。"""
+    import agent as A
+    monkeypatch.setattr(A, "GOAL_MAX_READS", 3)
+    out, _, _ = _run(monkeypatch, [_msg(content="好了")] + [_judge_reads("x.txt")] * 3)
+    assert "还没给结论" in out and "✅" not in out
+
+
+# ── 账单和提示词 ─────────────────────────────────────────────────────────────
+def test_judge_tokens_are_billed_separately_from_the_turn(ws, monkeypatch):
+    """判断器的开销单独记 —— 混进 state["tok"] 会让 benchmark 的每轮 token 悄悄变含义。"""
+    u = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20, prompt_tokens_details=None)
+    _out, state, _ = _run(monkeypatch, [_msg(content="好了", usage=u),
+                                        _msg(content='{"ok": true, "reason": ""}', usage=u)])
+    assert state["goal_tok"] == {"in": 100, "out": 20, "calls": 1}
+    assert state["tok"]["in"] == 100, "判断器的 token 漏进了主轮统计"
+
+
+def test_goal_reaches_the_model_only_when_active(ws, monkeypatch):
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    seen = {}
+    class Spy(_Client):
+        def _c(self, **k):
+            seen.setdefault("system", k["messages"][0]["content"])
+            return super()._c(**k)
+    A.agent_turn(Spy([_msg(content="好")]), "m", [{"role": "user", "content": "x"}],
+                 {"mode": "bypass", "allow": set(), "view": "quiet"}, top=True)
+    assert "[本轮目标]" not in seen["system"]            # 没目标 -> 一个 token 不占
+
+    seen.clear()
+    A.agent_turn(Spy([_msg(content="好"), _judge(ok=True)]), "m",
+                 [{"role": "user", "content": "x"}],
+                 {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "跑通"}, top=True)
+    assert "[本轮目标] 跑通" in seen["system"]
+    # 告诉模型判断器**会自己开文件**,而不是只说「要写清楚」——两者对它的行为要求不同
+    assert "自己打开交付物" in seen["system"]
+
+
+def test_system_prompt_measured_for_cache_matches_what_was_sent(ws, monkeypatch):
+    """`sys_now` 量的必须是**真正发出去的那一串**(那行注释自己说的)。
+
+    目标提示要是加在 `sys_now` 之后,缓存前缀仪表就会少量一段,而这个错误
+    在功能上完全无感 —— 只有这条判据看得见。
+    """
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    sent = {}
+    class Spy(_Client):
+        def _c(self, **k):
+            sent.setdefault("system", k["messages"][0]["content"])
+            return super()._c(**k)
+    state = {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "跑通"}
+    A.agent_turn(Spy([_msg(content="好"), _judge(ok=True)]), "m",
+                 [{"role": "user", "content": "x"}], state, top=True)
+    assert state["sys_now"] == sent["system"]
+
+
+# ── 判断器看得见什么 ─────────────────────────────────────────────────────────
+def test_listing_lets_the_judge_find_the_deliverable(ws, monkeypatch):
+    """判断器要先知道有哪些文件才谈得上去读,而 talos 没有 list 类工具 ——
+    目录由 harness 算好放进提示词,不给主循环加新工具面。"""
+    import agent as A
+    os.makedirs(os.path.join(ws, "out"), exist_ok=True)
+    with open(os.path.join(ws, "out", "report.md"), "w", encoding="utf-8") as f:
+        f.write("hi")
+    listing = A._workspace_listing()
+    assert "report.md" in listing and "B)" in listing
+
+
+def test_transcript_keeps_the_tail_of_a_long_result(ws, monkeypatch):
+    """退出码通常在**末尾**,只留开头会正好丢掉判据 3 要看的那半。"""
+    import agent as A
+    t = A._goal_transcript([{"role": "tool", "content": "x" * 5000 + "EXITCODE_0"}])
+    assert "EXITCODE_0" in t and "省略" in t and len(t) < 3000
+
+
+def test_pruned_stub_names_what_to_reread(ws):
+    """「需要就重新读」得说清读的是什么。
+
+    只报字符数的话,模型此时已经不知道当初读的是哪个文件 —— 那是一句无法执行的建议。
+    出处不用另存:发起这次调用的 tool_call 里就写着。
+    """
+    import agent as A
+    msgs = [{"role": "assistant", "content": "",
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "read_file",
+                                          "arguments": '{"path":"src/config.py"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "Z" * 1000}] \
+        + [{"role": "user", "content": "x"}] * 10
+    A._prune_old_tool_results(msgs)
+    assert "src/config.py" in msgs[1]["content"], "占位符没说该重读哪个文件"
+    # 找不到出处(压缩过的历史里调用可能已经没了)要退回旧说法,不能崩
+    orphan = [{"role": "tool", "tool_call_id": "gone", "content": "Z" * 1000}] \
+        + [{"role": "user", "content": "x"}] * 10
+    A._prune_old_tool_results(orphan)
+    assert orphan[0]["content"].startswith("[已省略")
+
+
+def test_once_picks_up_TALOS_GOAL_and_the_judge_forces_the_rework(ws, monkeypatch):
+    """无人值守那条路的完整接线:环境变量 → state → 判断器 → 打回 → 真工具真的跑。
+
+    `-p` 正是 EXAM 跑的那条路,而没人在读 transcript 的时候「说完成了但没完成」代价最大。
+    只有模型是脚本;write_file、权限闸、工作区隔离都是真的。
+    """
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.chdir(ws)                    # 相对路径指工作区,和真实运行一致
+    monkeypatch.setenv("TALOS_GOAL", "out.txt 里有三行")
+    client = _Client([
+        _msg(tool_calls=[_tc("write_file", '{"path":"out.txt","content":"a\\nb\\n"}')]),
+        _msg(content="写好了,应该是三行。"),              # 其实只有两行
+        _judge_reads("out.txt"),                          # 判断器自己去数
+        _judge(ok=False, reason="只有 2 行,要 3 行"),
+        _msg(tool_calls=[_tc("write_file", '{"path":"out.txt","content":"a\\nb\\nc\\n"}', cid="c9")]),
+        _msg(content="补成三行了。"),
+        _judge_reads("out.txt", cid="j2"),
+        _judge(ok=True, reason="3 行"),
+    ])
+    monkeypatch.setattr(A, "make_client", lambda: (client, "m"))
+    out = A.once("写个 out.txt")
+
+    with open(os.path.join(ws, "out.txt"), encoding="utf-8") as f:
+        assert f.read().count("\n") == 3, "最终产物不是三行"
+    assert "✅ 目标达成" in out
+    # 剧本 8 条全消费 = 第一次收工真的被打回去了。判断器没生效的话第 4 条之后就返回。
+    assert client.i == 8, f"判断器没把这轮打回去(只消费了 {client.i} 条)"
+
+
+def test_json_object_tolerates_fences_and_preamble():
+    import agent as A
+    assert A._json_object('```json\n{"ok": true}\n```') == {"ok": True}
+    assert A._json_object('我认为:\n{"ok": false, "reason": "x"}\n以上') == {"ok": False, "reason": "x"}
+    assert A._json_object("完全没有 json") is None
+    assert A._json_object('{"坏的": ') is None
+    assert A._json_object("[1,2,3]") is None            # 数组不是对象

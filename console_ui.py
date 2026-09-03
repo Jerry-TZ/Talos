@@ -39,7 +39,7 @@ def banner(mode: str, provider: str, model: str) -> None:
         border_style=C_MODEL, padding=(0, 2)))
     console.print(f"[dim]模型[/] [bold {C_CODE}]{provider}[/] · {model}    "
                   "[dim]命令[/] [bold]/workspace[/]·[bold]/model[/]·[bold]/mode[/]·[bold]/show[/]·"
-                  "[bold]/history[/]·[bold]/tokens[/]·[bold]/reflect[/]·[bold]/compact[/]·[bold]quit[/]\n"
+                  "[bold]/goal[/]·[bold]/history[/]·[bold]/tokens[/]·[bold]/reflect[/]·[bold]/compact[/]·[bold]quit[/]\n"
                   "[dim]中断[/] Ctrl+C 停下当前这轮(做过的都留着,可以直接说新要求)")
     console.print("[dim]权限档: plan(只读)·default(每次问)·acceptEdits(自动改文件)·bypass(全放行)   "
                   "自学习: 复杂任务后自动复盘并存 skills/[/]\n")

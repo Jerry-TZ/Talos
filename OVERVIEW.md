@@ -104,6 +104,7 @@ flowchart TB
 | `/resume <#/id>` | 调出历史会话继续 |
 | `/delete <#/id>` | 删除会话 |
 | `/compact` | 手动压缩上下文 |
+| `/goal <条件>` | 设完成条件。模型不调工具时不直接结束,先过一个**独立判断器**(单独一次调用,只有 `read_file`,会自己打开交付物核对);没达成就把理由写回对话继续做。`/goal` 查看,`/goal clear` 清除。无人值守用环境变量 `TALOS_GOAL` |
 | `quit` | 退出 |
 
 命令行参数:`--continue` / `--resume <id>` / `--list` / `--view <id>` / `--delete <id>` / `--selfcheck`。

@@ -1025,7 +1025,11 @@ STATE_SHARED = ("tok", "trace")              # 汇总:子轮的消耗算在父�
 STATE_LOCAL = ("capped", "last_tok", "last_calls",   # 只描述"刚刚这一轮"
                "since_reflect", "reads",             # 只在顶层那份 state 上累
                "budget_said",                        # 预算说到第几档:子轮继承了就会各说各的
-               "sys_hash", "sys_prev", "sys_now")    # 缓存仪表,同样不跨层
+               "sys_hash", "sys_prev", "sys_now",    # 缓存仪表,同样不跨层
+               # 目标是**会话级**的,和 `capped` 同一个道理:子 agent 干完子任务不等于
+               # 会话目标达成。判断器只在 top 跑,所以子那份 state 里这四个字段永远是空的
+               # —— 继承过去就是个读不到的死字段,不如在这儿把边界说明白。
+               "goal", "goal_checks", "goal_last", "goal_tok")
 
 _CHILD_KEYS = STATE_INHERIT + STATE_SHARED
 
@@ -1495,10 +1499,20 @@ _DESTRUCTIVE = re.compile(
 # user's code somewhere. Blanket-allowing run_bash must not blanket-allow egress.
 _EXFIL = re.compile(
     r"\bgit\s+(push|remote\s+add)\b"
-    r"|\bcurl\b[^\n]*(-T|--upload-file|-F\b|--data|-d\b)"
-    r"|\bwget\b[^\n]*--post"
+    r"|\bcurl\b[^\n]*(-T|--upload-file|-F\b|--form\b|--data|-d\b"
+    r"|-X\s+POST\b|--request\s+POST\b)"
+    r"|\bwget\b[^\n]*(--post|--body-file|--body-data)"
     r"|\bscp\b|\brsync\b[^\n]*::|@[\w.-]+:"
     r"|Invoke-RestMethod[^\n]*-Method\s+Post|Invoke-WebRequest[^\n]*-Method\s+Post"
+    # 别名和 UploadFile 是 2026-09 审计补的,判据是**同一个二进制的另一种拼法**,不是新增覆盖面:
+    # `--form` 之于 `-F`、`--body-file` 之于 `--post`、`iwr` 之于 `Invoke-WebRequest`,直白程度
+    # 一模一样,而 PowerShell 里没人打全称。补这些不违反下面「不追对抗类」那条 —— 它们本来就在
+    # 这张表点名的二进制上,只是漏了写法。**为什么是这一半值得补而删除那一半不值得**:删除有
+    # 回收站兜底(archive_workspace 按权限类别触发,不看命令),漏一条只是少弹个框,数据还在;
+    # 外发一条补偿控制都没有 —— SECURITY.md「缺的那道闸」写着默认断网没实现,所以这条正则
+    # 就是人按确认键之前唯一的一道。
+    r"|\b(iwr|irm)\b[^\n]*-Method\s+Post"
+    r"|WebClient[^\n]*\.(UploadFile|UploadString|UploadData)"
     r"|requests\.post|urllib[^\n]*urlopen\([^)]*data\s*=",
     re.IGNORECASE)
 
@@ -1840,6 +1854,156 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
                            "为什么,让用户自己动手。")
         return False, "用户拒绝了这次调用"
     return False, f"用户拒绝,并说:{ans}"          # like Claude Code's "No, and tell it what to do"
+
+# ── goal gate:模型说停 ≠ 目标达成 ─────────────────────────────────────────────
+# 从 s01 起退出条件一直是「模型不再调工具」。那只说明**这一轮**想停。
+#
+# 为什么值得做:JUDGING 第五节「谁来跑判据」说——「一条判据只有挂在**已经必跑的东西**上
+# 才算数」,而「叫模型记得跑一下第三方检查,那还是一条提示,不是判据」。SYSTEM 里那句
+# `Never claim you are done...` 正是它说的那种提示。挂在循环退出口上,才是每轮必跑。
+#
+# 为什么判断器要有只读工具:JUDGING 第五节另一半「谁来查判据」说要换一个没参与写它的模型。
+# 光换模型不够 —— 证据没换。任务 22 里 glm 四次凑不出规格要的 3 个冲突键,最后把断言从 3
+# 改成 4,它的 verify_conf.py 报「验证通过」(FINDINGS)。一个只读对话的判断器会看到那句
+# 「验证通过」然后放行,给这个仓库**已经记录在案**的失败模式盖章。那还是自证,只是套了一层
+# 看起来像独立检查的壳 —— SECURITY 开篇那句「假装堵住比不堵更危险」说的就是这个。
+# FINDINGS 自己给的解法是「验收交付物,不看它自己的验收脚本,另写脚本直接扫产物」。
+# 这里就是那句话的自动化版:判断器**自己去读产物**。
+#
+# 为什么只给 read_file:给它 run_bash 或 write 就变成第二个 agent 了 —— 那是再跑一遍任务,
+# 不是检查。read 类本来就不过权限门(_policy 第一行),所以判断器不会弹框打扰无人值守;
+# 而 read_file 自带工作区牢笼和凭据黑名单,判断器一并继承。**不给 spawn_subagent**:
+# 它在表里虽然登记成 "read",但它转手就能调所有工具。
+#
+# 判断器**做不到**的事(写在这儿,免得它变成又一个虚假的安全感):
+#   · 读不出来的正确性它判不了 —— 要跑才知道的东西,它只能依赖对话里的输出,那半仍是自证。
+#   · 它要花 token,而且是每轮结束时花。默认不开;开了就该看见账单(state["goal_tok"])。
+#   · 它自己也是个模型,一样会看走眼。它降低的是「一句话就蒙混过去」的概率,不是归零。
+
+GOAL_MAX_BLOCKS = int(os.environ.get("TALOS_GOAL_MAX_BLOCKS", "8"))  # 自动续轮的出口
+GOAL_MAX_READS = 6          # 判断器自己的步数上限:它是来查的,不是来干活的
+GOAL_LISTING_MAX = 200      # 放进判断器提示词的工作区文件数上限
+_GOAL_CLEAR = {"clear", "stop", "off", "reset", "none", "cancel", "清除", "取消"}
+
+GOAL_JUDGE_PROMPT = (
+    "你是一个独立的完成判断器。干活的模型已经说它这一轮做完了,你来判断**完成条件到底达成没有**。\n\n"
+    "你有一个工具:`read_file`。**你只能读,不能写、不能跑命令。**\n\n"
+    "判据(按顺序):\n"
+    "1. **优先自己读交付物**,而不是相信对话里的说法。条件里点名了文件、数量、字段,"
+    "就 read_file 打开它,自己数一遍。\n"
+    "2. **干活的模型自己写的验证脚本、它自己报的「验证通过」,都不算证据。**"
+    "真实发生过:它凑不出规格要求的数量,就把断言改小,然后脚本报「通过」。"
+    "要看就看产物本身,不看它对产物的说法。\n"
+    "3. 读不到、或者条件必须跑起来才能验(比如「测试退出码为 0」),才退回去看对话里"
+    "有没有出现**实际的命令输出和退出码**。仍然:只有输出算数,声称不算。\n"
+    "4. 条件里每一项都满足才算 ok;满足了一半是 ok=false,并在 reason 里说清**还差哪一项**。\n"
+    "5. **`impossible` 只用于「再做也做不到」,不是「还没做」。** 交付物缺失、数字不对、"
+    "少一步验证 —— 这些都是随手能补的状态,一律 ok=false 而不是 impossible;"
+    "只有前提被推翻、要求的东西根本不存在且造不出来,才 impossible=true。"
+    "(判错的代价不对称:ok=false 只是让它继续做,impossible 会当场收工。)\n\n"
+    "读够了就给结论。只输出一个 JSON 对象,不要解释、不要代码块围栏:\n"
+    '{"ok": true/false, "reason": "一句话", "impossible": true/false}'
+)
+
+def _json_object(text: str):
+    """从模型输出里抠出第一个 JSON 对象 —— 它常常裹在 ```json 里或带一句前言。"""
+    m = re.search(r"\{.*\}", text or "", re.S)
+    if not m:
+        return None
+    try:
+        d = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return None
+    return d if isinstance(d, dict) else None
+
+def _workspace_listing(limit: int = GOAL_LISTING_MAX) -> str:
+    """判断器得先知道有哪些文件才谈得上去读。
+
+    目录由 harness 直接算好放进提示词,**不加一个 list 类工具** —— 加了就是给所有模型
+    都加一个,为判断器的方便扩大主循环的工具面,代价不对等。"""
+    out = []
+    for root, dirs, files in os.walk(WORKSPACE):
+        dirs[:] = [d for d in dirs if not d.startswith((".", "__")) and d != "node_modules"]
+        for f in sorted(files):
+            p = os.path.join(root, f)
+            try:
+                out.append(f"{os.path.relpath(p, WORKSPACE)}  ({os.path.getsize(p)} B)")
+            except OSError:
+                continue
+            if len(out) >= limit:
+                return "\n".join(out) + f"\n…(还有更多,只列了 {limit} 个)"
+    return "\n".join(out) or "(工作区是空的)"
+
+def _goal_transcript(messages: list, budget: int = 12000) -> str:
+    """对话记录是**次要**证据(判据 3),但退出码这类只能从这儿看。倒着收到预算用完;
+    单条过长掐头去尾 —— 退出码通常在末尾,只留开头会正好丢掉判据。"""
+    out, used = [], 0
+    for m in reversed(messages):
+        text = m["content"] if isinstance(m.get("content"), str) else ""
+        if m.get("tool_calls"):
+            did = ", ".join(f"{(c.get('function') or {}).get('name', '?')}"
+                            f"({str((c.get('function') or {}).get('arguments', ''))[:60]})"
+                            for c in m["tool_calls"] if isinstance(c, dict))
+            text = ((text + " ") if text else "") + f"[调用了 {did}]"
+        if not text:
+            continue
+        if len(text) > 2000:
+            text = f"{text[:900]}\n…(省略 {len(text) - 1900} 字符)…\n{text[-1000:]}"
+        if used + len(text) > budget:
+            break
+        out.append(f"[{m.get('role')}] {text}")
+        used += len(text)
+    return "\n".join(reversed(out))
+
+def evaluate_goal(client, model: str, goal: str, messages: list, state: dict) -> tuple[str, str]:
+    """独立判断:目标达成了吗。返回 ('ok'|'block'|'impossible'|'error', 理由)。
+
+    自带一个**小循环** —— 判断器可以 read_file 若干次再下结论,上限 GOAL_MAX_READS。
+    工具白名单只有 read_file:名字对不上一律驳回,不走 run_tool。"""
+    judge_model = os.environ.get("TALOS_GOAL_MODEL") or model
+    specs = [s for s in tool_specs() if s["function"]["name"] == "read_file"]
+    conv = [{"role": "user", "content":
+             f"完成条件:\n{goal}\n\n工作区文件:\n{_workspace_listing()}\n\n"
+             f"干活模型的对话记录(次要证据):\n{_goal_transcript(messages)}"}]
+    for _ in range(GOAL_MAX_READS):
+        try:
+            resp = _chat(client, model=judge_model, tools=specs,
+                         messages=[{"role": "system", "content": GOAL_JUDGE_PROMPT}] + conv)
+        except Exception as e:                # 判断不了就**别猜**:保留目标,交还控制权
+            return "error", f"判断器调用失败 — {type(e).__name__}: {e}"
+        msg = resp.choices[0].message
+        # 判断器的开销单独记账。混进 state["tok"] 会让 benchmark 的每轮 token 悄悄变含义,
+        # 而目标是可选的 —— 没开目标的对比不受影响,开了就该看得见它花了多少。
+        gt = state.setdefault("goal_tok", {"in": 0, "out": 0, "calls": 0})
+        for k, v in zip(("in", "out"), _usage(resp)):
+            gt[k] += v
+        gt["calls"] += 1
+        calls = msg.tool_calls or []
+        if not calls:
+            data = _json_object(msg.content or "")
+            if data is None:
+                return "error", f"判断器没返回 JSON:{(msg.content or '')[:200]}"
+            if data.get("impossible"):
+                return "impossible", str(data.get("reason") or "判断器认为目标已不可能达成")
+            if data.get("ok"):
+                return "ok", str(data.get("reason") or "")
+            return "block", str(data.get("reason") or "还没有能证明完成的证据")
+        conv.append({"role": "assistant", "content": msg.content or "",
+                     "tool_calls": [{"id": c.id, "type": "function",
+                                     "function": {"name": c.function.name,
+                                                  "arguments": c.function.arguments}}
+                                    for c in calls]})
+        for c in calls:
+            if c.function.name != "read_file":       # 白名单:判断器只准读
+                out = f"error: 判断器只能用 read_file,不能调 {c.function.name}"
+            else:
+                try:
+                    args = json.loads(c.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                out, _err = run_tool("read_file", args)
+            conv.append({"role": "tool", "tool_call_id": c.id, "content": out})
+    return "error", f"判断器读了 {GOAL_MAX_READS} 次还没给结论"
 
 # ── the loop (OpenAI-compatible chat format) ──────────────────────────────────
 
@@ -2195,8 +2359,17 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
     # 它不落盘 —— 会话里存的还是干净的对话,`/history` 看到的还是人说的话。
     #
     # 这一改自带验证:system 不再含每轮变动的部分,`prefix_kept` 应该跳到 1.0。
+    # 目标只在活跃时进 system:没设目标就一个 token 都不占,退出条件和以前完全一样。
+    # 必须加在 `sys_now` 之前 —— 那行量的是**真正发出去的这一串**,少加一段就量错了。
+    # 同一个会话里目标文本不变,所以缓存前缀照样稳定。
+    goal_note = ("\n\n[本轮目标] " + state["goal"] +
+                 "\n这一轮结束时,一个**独立判断器**会检查它达成没有。判断器有 read_file,"
+                 "**会自己打开交付物核对**,不看你对交付物的说法 —— 所以改小断言、"
+                 "或者只报一句「验证通过」,都会被当场翻出来。要跑起来才验得了的条件"
+                 "(比如退出码),把命令和它的**实际输出**写进回复,否则判断器看不见。"
+                 ) if (top and state.get("goal")) else ""
     system = (SYSTEM + _env_block()                # stable -> stays inside the cached prefix
-              + ("\n\n" + learned if learned else ""))
+              + ("\n\n" + learned if learned else "") + goal_note)
     if top:
         # 量前缀稳定性用**真正发出去的这一串**。挂 `top` 上是因为子 agent 共享 state:
         # 不挡一下,最后写进来的是最后一个子 agent 的 system,而 `_log_turn` 在顶层跑完
@@ -2256,6 +2429,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
     calls_io: list = []          # 本层每次模型调用的 (in, cached) —— 见循环里那段
     base = dict(state["tok"])    # a subagent shares `state`, so measure this turn as end-minus-start:
     steps = 0                    # nested work then lands in the caller's total instead of being lost
+    blocks = 0                   # 目标判断器把这一轮打回去了几次
     while True:
         steps += 1
         if steps > MAX_STEPS:                          # safety cap — don't spin forever
@@ -2321,7 +2495,36 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             ]
         messages.append(entry)
 
-        if not tool_calls:                              # no tool wanted -> final answer
+        if not tool_calls:                              # model wants to stop THIS ROUND
+            # `top` 已经把内部轮次分开了:子 agent 干完子任务不等于会话目标达成,
+            # 复盘那一轮更不该被目标打回去重做。两处都不传 top,所以天然不检查。
+            goal = state.get("goal") if top else None
+            if goal:
+                verdict, why = evaluate_goal(client, model, goal, messages, state)
+                state["goal_checks"] = state.get("goal_checks", 0) + 1
+                state["goal_last"] = why
+                if verdict == "block" and blocks < GOAL_MAX_BLOCKS:
+                    blocks += 1
+                    if view != "quiet":
+                        ui.note(f"🎯 目标未达成({blocks}/{GOAL_MAX_BLOCKS}):{why}")
+                    messages.append({"role": "user", "content":
+                                     f"[目标检查] 还没达成:{why}\n完成条件:{goal}\n"
+                                     f"继续做。判断器会**自己打开文件核对**,所以改小断言、"
+                                     f"或者只说一句「验证通过」都没有用 —— 把交付物做对。"})
+                    continue                           # 回到同一个 while,不用用户再说「继续」
+                # 出口必须有,而且**不许把没达成说成达成**。三种情况都保留目标、都不自动清除:
+                # 连续打回到上限、判断器自己出问题、判定为不可能。无法判断时宣称成功,
+                # 比根本没有判断器更糟 —— 那正是这道闸要治的病,不能由它自己犯。
+                if verdict == "block":
+                    tail = (f"(目标判断器连续 {GOAL_MAX_BLOCKS} 次判定未达成,先交还控制权。"
+                            f"目标还在 —— 补充信息后说「继续」,或 /goal clear 清掉。最近理由:{why})")
+                elif verdict == "impossible":
+                    tail = f"(⚠️ 判断器认为目标已不可能达成:{why} —— 目标保留,没有判定完成。)"
+                elif verdict == "error":
+                    tail = f"(⚠️ 目标检查失败:{why} —— 无法判断时不宣称成功,目标保留。)"
+                else:
+                    tail = f"(✅ 目标达成{(':' + why) if why else ''})"
+                msg.content = ((msg.content or "") + "\n\n" + tail).strip()
             state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
             state["last_calls"] = state["last_tok"]["calls"]
             _seal_trace(steps, capped=False)
@@ -2696,11 +2899,30 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
 def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
     """Stub OLD, bulky tool outputs in place so they stop getting resent every step (token saver).
     Keeps the last `keep` messages untouched. Note: this rewrites saved history (/view shows stubs)."""
+    # 「需要就重新读」得说清读的是什么。只报字符数的话,模型此时已经不知道当初读的是哪个
+    # 文件了 —— 那是一句无法执行的建议。出处不用另存:发起这次调用的 tool_call 里就写着。
+    by_id = {}
+    for m in messages:
+        for c in (m.get("tool_calls") or []) if m.get("role") == "assistant" else ():
+            if not isinstance(c, dict):     # 历史里也可能是 provider 的原始对象,不是 dict
+                continue                    # —— maybe_compact 同一处也这么防
+            fn = c.get("function") or {}
+            try:
+                a = json.loads(fn.get("arguments") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                a = {}
+            key = next((a[k] for k in ("path", "command", "name", "task")
+                        if isinstance(a, dict) and a.get(k)), "")
+            by_id[c.get("id")] = (f"{fn.get('name', '?')}({str(key)[:60]})" if key
+                                  else fn.get("name", "?"))
     old = messages[:-keep] if len(messages) > keep else []
     for m in old:
         if (m.get("role") == "tool" and isinstance(m.get("content"), str)
                 and len(m["content"]) > 600 and not m["content"].startswith("[已省略")):
-            m["content"] = f"[已省略工具输出,{len(m['content'])} 字符 — 需要就重新读]"
+            what = by_id.get(m.get("tool_call_id"))
+            m["content"] = (f"[已省略 {what} 的输出,{len(m['content'])} 字符 — 需要就重新读]"
+                            if what else
+                            f"[已省略工具输出,{len(m['content'])} 字符 — 需要就重新读]")
 
 _CORRECTION_MARKERS = ("不对", "错了", "搞错", "不是这样", "不应该", "不该", "重来", "别这样",
                        "不是这个", "写错", "wrong", "incorrect", "not what", "should have", "instead")
@@ -2717,7 +2939,10 @@ def once(task: str, mode: str = "bypass") -> str:
     import console_ui as ui
     client, model = make_client()
     load_dynamic_tools()
-    state = {"mode": mode, "allow": set(), "view": "normal", "asked": task}
+    # 无人值守正是「说完成了但没完成」代价最大的地方 —— 没人在读 transcript,而 EXAM 就跑在
+    # 这条路上。TALOS_GOAL="每列的非空/唯一数都实际打印出来了" 就给这一次开上判断器。
+    state = {"mode": mode, "allow": set(), "view": "normal", "asked": task,
+             "goal": os.environ.get("TALOS_GOAL", "").strip() or None}
     messages: list = [{"role": "user", "content": task}]
     try:
         result = agent_turn(client, model, messages, state, top=True)
@@ -2909,6 +3134,32 @@ def repl(resume=None) -> None:
             except Exception as e:
                 ui.error(e)
             continue
+        if task.startswith("/goal"):
+            arg = task[5:].strip()
+            if not arg:                                # 查看
+                g = state.get("goal")
+                if not g:
+                    ui.note("没有活跃目标。/goal <完成条件> 设一个。条件要**能被检查**:"
+                            "写清最终状态 + 用什么验证 + 不能破坏什么。\n"
+                            "例:/goal report.md 里每一列的非空数和唯一数都有具体数字,"
+                            "且 tools/ 里没有功能重复的新工具")
+                else:
+                    gt = state.get("goal_tok") or {}
+                    ui.note(f"🎯 当前目标:{g}\n已判断 {state.get('goal_checks', 0)} 次"
+                            + (f" · 判断器花了 {gt.get('in', 0) + gt.get('out', 0)} tok"
+                               if gt else "")
+                            + (f"\n最近理由:{state['goal_last']}" if state.get("goal_last") else ""))
+                continue
+            if arg.lower() in _GOAL_CLEAR:
+                for k in ("goal", "goal_checks", "goal_last"):
+                    state.pop(k, None)
+                ui.note("目标已清除,退出条件回到「模型不调工具就停」")
+                continue
+            state["goal"], state["goal_checks"] = arg, 0
+            state.pop("goal_last", None)
+            ui.note(f"🎯 目标:{arg}")
+            task = arg               # 设完立刻开工,不用再输一句「开始」
+
         if task.startswith("/workspace"):              # 换工作目录,不用退出去设环境变量
             arg = task[10:].strip().strip('"')
             if not arg:
