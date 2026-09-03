@@ -3366,6 +3366,12 @@ def _selfcheck() -> None:
 if __name__ == "__main__":
     try:
         sys.stdout.reconfigure(encoding="utf-8")   # selfcheck prints emoji; rich manages its own console
+        # **stderr 也要。** `raise SystemExit("中文提示")` 由解释器写 stderr,而没有
+        # `chcp 65001` 的窗口(直接跑 `python agent.py -p …`、或者重定向)默认是 GBK ——
+        # 于是**只有出错的时候**才乱码,而那正是最需要读懂的时候。
+        # 同一个坑这个仓库里第三次:FINDINGS 二十六节尾声给 drawiocheck 记过,原话就是
+        # 「stderr 也要(判官分两拨说话,排版那拨写在 stderr)」,而这边一直没补。
+        sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
     argv = sys.argv[1:]

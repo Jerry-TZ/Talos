@@ -1709,8 +1709,14 @@ def test_switching_model_from_the_command_line(args, rc, frag):
     import os
     import subprocess
     import sys
+    # **把 PYTHONIOENCODING 摘掉**,否则这条判据测的是「跑它的人 shell 里有什么」。
+    # 真事:本机三条绿、CI 上 Windows 两格红 —— 我每条命令都带着 PYTHONIOENCODING=utf-8,
+    # 子进程继承了它,于是中文报错解得开;CI 不设,解出来是乱码,子串匹配当场失败。
+    # 摘掉之后本机就等于 CI,这条判据才是在测 agent.py 而不是在测我的终端。
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONIOENCODING"}
     r = subprocess.run([sys.executable, "agent.py"] + args,
                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       env=env,
                        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     assert r.returncode == rc, f"{args} 返回码 {r.returncode},期望 {rc}\n{r.stdout}{r.stderr}"
     if frag:
