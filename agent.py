@@ -2138,17 +2138,27 @@ def _repeat_guard(seen: dict, name: str, args: dict, out: str) -> str:
 STALL_LIMIT = 4      # 连着这么多次对同一个目标做同一件事、中间不看一眼 —— 开口提醒
 STALL_HARD = int(os.environ.get("TALOS_STALL_HARD", "8"))   # 提醒之后还照做到这个数 —— 交还控制权
 
+_PAYLOAD = ("content", "new_string", "old_string", "text", "body")
+
 def _stall_key(name: str, args: dict) -> str:
-    """这一次调用**冲着哪个目标**去的。不含输出,也不含内容。
+    """这一次调用**指向哪儿**。含全部参数,**除了要写进去的那坨内容**。
 
     `_repeat_guard` 的键里带着 `out`,所以它只认「同一个调用拿到同一个结果」;
     `_read_guard` 只认读。**两条都漏掉「反复写同一个文件、每次内容都不一样」** ——
     而那正是实测里最贵的一种打转:一轮连着 15 次 `write_file conf/app1.ini`,
-    中间一次没跑、没读,而 `_repeat_guard` 因为「wrote N chars」里的 N 在变一路沉默。"""
-    for k in ("path", "command", "file", "name"):     # 文件工具看 path,run_bash 看 command
-        if isinstance(args.get(k), str):
-            return name + "\x00" + args[k].strip()
-    return name + "\x00" + json.dumps(args, sort_keys=True, default=str)
+    中间一次没跑、没读,而 `_repeat_guard` 因为「wrote N chars」里的 N 在变一路沉默。
+
+    **第一版的键只取 `path`,当场被真实语料证伪:** 拿 65 个历史会话回放,
+    2026-08-07 那一轮 110 次调用会被砍在第 29 步 —— 而那是**翻页读**
+    (`read_file` 同一个文件换着 `offset`),每次返回的内容都不同,它确实在学新东西。
+    分界因此是:**`offset`/`limit` 改变「指向哪儿」,`content` 不改变。**
+    翻页读归 `_read_guard` 管(它按文件计数、到 6 次就不再返回内容),不归这条。
+
+    这里的**排除**列表和 `_EXFIL` 那种枚举不是一回事,方向正好相反:漏掉一个载荷字段,
+    键就变得更细、计数更容易清零 —— **失效方向是「更安静」,不是「误伤」**。
+    所以这张表短一点、保守一点是对的;宁可漏报,不可乱拦。"""
+    keyed = {k: v for k, v in args.items() if k not in _PAYLOAD}
+    return name + "\x00" + json.dumps(keyed, sort_keys=True, default=str)
 
 def _stall_guard(st: dict, name: str, args: dict, out: str) -> str:
     """**连续**冲同一个目标做同一件事、中间没有任何别的动作 —— 那不是迭代,是打转。

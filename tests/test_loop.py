@@ -1734,10 +1734,13 @@ def test_writing_the_same_file_over_and_over_with_nothing_in_between_is_caught()
     哪天有人把它并进 `_repeat_guard` 也照样绿,而那正是漏掉这种打转的实现。"""
     import agent as A
     st, repeat = {}, {}
-    args = {"path": "conf/app1.ini", "content": "..."}
     fired = None
     for i in range(A.STALL_LIMIT):
-        out = f"wrote {100 + i} chars"          # 每次输出都不同 —— 旧守卫的判据不成立
+        # **内容每次都不同**,这一点是判据的要害:真实场景就是「重写同一个文件的新变体」。
+        # 上一版这里复用了同一个 content,于是把载荷放进键也照样绿 —— 变异体逮到的
+        # 是判据的洞不是代码的洞(今天第三次)。
+        args = {"path": "conf/app1.ini", "content": f"# 变体 {i} " + "x" * i}
+        out = f"wrote {100 + i} chars"          # 输出也每次不同 —— 旧守卫的判据不成立
         assert A._repeat_guard(repeat, "write_file", args, out) == out, "旧守卫不该在这里响"
         fired = A._stall_guard(st, "write_file", args, out)
     assert "连着" in fired and "先跑一次" in fired, f"新守卫没响:{fired}"
@@ -1793,3 +1796,42 @@ def test_the_stall_counter_is_per_turn_not_shared_with_subagents():
     assert a.get("stop"), "连着 STALL_HARD 次没触发硬出口"
     A._stall_guard(b, "write_file", args, "wrote")
     assert not b.get("stop") and b["n"] == 1, "新 dict 没有从头数"
+
+
+def test_paging_through_one_file_is_not_a_stall():
+    """翻页读同一个文件**不是**打转 —— 这条是被真实语料证伪出来的,不是想出来的。
+
+    第一版 `_stall_key` 只取 `path`。拿 65 个历史会话回放,2026-08-07 那一轮 110 次调用
+    会被砍在第 29 步 —— 而那段是 `read_file` 同一个文件换着 `offset` 翻页,
+    每次返回的内容都不同,**它确实在学新东西**。翻页归 `_read_guard` 管
+    (按文件计数、到 6 次不再返回内容),不归这条。
+
+    分界:`offset`/`limit` 改变「指向哪儿」,`content` 不改变。所以键含前者、不含后者。
+    改完重放:硬收手从 4 个降到 3 个,而那 3 个正好是已知在打转的三轮 —— 分离是干净的。"""
+    import agent as A
+    st = {}
+    for off in range(0, A.STALL_HARD * 200, 200):        # 远超硬上限,只要 offset 在动就不该响
+        out = A._stall_guard(st, "read_file", {"path": "big.py", "offset": off, "limit": 200}, "chunk")
+        assert "[系统]" not in out, f"翻页读被当成打转了(offset={off})"
+    assert not st.get("stop"), "翻页读触发了硬出口"
+
+    # 同一个 offset 反复读才是原地打转
+    st2 = {}
+    for _ in range(A.STALL_HARD):
+        A._stall_guard(st2, "read_file", {"path": "big.py", "offset": 0, "limit": 200}, "chunk")
+    assert st2.get("stop"), "同一页反复读没被抓住"
+
+
+def test_the_payload_is_not_part_of_the_key_but_everything_else_is():
+    """键含「指向哪儿」的全部参数,只排掉要写进去的那坨内容。
+
+    这张排除表和 `_EXFIL` 那种枚举方向相反:**漏掉一个载荷字段,键变细、计数更容易清零,
+    失效方向是「更安静」而不是「误伤」**。所以它短一点、保守一点是对的。
+    反过来错删一个**区分性**字段(比如 `offset`)就是误伤 —— 上面那条判据钉的就是它。"""
+    import agent as A
+    k1 = A._stall_key("write_file", {"path": "a.txt", "content": "一"})
+    k2 = A._stall_key("write_file", {"path": "a.txt", "content": "二"})
+    assert k1 == k2, "内容不同就换了键 —— 反复重写同一个文件永远抓不住"
+    k3 = A._stall_key("read_file", {"path": "a.txt", "offset": 0})
+    k4 = A._stall_key("read_file", {"path": "a.txt", "offset": 200})
+    assert k3 != k4, "offset 被并进同一个键 —— 翻页读会被误伤"
