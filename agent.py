@@ -2135,6 +2135,65 @@ def _repeat_guard(seen: dict, name: str, args: dict, out: str) -> str:
             f"别再写同一个脚本的新变体了。要么换一个完全不同的角度,要么直接说清你卡在哪、试过什么。\n"
             f"原始输出:\n{out}")
 
+STALL_LIMIT = 4      # 连着这么多次对同一个目标做同一件事、中间不看一眼 —— 开口提醒
+STALL_HARD = int(os.environ.get("TALOS_STALL_HARD", "8"))   # 提醒之后还照做到这个数 —— 交还控制权
+
+def _stall_key(name: str, args: dict) -> str:
+    """这一次调用**冲着哪个目标**去的。不含输出,也不含内容。
+
+    `_repeat_guard` 的键里带着 `out`,所以它只认「同一个调用拿到同一个结果」;
+    `_read_guard` 只认读。**两条都漏掉「反复写同一个文件、每次内容都不一样」** ——
+    而那正是实测里最贵的一种打转:一轮连着 15 次 `write_file conf/app1.ini`,
+    中间一次没跑、没读,而 `_repeat_guard` 因为「wrote N chars」里的 N 在变一路沉默。"""
+    for k in ("path", "command", "file", "name"):     # 文件工具看 path,run_bash 看 command
+        if isinstance(args.get(k), str):
+            return name + "\x00" + args[k].strip()
+    return name + "\x00" + json.dumps(args, sort_keys=True, default=str)
+
+def _stall_guard(st: dict, name: str, args: dict, out: str) -> str:
+    """**连续**冲同一个目标做同一件事、中间没有任何别的动作 —— 那不是迭代,是打转。
+
+    判据是「连续」而不是「累计」,这一条是全部关键:**反复改同一个文件是正常干活**
+    (`_read_guard` 的注释就写着「边写边试,改十遍很常见」),但正常干活是
+    写→跑→读→再写,中间隔着**反馈**。中间什么都不隔的连着 N 次,说明它这一次的依据
+    和上一次一模一样,再来一次不会知道任何新东西。任何别的工具插进来就清零。
+
+    实测代价(FINDINGS 五十三):一轮撞满 100 步烧掉 178 万 token,另一轮把 6M 的额度
+    烧到 429。`_repeat_guard` 在那两轮里喊了 **42 次**、`_read_guard` 喊了 48 次,
+    **一次都没能止住** —— 所以这条到 `STALL_HARD` 是真的收手,不是再喊一句。
+    只会喊的闸已经被量过了,量出来的数字是 42。
+
+    `st` 和 `repeat` 一样是本轮独有的 dict,理由见 `_repeat_guard`:挂在 `state` 上会被
+    子 agent 清零,而那正好发生在它最该数数的时候。"""
+    key = _stall_key(name, args)
+    st["n"] = st["n"] + 1 if st.get("last") == key else 1
+    st["last"] = key
+    if st["n"] < STALL_LIMIT:
+        return out
+    if st["n"] >= STALL_HARD:
+        st["stop"] = key.split("\x00", 1)[-1][:80]    # 交给循环去收场,守卫不负责结束一轮
+        return out
+    if ui is not None:
+        ui.note(f"🌀 连着第 {st['n']} 次对同一个目标做同一件事 —— 已提醒模型先看一眼")
+    return (f"[系统] 这是你**连着**第 {st['n']} 次对同一个目标做同一件事,中间一次都没去看结果。\n"
+            f"不是「同一个调用」的问题 —— 是你每一次的依据都和上一次一样,再来一次也学不到新东西。\n"
+            f"**先跑一次、或者读一次**,拿到新信息再动手;或者直接说清你卡在哪、试过什么。\n"
+            f"再连着做到 {STALL_HARD} 次,这一轮就交还控制权了。\n"
+            f"原始输出:\n{out}")
+
+def _unchecked_goal_note(state: dict, top: bool, why: str) -> str:
+    """**非自愿结束的每一条出口**都够不着目标闸 —— 闸挂在「模型这轮不再调工具」上。
+
+    写成一个函数而不是抄两遍,是因为这片面上的路不止一条(撞步数上限、打转被打断),
+    而抄的那一份迟早只改好其中一遍。这个仓库里「同一条不变式只守一条路」已经数不清了。
+    这里**不补判断器调用**:非自愿结束的那一轮往往已经烧掉百万级 token,再追加一次
+    只为讲一件出口措辞已经暗示了的事。补的是零 API 开销的那一半 ——
+    **没判断过,就别让人以为判断过了。**"""
+    if not (state.get("goal") and top):
+        return ""
+    return (f"⚠️ 目标**一次都没被检查过**(判断器挂在正常收尾那个出口上,{why}走不到)—— "
+            f"别把「停下了」当成「做完了」。目标:{state['goal']}\n\n")
+
 READ_LIMIT = 6       # 一轮里同一个文件读到第这么多次,就不再返回内容
 
 # 「这条命令是在读文件内容吗」。**这条正则是这个守卫能不能站住的全部关键。**
@@ -2415,6 +2474,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
     state.setdefault("tok", {"in": 0, "out": 0, "cached": 0, "steps": 0, "calls": 0})
     state.setdefault("trace", [])                 # every dispatched tool, in order (see _trace_summary)
     repeat: dict = {}                             # 本轮独有;绝不能挂在 state 上 —— 见 _repeat_guard
+    stall: dict = {}                              # 同上。连续计数,任何别的工具插进来就清零
     # 读预算跟 `repeat` 相反,**要跨子 agent 累计**。两条守卫看着像一对,守的其实不是
     # 一回事:`_repeat_guard` 守的是「这一轮卡住了」——per-turn 才对;`_read_guard` 守的是
     # **token 预算**,而子 agent 的 token 本来就滚进父的 `state["tok"]`(有测试断言这一条)。
@@ -2489,10 +2549,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             # 但**闭口不谈是不行的**:上一版这句话只说「说「继续」就接着做」,而人凭什么
             # 知道该不该继续?加一句「目标一次都没被检查过」—— 零 API 开销,
             # 而且它守的是同一条不变式:**没判断过就别让人以为判断过了。**
-            goal_note = (f"⚠️ 目标**一次都没被检查过**(判断器挂在正常收尾那个出口上,"
-                         f"撞上限走不到)—— 别把「跑满了」当成「做完了」。目标:{state['goal']}\n\n"
-                         if state.get("goal") and top else "")
-            return (goal_note
+            return (_unchecked_goal_note(state, top, "撞上限")
                     + f"(已到 {MAX_STEPS} 步上限,停下了。会话还能接着走,不过早先的大块工具输出"
                     f"可能已经被裁剪或压成摘要了 —— 直接说「继续」就接着做,"
                     f"或者拆小些重来;想放宽上限设 TALOS_MAX_STEPS。)")
@@ -2638,10 +2695,26 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             # 接不住。与其去追每一种可能的异常类型,不如认下这件事:**守卫失败 = 不守,别拦活。**
             try:
                 guarded = _read_guard(reads, name, args,
-                                      _repeat_guard(repeat, name, args, out))
+                                      _repeat_guard(repeat, name, args,
+                                                    _stall_guard(stall, name, args, out)))
             except Exception:
                 guarded = out
             messages.append({"role": "tool", "tool_call_id": c.id, "content": guarded})
+        # 打转的硬出口。**放在这里而不是守卫里**:守卫返回的是一个字符串,结束一轮
+        # 不是它的职责(而且它跑在 try 里 —— 「守卫失败 = 不守」那条规矩不能变成
+        # 「守卫失败 = 悄悄结束一轮」)。
+        if stall.get("stop"):
+            state["last_tok"] = {k: state["tok"][k] - v for k, v in base.items()}
+            state["last_calls"] = state["last_tok"]["calls"]
+            state["capped"] = True          # 打转的一轮不许拿去复盘,理由同撞上限那条
+            _seal_trace(steps, capped=True)
+            return (_unchecked_goal_note(state, top, "打转被打断")
+                    + f"(连着 {STALL_HARD} 次对同一个目标做同一件事、中间一次没看结果,"
+                    f"先停下了 —— 卡在:{stall['stop']}。\n"
+                    f"提醒过一次没改路,再让它做下去只是烧钱:实测这种打转烧掉过 178 万 token、"
+                    f"也烧完过一整包额度。\n"
+                    f"会话还能接着走 —— 换个角度、或者说清卡在哪之后说「继续」;"
+                    f"想放宽设 TALOS_STALL_HARD。)")
 
 # ── the learning write-back: reflect (save) + consolidate (tidy) ──────────────
 # Both are just another agent_turn with a special prompt — so saving reuses the

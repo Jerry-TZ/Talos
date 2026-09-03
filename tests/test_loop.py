@@ -1721,3 +1721,75 @@ def test_switching_model_from_the_command_line(args, rc, frag):
     assert r.returncode == rc, f"{args} 返回码 {r.returncode},期望 {rc}\n{r.stdout}{r.stderr}"
     if frag:
         assert frag in (r.stdout + r.stderr), f"{args} 没说清错在哪:{r.stdout}{r.stderr}"
+
+
+def test_writing_the_same_file_over_and_over_with_nothing_in_between_is_caught():
+    """`_repeat_guard` 和 `_read_guard` 都漏掉的那种打转:**反复写同一个文件,每次内容不同**。
+
+    实测(FINDINGS 五十三)一轮连着 15 次 `write_file conf/app1.ini`,中间一次没跑、没读。
+    `_repeat_guard` 的键里含输出,而「wrote N chars」的 N 每次都在变,于是它一路沉默;
+    `_read_guard` 只管读。两条守卫加起来在那两轮里喊了 42 + 48 次,一次都没止住。
+
+    这条判据同时钉住**旧守卫在这个形状上是瞎的** —— 只断言新守卫响了的话,
+    哪天有人把它并进 `_repeat_guard` 也照样绿,而那正是漏掉这种打转的实现。"""
+    import agent as A
+    st, repeat = {}, {}
+    args = {"path": "conf/app1.ini", "content": "..."}
+    fired = None
+    for i in range(A.STALL_LIMIT):
+        out = f"wrote {100 + i} chars"          # 每次输出都不同 —— 旧守卫的判据不成立
+        assert A._repeat_guard(repeat, "write_file", args, out) == out, "旧守卫不该在这里响"
+        fired = A._stall_guard(st, "write_file", args, out)
+    assert "连着" in fired and "先跑一次" in fired, f"新守卫没响:{fired}"
+
+
+def test_normal_iteration_is_not_a_stall():
+    """写→跑→写→跑 是**正常干活**,连一次都不许响。
+
+    `_read_guard` 的注释自己写着「同一个文件反复改是正常干活(边写边试,改十遍很常见)」。
+    所以判据是「**连续**」不是「累计」:中间隔着反馈就说明这一次的依据变了。
+    误伤比漏报更快让人把闸关掉 —— 这条判据比上面那条重要。"""
+    import agent as A
+    st = {}
+    for _ in range(A.STALL_HARD * 2):           # 远超硬上限,只要交替就永远不该响
+        w = A._stall_guard(st, "write_file", {"path": "a.py", "content": "x"}, "wrote 10 chars")
+        r = A._stall_guard(st, "run_bash", {"command": "python a.py"}, "ok")
+        assert "[系统]" not in w and "[系统]" not in r, "交替干活被当成打转了"
+    assert not st.get("stop"), "交替干活触发了硬出口"
+
+
+def test_a_stall_that_ignores_the_warning_hands_control_back(ws, monkeypatch):
+    """提醒过还照做 —— 到 `STALL_HARD` 就真的收手,不是再喊一句。
+
+    **只会喊的闸已经被量过了,量出来的数字是 42**(`_repeat_guard` 在那一轮喊了 42 次,
+    模型一路没停,直到把 6M 额度烧到 429)。所以这条到硬上限是结束这一轮。
+
+    同时钉住:这是一条**非自愿出口**,而目标闸挂在「模型这轮不再调工具」上够不着它 ——
+    所以它必须自己说出「目标一次都没被检查过」。撞步数上限那条也是同一个函数,
+    抄两遍的话迟早只改好其中一遍。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    spin = _msg(tool_calls=[_tc("write_file", '{"path":"a.txt","content":"x"}')])
+    out = A.agent_turn(_Client([spin] * 40), "m", [{"role": "user", "content": "x"}],
+                       {"mode": "bypass", "allow": set(), "view": "quiet", "goal": "产物恰好三行"},
+                       top=True)
+    assert "连着" in out and "先停下了" in out, f"打转没被打断:{out}"
+    assert "a.txt" in out, "没说卡在哪个目标上"
+    assert "一次都没被检查过" in out and "产物恰好三行" in out, f"非自愿出口对目标闭口不谈:{out}"
+    assert "上限" not in out.split("先停下了")[0], "先撞到了 MAX_STEPS,这条判据其实没测到打转"
+
+
+def test_the_stall_counter_is_per_turn_not_shared_with_subagents():
+    """计数挂在本轮的局部 dict 上,和 `_repeat_guard` 同一个理由。
+
+    挂 `state` 上的话,子 agent 拿到父的同一个 dict,进入嵌套 `agent_turn` 就把计数清零 ——
+    守卫**恰好在它该数数的那一刻被关掉**。这里断言的是「函数只认传进来的那个 dict」,
+    所以换个 dict 就从头数。"""
+    import agent as A
+    a, b = {}, {}
+    args = {"path": "x.txt", "content": "1"}
+    for _ in range(A.STALL_HARD):
+        A._stall_guard(a, "write_file", args, "wrote")
+    assert a.get("stop"), "连着 STALL_HARD 次没触发硬出口"
+    A._stall_guard(b, "write_file", args, "wrote")
+    assert not b.get("stop") and b["n"] == 1, "新 dict 没有从头数"

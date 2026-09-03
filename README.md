@@ -2,7 +2,7 @@
 
 [![tests](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml/badge.svg)](https://github.com/Jerry-TZ/Talos/actions/workflows/test.yml)
 
-**一个你能完整读完的编程 agent。** 4514 行 Python,261 条离线判据,一份不糊弄人的安全说明。
+**一个你能完整读完的编程 agent。** 4587 行 Python,265 条离线判据,一份不糊弄人的安全说明。
 
 <img src="docs/demo.svg" alt="Talos 终端界面:动盘之前先弹确认框" width="100%">
 
@@ -19,7 +19,7 @@
 
 | 文件 | 行数 | 职责 |
 |---|---|---|
-| `agent.py` | 3456 | 循环 + 工具 + 权限门 + 自学习 |
+| `agent.py` | 3529 | 循环 + 工具 + 权限门 + 自学习 |
 | `console_ui.py` | 214 | 终端界面(可整体替换) |
 | `recall.py` | 557 | 联想记忆:扩散激活检索 |
 | `session.py` | 287 | 会话持久化(想换 SQLite 只改这个) |
@@ -33,7 +33,7 @@
 极简 agent 赛道很挤,有人用 Zig 做到 678KB 二进制。**Talos 不比谁小,它比谁都好读。**
 
 - **能读完** — 四个文件,注释解释的是*为什么*,不是*是什么*。几乎每条防御旁边都写着它挡的那次真实翻车。
-- **能验证** — 261 个测试,**离线、免 API key、几秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
+- **能验证** — 265 个测试,**离线、免 API key、几秒跑完**,CI 在 Linux/Windows × Python 3.10/3.13 上都跑。clone 下来立刻知道它没坏。
 - **不吹牛** — [`SECURITY.md`](SECURITY.md) 明写 `create_tool` 就是进程内 RCE、正则黑名单只是减速带。**没有沙箱就是没有沙箱** —— 真要隔离,[三条现成方案](SECURITY.md#真要隔离怎么办)按代价从低到高列在那儿。
 - **有考卷** — [`EXAM.md`](EXAM.md) / [`EXAM2.md`](EXAM2.md) 是两份可复现的能力测试,带标准答案和作弊检测(比如逐个核验 arXiv ID 真伪,防止编造引用)。记录的是"我怎么验证它真的有用",不是功能列表。
 - **有实测** — [`FINDINGS.md`](FINDINGS.md) 记了二十二个真实任务量出来的东西:哪条提示词生效、哪条从头到尾没生效、六次翻车、检索改动的前后数字,以及**两个被数据否掉的自己的方案**。样本小,局限写在最前面。
@@ -153,6 +153,8 @@ tail -3 .talos/recall_trace.jsonl
 
 **会话** — 按第一句话自动起名,`/history` 列表、`/resume` 续上、`--continue` 接最近一次。
 
+**不打转** — 连着 4 次对同一个目标做同一件事、中间一次不看结果就提醒,到 8 次交还控制权。判据是**连续**不是累计:写→跑→写→跑 是正常干活,中间什么都不隔才是打转。
+
 **换模型** — `--model glm/glm-4.6` 换一家,`--model glm-4.6` 只换型号。改一次跑一次,不改文件、不留 shell 状态。provider 写在斜杠前面,**不从模型名去猜** —— 猜的那张前缀表每来一家新模型就落后一次,而猜错是拿着 A 家的 key 去打 B 家。
 
 **一次性模式** — `agent.py -p "任务"` 跑完即退,方便脚本和计时。
@@ -198,7 +200,7 @@ Ctrl+C              停下当前这轮 —— 做过的都留着,可以直接说
 
 ```bash
 .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.venv\Scripts\python.exe -m pytest tests/ -q     # 261 条,约 8 秒,不联网、不需要 key
+.venv\Scripts\python.exe -m pytest tests/ -q     # 265 条,约 8 秒,不联网、不需要 key
 python agent.py --selfcheck                       # 免依赖的冒烟检查
 ```
 
