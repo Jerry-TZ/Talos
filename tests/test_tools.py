@@ -571,6 +571,33 @@ def test_reading_a_directory_says_it_is_a_directory(ws):
     with pytest.raises(ValueError) as e:
         A.read_file(p)
     assert "目录" in str(e.value) and "dir" in str(e.value), "得说清它是目录、以及该用什么列"
+    # **这一句是 CI 的 ubuntu 两格逼出来的。** Linux 上目录的 `st_nlink` 至少是 2,
+    # 于是硬链接闸(排在 isdir 之前)对**任何目录**都命中,报的是「它是个硬链接,
+    # 先 del 掉链接」—— 一条模型无法执行、而且会让它去删目录的意见。
+    # Windows 上目录 nlink 是 1,本机永远绿。
+    assert "硬链接" not in str(e.value), "读目录报成了硬链接 —— 那条意见对方执行不了"
+
+def test_a_directory_with_posix_link_counts_still_reads_as_a_directory(ws, monkeypatch):
+    """把 Linux 的语义搬到本机来测:目录的 `st_nlink` 报 2。
+
+    不搬的话这条回归**只有 CI 能发现**,而 CI 那一格我等四分钟才看得到。
+    这个仓库为「本机绿不是证据」已经付过好几次账 —— 能搬进本机的语义就搬进来。"""
+    import agent as A
+    p = os.path.join(ws, "conf")
+    os.makedirs(p, exist_ok=True)
+    real_stat, target = os.stat, os.path.realpath(p)
+
+    def fake(path, *a, **k):
+        st = real_stat(path, *a, **k)
+        if os.path.realpath(path) == target:          # 只有这一个目录假装有 2 个链接
+            return os.stat_result(tuple(st)[:3] + (2,) + tuple(st)[4:])
+        return st
+
+    monkeypatch.setattr(os, "stat", fake)
+    with pytest.raises(ValueError) as e:
+        A.read_file(p)
+    assert "硬链接" not in str(e.value) and "目录" in str(e.value), \
+        f"nlink=2 的目录被当成硬链接拦了:{e.value}"
 
 def test_the_cap_must_not_drop_the_one_file_that_is_about_to_be_overwritten(ws, monkeypatch):
     """上限按 mtime 倒序取前 N,于是**最久没动过的文件排在最末**,名额永远轮不到它 ——

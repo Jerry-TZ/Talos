@@ -519,8 +519,15 @@ def _in_workspace(path: str, for_read: bool = False) -> str:
     # 上面那道按文件名的凭据闸完全绕过,而且全程静默:read_file 走 read 权限类,永远不弹框。
     # 判据用 st_nlink 而不是"这文件是不是 .env":链接数是个**数字**,不是判断题。工作区里
     # 出现硬链接,不是手滑就是有意,两种都值得停一下。
+    # **目录要排除掉,而这只在 POSIX 上看得出来。** Linux 上每个目录的 `st_nlink` 至少是 2
+    # (它自己 + 里面的 `.`),于是这道闸对**任何目录**都命中 —— `read_file("conf")` 收到的是
+    # 「它是个硬链接,凭据文件可以靠它换个名字被读走,先 del 掉链接」,而它只是想列个目录。
+    # 又是一条**对方无法执行的意见**,而且吓人:模型会去删那个目录。
+    # Windows 上目录的 nlink 是 1,所以本机永远看不见 —— CI 的 ubuntu 两格同时红,
+    # 是这条判据刚写完的第一跑逮到的。目录本来就不该走这道闸:硬链接只对文件成立
+    # (POSIX 不许硬链接目录,Windows 的目录联接是 reparse point,realpath 已经解开了)。
     try:
-        if os.stat(full).st_nlink > 1:
+        if not os.path.isdir(full) and os.stat(full).st_nlink > 1:
             raise ValueError(f"拒绝访问 {path}:它是个硬链接(链接数 "
                              f"{os.stat(full).st_nlink})。硬链接的两个名字指向同一份数据,"
                              "解析路径看不出它真正是什么 —— 凭据文件可以靠它换个名字被读走。"
