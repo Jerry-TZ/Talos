@@ -746,6 +746,46 @@ def test_prune_old_tool_results():
     assert recent["content"] == "Y" * 1000                       # 最近的不动
 
 
+def test_a_wildcard_search_does_not_spend_every_matched_files_read_budget(ws):
+    """`findstr /s "x" **/*.py` 搜一遍,不该把命中的**每个文件**各扣一次读预算。
+
+    搜索返回的是**匹配行**,不是文件内容 —— 而这道闸的前提写着「文件没变,再读一遍
+    不会读出新东西」。它压根没给过你内容,扣一次整读是**种类上的错**。
+
+    实测(chapter3,222 个 py):一条 `findstr /s /n "schema" **/*.py` 记账 **200 个文件**
+    (`_GLOB_MAX` 的上限),三条这样的命令之后,模型想正常 `read_file` 其中任何一个,
+    **第 3 次就被拒** —— 6 次预算已经被三次搜索花掉一半,而它一个字的内容都没拿到。
+    这正是第一条正式任务烧掉 120 万 token 却零产出的机制(六十八节),
+    模型自己在最终回复里诊断对了,我用错的探针否了两次。
+
+    `_targets` 展开通配符是**权限闸**要的(`del conf/*.ini` 必须记下具体文件名,
+    见那段注释),读预算不要 —— **同一个函数两个消费者,要求相反。**
+    天花板:`findstr /n ".*" **/*.py` 这种「拿搜索当整读」的写法现在不花读预算了,
+    挡它的是 `BASH_MAX_CHARS` 截断和 `_repeat_guard`,不是这道闸。"""
+    import agent as A, os
+    sub = os.path.join(ws, "pkg")
+    os.makedirs(sub, exist_ok=True)
+    for i in range(3):
+        with open(os.path.join(sub, f"m{i}.py"), "w", encoding="utf-8") as f:
+            f.write(f"# schema {i}\n" * 40)
+    seen: dict = {}
+    for _ in range(3):
+        A._read_guard(seen, "run_bash", {"command": 'findstr /s /n "schema" **/*.py'}, "命中若干行")
+    target = os.path.join("pkg", "m0.py")
+    for i in range(1, 4):
+        out = A._read_guard(seen, "read_file", {"path": target}, "真正的文件内容")
+        assert "[系统]" not in out, (
+            f"三次通配符搜索之后,第 {i} 次正常读 {target} 就被拒了 —— "
+            "搜索只回匹配行,却按整读扣了预算")
+
+    # 反面:命令里**点名**的文件照旧要算。`findstr /n "x" a.py` 是对 a.py 的一次真读取,
+    # 那一条正是这道闸最早的用例,不能连它一起放掉。
+    seen2: dict = {}
+    named = {"command": f'findstr /n "schema" {target}'}
+    hits = [A._read_guard(seen2, "run_bash", named, "命中") for _ in range(A.READ_LIMIT + 2)]
+    assert any("[系统]" in h for h in hits), "点名读同一个文件读到上限,还是得拦"
+
+
 def test_compaction_never_fabricates_an_assistant_turn(ws, monkeypatch):
     """压缩不许凭空造一条 assistant 消息 —— 思考模型会当场拒掉整个请求。
 

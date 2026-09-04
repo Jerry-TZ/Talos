@@ -1726,7 +1726,7 @@ _QUOTED = re.compile(r'"([^"\n]{1,260})"' r"|'([^'\n]{1,260})'")
 # 200 是拍的,不是量的 —— 超了会退成记目录,不会静默丢。真嫌粗了再往上调。
 _GLOB_MAX = 200
 
-def _targets(cmd: str) -> set:
+def _targets(cmd: str, globs: bool = True) -> set:
     """命令里提到的文件。
 
     只用 `_FILENAME` 不够 —— 它要求 `.<1~5 字符>` 结尾,于是 `Makefile`、`LICENSE`、
@@ -1745,6 +1745,15 @@ def _targets(cmd: str) -> set:
     for tok in cand:
         if tok.startswith("-"):
             continue                                  # 是开关不是文件
+        if any(c in tok for c in "*?") and not globs:
+            # **读预算不要这个展开。** 搜索回来的是**匹配行**,不是文件内容,而这道闸的
+            # 前提是「文件没变,再读一遍不会读出新东西」—— 它压根没给过你内容。
+            # 实测:一条 `findstr /s "x" **/*.py` 记账 200 个文件(`_GLOB_MAX` 上限),
+            # 三条之后模型正常 `read_file` 其中任何一个,**第 3 次就被拒**,
+            # 而它一个字都还没读到。第六十八节那 120 万 token 零产出就是这么烧的。
+            # **同一个函数两个消费者,要求相反**:权限闸必须展开(`del conf/*.ini`
+            # 要记下具体文件名),读预算必须不展开。
+            continue
         if any(c in tok for c in "*?"):
             # **通配符是最该记的那一种删除,而它一个字都记不下来。** `rm conf/*.ini`
             # 作为字符串在磁盘上并不存在,于是下面那道「问文件系统」直接跳过 ——
@@ -2484,7 +2493,7 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
         #    而 `_env_block` 把 `sys.executable` 印给模型看、它就放在每条命令的开头。
         #    所以再按**身份**挡一道:realpath 等于正在跑的这个解释器,那就不是"被读的文件"。
         #    按拼写挡的判据,换个平台就漏 —— 这道闸今天已经因为拼写漏过一次了。
-        paths = {p for p in _targets(args.get("command", ""))
+        paths = {p for p in _targets(args.get("command", ""), globs=False)
                  if not p.lower().endswith((".exe", ".bat", ".cmd", ".com"))
                  and os.path.normcase(os.path.realpath(_abs(p))) != _SELF
                  and (os.path.exists(p) or os.path.exists(os.path.join(WORKSPACE, p)))}
