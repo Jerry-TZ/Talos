@@ -1902,9 +1902,19 @@ def test_the_name_the_user_typed_matches_however_they_capitalised_it(ws):
     os.chdir(A.WORKSPACE)
     try:
         st = {"asked": "把结果写进 Report.md"}
-        assert A._named_in_request(st, {"command": "del report.md"}), \
-            "用户写 Report.md、模型敲 report.md —— 同一个文件,提示行却沉默了"
-        assert A._named_in_request(st, {"command": "del Report.md"}), "同样大小写反而也该命中"
+        assert A._named_in_request(st, {"command": "del Report.md"}), "同样大小写必须命中"
         assert not A._named_in_request(st, {"command": "del other.md"}), "不相干的文件不该命中"
+        # **大小写算不算同一个文件,由平台说了算,不由我这台机器说了算。**
+        # 第一版无条件断言「必须命中」,CI 的 ubuntu 两格当场红 —— POSIX 上
+        # `Report.md` 和 `report.md` 真的是两个文件,那儿**不该**命中:
+        # 对一个用户没点名的文件喊「你点名要过它」是误报。
+        # `normcase` 在 POSIX 上是恒等,产品两边都对;错的是把本机语义烤进断言的我。
+        # (「别把本机语义烤进判据」这条挂账就在「还没解决的」里,我又犯了一次。)
+        same_file = os.path.normcase("Report.md") == os.path.normcase("report.md")
+        got = A._named_in_request(st, {"command": "del report.md"})
+        if same_file:                                    # Windows / macOS 默认
+            assert got, "用户写 Report.md、模型敲 report.md —— 同一个文件,提示行却沉默了"
+        else:                                            # POSIX:两个不同的文件
+            assert not got, f"这是两个不同的文件,不该报「你点名要过它」:{got}"
     finally:
         os.chdir(cwd)
