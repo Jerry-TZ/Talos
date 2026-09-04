@@ -203,3 +203,27 @@ def test_the_rot_checker_cannot_be_fooled_by_a_nearby_unrelated_name():
     assert name == "check_permission", f"取错了名字:{name}(该取紧贴括号前面那个)"
     assert not ok, (f"把一条错的行号判成了成立 —— 它拿附近**别的**名字交了差。"
                     f"声明 {n},而 check_permission 实际在 {actual}")
+
+def test_an_unattended_run_is_not_a_user_query(tmp_path):
+    """跑批会话的"用户消息"是**我自己写的任务串**,不能进冻结验证集的候选池。
+
+    2026-09-04 量出来的:cutoff 之后 9 条"合格"查询,**9 条全是这个** ——
+    五个数据解析陷阱加三次几乎一样的 hello.txt,真实用户查询 0 条,而汇总里写着 9。
+
+    这个验证集存在的全部理由,是拿**未参与调参的真实查询**去裁决检索该不该留。
+    拿我自己写的任务去填,等于把「测试数据全是 agent 自己造的」——这份记录里最大的
+    那处系统性偏差 —— 烤进那把唯一的尺子里。而且它**看起来在推进**:
+    燃尽表上的数字每跑一次批就涨。这条判据就是拦那个「看起来在推进」的。"""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "benchmarks", "recall"))
+    import recall_benchmark as B
+    from pathlib import Path
+
+    assert B._is_batch(Path("20260903-084801__batch-在工作区建一个-hello-txt.jsonl"))
+    assert not B._is_batch(Path("20260903-084801__在工作区建一个-hello-txt.jsonl"))
+    # 前缀认的是 slug 那一段,不是整个文件名 —— 时间戳里不会有,但别让它在别处误命中
+    assert not B._is_batch(Path("20260903-084801__batching-作业-怎么写.jsonl"))
+    # 常数跟 session.py 共用,不许两边各写各的(同一条规则两处实现,这仓库记过三次)
+    import session
+    assert B._BATCH_PREFIX == session.BATCH

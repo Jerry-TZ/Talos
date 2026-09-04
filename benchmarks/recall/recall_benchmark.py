@@ -31,6 +31,19 @@ EXCLUDED_PREFIXES = ("/", "[系统]", "【早前对话的压缩摘要】")
 SESSION_STAMP = re.compile(r"^(\d{8}-\d{6})")
 
 
+def _batch_prefix() -> str:
+    """跑批会话的 slug 前缀。**从 `session.py` 拿,不在这里再写一遍那个字符串。**
+    这个仓库里「同一条规则两处实现,只修了一处」已经记过三次(第二十四节)。"""
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("_talos_session", root / "session.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.BATCH
+
+
+_BATCH_PREFIX = _batch_prefix()
+
+
 def _json_dump(obj, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
@@ -127,6 +140,22 @@ def _usable_query(text: str, min_chars: int) -> tuple[bool, str]:
     return True, ""
 
 
+def _is_batch(path: Path) -> bool:
+    """跑批会话(`once()` 无人值守)—— 它的"用户消息"是**我自己写的任务串**,不是人在问。
+
+    2026-09-04 量出来的:cutoff 之后 9 条"合格"查询,**9 条全是这个**(五个数据解析陷阱
+    加三次几乎一样的 hello.txt)。真实用户查询是 **0 条**,而汇总里写着 9。
+
+    这不是少记几条的问题:这个冻结验证集存在的理由,就是拿**未参与调参的真实查询**
+    去裁决检索该不该留。拿我自己写的任务去填,等于把「测试数据全是 agent 自己造的」
+    ——这份记录里最大的那处系统性偏差 —— 直接烤进那把唯一的尺子里。
+    而且它会**看起来**在推进:燃尽表上的数字每跑一次批就涨。
+
+    判据用 `session.BATCH` 那个前缀,跟写它的那一边共用一个常数,免得两边各写各的。"""
+    slug = path.name.split("__", 1)[-1]
+    return slug.startswith(_BATCH_PREFIX)
+
+
 def collect_candidates(repo: Path, cutoff_commit: str, min_chars: int = 12) -> list[dict]:
     sessions = repo / ".talos" / "sessions"
     if not sessions.is_dir():
@@ -144,6 +173,8 @@ def collect_candidates(repo: Path, cutoff_commit: str, min_chars: int = 12) -> l
                 reasons.append("session_filename_has_no_timestamp")
             elif started <= cutoff:
                 reasons.append("session_started_at_or_before_tuning_cutoff")
+            if _is_batch(path):
+                reasons.append("unattended_run_task_written_by_the_agent")
             rows.append({
                 "query": query,
                 "query_sha256": _sha_text(query),
