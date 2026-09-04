@@ -84,7 +84,7 @@
   "steps": 8,
   "read_bytes": 1000,
   "read_chars": 1002,
-  "sent": 93857,
+  "sent": 94577,
   "model_calls": 9,
   "compactions": 0,
   "compact_sent": 0
@@ -93,7 +93,7 @@
   "steps": 16,
   "read_bytes": 1000,
   "read_chars": 1002,
-  "sent": 201303,
+  "sent": 206919,
   "model_calls": 17,
   "compactions": 0,
   "compact_sent": 0
@@ -102,7 +102,7 @@
   "steps": 32,
   "read_bytes": 1000,
   "read_chars": 1002,
-  "sent": 459775,
+  "sent": 489007,
   "model_calls": 33,
   "compactions": 0,
   "compact_sent": 0
@@ -120,7 +120,7 @@
   "steps": 8,
   "read_bytes": 4000,
   "read_chars": 4008,
-  "sent": 172013,
+  "sent": 172733,
   "model_calls": 9,
   "compactions": 0,
   "compact_sent": 0
@@ -129,7 +129,7 @@
   "steps": 16,
   "read_bytes": 4000,
   "read_chars": 4008,
-  "sent": 375651,
+  "sent": 381267,
   "model_calls": 17,
   "compactions": 0,
   "compact_sent": 0
@@ -138,7 +138,7 @@
   "steps": 32,
   "read_bytes": 4000,
   "read_chars": 4008,
-  "sent": 826507,
+  "sent": 855739,
   "model_calls": 33,
   "compactions": 0,
   "compact_sent": 0
@@ -147,36 +147,36 @@
   "steps": 4,
   "read_bytes": 20000,
   "read_chars": 20040,
-  "sent": 76423,
+  "sent": 86683,
   "model_calls": 7,
   "compactions": 2,
-  "compact_sent": 1710
+  "compact_sent": 1389
  },
  {
   "steps": 8,
   "read_bytes": 20000,
   "read_chars": 20040,
-  "sent": 146597,
+  "sent": 170931,
   "model_calls": 13,
   "compactions": 4,
-  "compact_sent": 3650
+  "compact_sent": 3295
  },
  {
   "steps": 16,
   "read_bytes": 20000,
   "read_chars": 20040,
-  "sent": 286951,
+  "sent": 339443,
   "model_calls": 25,
   "compactions": 8,
-  "compact_sent": 7530
+  "compact_sent": 7107
  },
  {
   "steps": 32,
   "read_bytes": 20000,
   "read_chars": 20040,
-  "sent": 567663,
+  "sent": 676483,
   "model_calls": 49,
   "compactions": 16,
-  "compact_sent": 15290
+  "compact_sent": 14731
  }
 ]

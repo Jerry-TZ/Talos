@@ -3205,8 +3205,8 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
     # 留下的那条可能自己就超预算(`_tail_start` 现在宁可留一条也不留空)。**截断,别丢掉** ——
     # 截断模型看得见,丢掉它只会去重读一遍。
     for m in tail:
-        if isinstance(m.get("content"), str) and len(m["content"]) > COMPACT_TAIL_CHARS:
-            m["content"] = m["content"][:COMPACT_TAIL_CHARS] + "\n…(尾部过长,已截断)"
+        if isinstance(m.get("content"), str) and len(m["content"]) > COMPACT_TAIL_CHARS // 3:
+            m["content"] = m["content"][:COMPACT_TAIL_CHARS // 3] + "\n…(尾部过长,已截断)"
     # **不再合成一条 assistant。** 原来这里补一句「了解,以上是之前的进展」,让摘要读起来
     # 像是已经确认过的上下文。代价:那是一条**凭空造的 assistant 消息**,而思考模型要求
     # 历史里的 assistant 必须带回 `reasoning_content` —— 造的那条没有。
