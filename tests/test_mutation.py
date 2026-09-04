@@ -189,9 +189,22 @@ def _is_refusal(node) -> bool:
             and isinstance(node.value.elts[0], ast.Constant) and node.value.elts[0].value is False)
 
 
+def _is_error_return(node) -> bool:
+    """`return "error: …", True` —— `run_tool` 报告「这次调用没成」的那个出口。
+
+    **这一档是我自己写下边界、又自己推翻的。** 上一版的 docstring 写着「它们的反面不是
+    一个固定值,拆法要一处一个看」—— 而同一天下午在拒绝出口那儿想通的那句话套过来
+    就够了:**报错的反面是声称成功**,也就是 `("", False)`。
+    当时不是没有办法,是我没往下想一步。写下的边界不检查,就会一直是边界。"""
+    return (isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
+            and len(node.value.elts) == 2 and not _is_refusal(node)
+            and isinstance(node.value.elts[1], ast.Constant) and node.value.elts[1].value is True)
+
+
 def _guard_sites(tree) -> list:
-    """两种形状的守卫,按源码顺序。"""
-    return sorted((n for n in ast.walk(tree) if isinstance(n, ast.Raise) or _is_refusal(n)),
+    """三种形状的守卫,按源码顺序。"""
+    return sorted((n for n in ast.walk(tree)
+                   if isinstance(n, ast.Raise) or _is_refusal(n) or _is_error_return(n)),
                   key=lambda n: (n.lineno, n.col_offset))
 
 
@@ -203,7 +216,8 @@ class _DropGuard(ast.NodeTransformer):
     「哪几条」全是错的。那一版靠给 sites 排序绕过去,而**序号这个耦合还在**;
     现在两种形状混在一起数,它只会更脆。按 `(lineno, col_offset)` 认就没有这回事了。
 
-    `raise` 换成 `pass`;`return False, 理由` 换成 `return True, ""` —— 后者不能也换成
+    `raise` 换成 `pass`;`return False, 理由` 换成 `return True, ""`;
+    `return 消息, True` 换成 `return "", False`。后两种不能也换成
     `pass`:那样函数返回 None,调用方拆包当场炸,**每个变异体都"被抓到",而抓到的是崩溃
     不是守卫**。闸的反面不是「什么都不返回」,是「放行」。"""
 
@@ -216,9 +230,15 @@ class _DropGuard(ast.NodeTransformer):
         return ast.copy_location(ast.Pass(), node)
 
     def visit_Return(self, node):
-        if (node.lineno, node.col_offset) != self.pos or not _is_refusal(node):
+        if (node.lineno, node.col_offset) != self.pos:
             return node
-        return ast.copy_location(ast.parse('return (True, "")').body[0], node)
+        if _is_refusal(node):
+            return ast.copy_location(ast.parse('return (True, "")').body[0], node)
+        if _is_error_return(node):
+            # 报错的反面是**声称成功**,不是不返回。返回空串是为了让调用方照常拼字符串,
+            # 别把变异体变成崩溃 —— 崩溃会让每个变异体都"被抓到",而抓到的不是守卫。
+            return ast.copy_location(ast.parse('return ("", False)').body[0], node)
+        return node
 
 
 def _suite_green(src: str, repo: str) -> bool:
@@ -259,7 +279,7 @@ def _off_platform(tree, plat: str = "") -> set:
             continue
         for stmt in node.body:             # **只走 body,不走 orelse** —— else 那支是照常执行的
             for sub in ast.walk(stmt):
-                if isinstance(sub, ast.Raise) or _is_refusal(sub):
+                if isinstance(sub, ast.Raise) or _is_refusal(sub) or _is_error_return(sub):
                     out.add((sub.lineno, sub.col_offset))
     return out
 
@@ -315,7 +335,7 @@ def test_the_sweep_knows_which_guards_this_platform_cannot_reach():
 
 
 @pytest.mark.skipif(not os.environ.get("TALOS_SWEEP"),
-                    reason="全扫要 5 分钟(37 个变异体 × 一遍全套)。CI 跑一格,本地 TALOS_SWEEP=1")
+                    reason="全扫要 5 分钟(40 个变异体 × 一遍全套)。CI 跑一格,本地 TALOS_SWEEP=1")
 def test_every_guard_in_agent_has_a_case_that_dies_without_it():
     """拆掉 agent.py 里任何一处守卫,全套判据必须有人红。
 
@@ -327,9 +347,14 @@ def test_every_guard_in_agent_has_a_case_that_dies_without_it():
     也就是 README 管它叫安全边界的那道闸,整片 7 处,第一版一处都没扫到。
     「立完闸没问『这片面还有几条路』」在这份记录里出现过三次,那是第四次。
 
-    **还剩下的边界写在这:** 返回拒绝串的那种(`return "error: …"`)不在里面 ——
-    它们的「反面」不是一个固定值,拆法要一处一个看,没有统一的变异。
-    写在这里免得有人把绿读成"全查过了"。"""
+    **第三版补上了 `return "error: …", True`**(`run_tool` 报「这次调用没成」的出口)。
+    上一版的这段话写着「它们的反面不是一个固定值」—— 那句话是错的,而推翻它的正是
+    同一天写在 `_DropGuard` 里的那句:**闸的反面是放行,报错的反面是声称成功**。
+    当时不是没有办法,是我没往下想一步。**自己写下的边界,过一阵要回来检查一次。**
+
+    **现在的边界:** 循环里那几处**赋值**形式的报错(`out, is_error = …`)不在里面,
+    它们不是 return,这个扫描认不出来 —— 而今天已经因为「循环自己另写一句话」
+    吃过一次亏(那段好话在真实路径上一次都没执行过)。写在这里免得有人把绿读成"全查过了"。"""
     rows = _agent_sweep()
     survivors = [n for n, green, off in rows if green and not off]
     assert not survivors, (
