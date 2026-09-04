@@ -198,9 +198,42 @@ def _suite_green(src: str, repo: str) -> bool:
     return r.returncode == 0
 
 
+def _off_platform(tree, plat: str = "") -> set:
+    """整段被 `os.name == "nt"` 包住、而这台机器不是 nt 的那些 raise 的位置。
+
+    **「摘掉它没有判据红」有第三种解释**(前两种见第二十九节:多余 / 没人写过判据):
+    **这一格根本执行不到它。** `run_bash` 里三条 cmd.exe 专用的闸就是这样 ——
+    Windows 上判据钉得死死的,Linux 上那段代码压根不运行,任何判据都不可能红。
+    第一次在 CI 的 ubuntu 格跑这个扫描,报的就是这三条。
+
+    不写成一张名单是有意的:名单按行号或报文措辞记,改一个字就烂,而且烂了不报错。
+    这个判断**从源码本身算**,加一条新的平台闸自动被认出来,不需要谁记得。
+    边界:只认 `os.name == "nt"`(含 `and` 连着的),`!= "nt"` 和 `sys.platform`
+    这两种写法现在源码里没有 —— 真出现了,它会被当成普通守卫报成「没有判据」,
+    那时候来这里加一行。"""
+    # 平台**传进来**,不去 patch `os.name`。第一版判据是 `monkeypatch.setattr(os, "name", ...)`,
+    # 它绿的时候没事,**红的时候把 pytest 自己炸了** —— 补报错时 `pathlib` 照着被改过的
+    # `os.name` 去实例化 `PosixPath`,直接 INTERNALERROR,真正的断言消息一个字都看不到。
+    # 而红那一下才是这条判据存在的全部理由。
+    if (plat or os.name) == "nt":
+        return set()                       # 这一格就是 nt,那几段照常执行,不算盲
+    out = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If) or 'os.name ==' not in ast.unparse(node.test):
+            continue
+        if '"nt"' not in ast.unparse(node.test) and "'nt'" not in ast.unparse(node.test):
+            continue
+        for stmt in node.body:             # **只走 body,不走 orelse** —— else 那支是照常执行的
+            for sub in ast.walk(stmt):
+                if isinstance(sub, ast.Raise):
+                    out.add((sub.lineno, sub.col_offset))
+    return out
+
+
 def _agent_sweep():
-    """agent.py 的每一处 raise 换成 pass,跑全套。返回 [(位置, 摘掉后是否还全绿)]。"""
+    """agent.py 的每一处 raise 换成 pass,跑全套。返回 [(位置, 摘掉后是否还全绿, 这格跑不跑得到)]。"""
     src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+    off = _off_platform(ast.parse(src))
     sites = sorted((n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Raise)),
                    key=lambda n: (n.lineno, n.col_offset))
     assert sites, "agent.py 里一处 raise 都没找到 —— 这个扫描失效了"
@@ -216,8 +249,36 @@ def _agent_sweep():
         for i, site in enumerate(sites):
             mutant = _DropRaise(i).visit(ast.parse(src))
             ast.fix_missing_locations(mutant)
-            out.append((f"agent.py:{site.lineno} {_label(site)}", _suite_green(ast.unparse(mutant), repo)))
+            out.append((f"agent.py:{site.lineno} {_label(site)}",
+                        _suite_green(ast.unparse(mutant), repo),
+                        (site.lineno, site.col_offset) in off))
     return out
+
+
+def test_the_sweep_knows_which_guards_this_platform_cannot_reach():
+    """**把 Linux 的答案搬到本机来对。** 不搬的话,`_off_platform` 判得对不对
+    只有 CI 那一格能告诉我,而那一格要四分钟 —— 今天已经为「本机绿不是证据」
+    等过两轮了。这条是纯 AST,毫秒级。
+
+    数字钉死在 3:多一条说明有人又加了一道平台闸(该有人看一眼它在另一边有没有判据),
+    少一条说明某条闸不再被平台包着了。两种都该停下来问一句,而不是自动放过。"""
+    tree = ast.parse(open(os.path.join(HERE, "agent.py"), encoding="utf-8").read())
+    assert _off_platform(tree, "nt") == set(), "nt 那一格里那几段照常执行,一条都不该算盲"
+    off = _off_platform(tree, "posix")
+    at = {(n.lineno, n.col_offset): n for n in ast.walk(tree) if isinstance(n, ast.Raise)}
+    labels = sorted(_label(at[p]) for p in off)
+    assert len(off) == 3, f"POSIX 上执行不到的应该正好是 run_bash 里那三条 cmd.exe 闸,实得 {labels}"
+    assert all("cmd" in s or "Windows" in s for s in labels), f"认出来的不是那三条:{labels}"
+
+    # `else:` 那一支是**照常执行**的,不能跟着 if 一起被判成盲区。agent.py 现在一个这种
+    # 形状都没有,所以拿真源码测不出来 —— 实测把 `node.body` 改成 `node.body + node.orelse`,
+    # 这条判据照绿(第二十九节那两种解释里的第二种:没人写过这种输入)。合成一个喂进去。
+    fake = ast.parse('import os\nif os.name == "nt":\n    raise ValueError("win")\n'
+                     'else:\n    raise ValueError("posix 这支照常跑")\n')
+    got = {_label(at2[p]) for p in _off_platform(fake, "posix")
+           for at2 in [{(n.lineno, n.col_offset): n for n in ast.walk(fake)
+                        if isinstance(n, ast.Raise)}]}
+    assert got == {"win"}, f"`else:` 那支被一起判成执行不到了 —— 它照常跑:{got}"
 
 
 @pytest.mark.skipif(not os.environ.get("TALOS_SWEEP"),
@@ -231,10 +292,18 @@ def test_every_guard_in_agent_has_a_case_that_dies_without_it():
 
     扫的是 `raise`,不是全部守卫:返回拒绝串的那些(`permission denied: ...`、
     `error: ...`)不在里面。**这是覆盖面的边界,写在这里免得有人把它读成"全查过了"。**"""
-    survivors = [name for name, still_green in _agent_sweep() if still_green]
+    rows = _agent_sweep()
+    survivors = [n for n, green, off in rows if green and not off]
     assert not survivors, (
         f"{len(survivors)} 处守卫摘掉之后全套照绿 —— 它们没有判据,等于没写:\n  "
         + "\n  ".join(survivors))
+    # **反过来也要钉。** 被标成「这一格执行不到」的,如果居然被判据抓住了,
+    # 说明 `_off_platform` 判错了 —— 那这张表在**另一个方向**上也不可信,
+    # 而它不可信的时候是绿的。跟 `_BLIND` 那条两向断言同一个道理。
+    wrong = [n for n, green, off in rows if off and not green]
+    assert not wrong, (
+        "这些守卫被判成「本平台执行不到」,却真的有判据抓住了它们 —— "
+        f"`_off_platform` 判错了:\n  " + "\n  ".join(wrong))
 
 
 if __name__ == "__main__":                      # 直接跑给人看:python tests/test_mutation.py
