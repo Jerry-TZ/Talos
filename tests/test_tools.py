@@ -6,6 +6,14 @@ import tempfile
 
 import pytest
 
+
+def _encodable(s: str, enc: str) -> bool:
+    try:
+        s.encode(enc)
+        return True
+    except (UnicodeEncodeError, LookupError):
+        return False
+
 def test_read_write_edit(ws):
     import agent as A
     p = os.path.join(ws, "t.txt")
@@ -288,6 +296,32 @@ def test_multiline_bash_refused_loudly(ws):
     import agent as A
     out, err = A.run_tool("run_bash", {"command": 'python -c "\nprint(1)\n"'})
     assert err and "第一行" in out
+
+@pytest.mark.skipif(os.name != "nt", reason="POSIX 上到处都是 UTF-8,原生命令的输出编码不是问题")
+def test_run_bash_reads_back_what_a_native_command_printed(ws):
+    """`dir` / `git` / `findstr` 不是 Python —— 它们按**控制台代码页**输出,不是 UTF-8。
+
+    `run_bash` 写死 `encoding="utf-8"`,而旁边那行注释("else a GBK console kills any
+    child that prints 中文")想到的是 `PYTHONIOENCODING` 管得住的**Python 子进程**。
+    原生命令不在其内:中文 Windows 上 `dir` 一个中文名文件,模型收到的是 `����.txt` ——
+    **它拿不到那个文件名,后面每一步都跟着错**,而输出看着像正常返回。
+
+    掩盖它的是 `talos.bat` 里的 `chcp 65001`:交互启动永远踩不到。而 `once()`
+    (`-p`、EXAM、benchmark)不走那个 bat —— **无人值守那条路一直在拿乱码**。
+    同一族坑第五十二节记过一次,那次是 Talos 往外写 stderr,这条是往里读子进程输出。
+
+    判据不写死 cp936:runner 是英文 Windows(OEM 437),挑一个**这台机器编得出来**的词,
+    别把本机语义烤进断言 —— 那个错误这个仓库今天刚犯过一次。"""
+    import agent as A, locale
+    oem = locale.getpreferredencoding(False)
+    word = next((w for w in ("报告", "café", "naïve") if _encodable(w, oem)), None)
+    assert word, f"这台机器的 {oem} 一个非 ASCII 词都编不出来,判据失效"
+    with open(os.path.join(ws, "f.txt"), "wb") as f:
+        f.write(word.encode(oem))                # 原生命令吐出来的就是这样的字节
+    out, err = A.run_tool("run_bash", {"command": "type f.txt"})
+    assert not err, out
+    assert word in out, f"原生命令的输出解错码了:拿到 {out.strip()!r},要的是 {word!r}"
+
 
 def test_bad_calls_get_actionable_errors(ws):
     """模型偶尔会吐畸形调用 —— 报错要说清正确形状,否则它只能换个姿势再猜。"""

@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import locale
 import os
 import platform
 import re
@@ -826,12 +827,34 @@ def run_bash(command: str) -> str:
                **_VENV_ENV)
     # cwd=WORKSPACE keeps relative paths consistent with the file tools' jail. It is NOT a
     # boundary: the command can still cd out or use absolute paths. Only a sandbox fixes that.
-    p = subprocess.run(command, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
-                       encoding="utf-8", errors="replace", timeout=120, env=env)
-    out = (p.stdout + p.stderr).strip() or f"(exit {p.returncode}, no output)"
+    # 拿 **bytes**,自己解码 —— 见 `_decode_console`。写死 encoding="utf-8" 的那一版,
+    # 中文 Windows 上 `dir` 一个中文名文件,模型收到的是 `????.txt`。
+    p = subprocess.run(command, shell=True, capture_output=True, cwd=WORKSPACE,
+                       timeout=120, env=env)
+    out = ((_decode_console(p.stdout) + _decode_console(p.stderr)).strip()
+           or f"(exit {p.returncode}, no output)")
     if len(out) > BASH_MAX_CHARS:
         out = out[:BASH_MAX_CHARS] + f"\n…(输出共 {len(out)} 字符,已截断到 {BASH_MAX_CHARS};用更精确的命令/grep 缩小范围)"
     return _workspace_hint(command, out, p.returncode != 0)
+
+def _decode_console(b: bytes) -> str:
+    """UTF-8 优先,明显不是 UTF-8 就按**控制台代码页**再解一次。
+
+    Python 子进程吐 UTF-8(env 里钉了 `PYTHONIOENCODING`),而 `dir` / `git` / `findstr`
+    按控制台代码页吐 —— **同一次 run_bash 里两种都可能出现**,所以判据是「这段字节像不像
+    UTF-8」,不是「这台机器是什么编码」。写死任何一边,另一边就是乱码:原来写死 utf-8,
+    中文 Windows 上 `dir` 一个中文名文件,模型收到 `????.txt`,**后面每一步都跟着错**,
+    而输出看着像正常返回。掩盖它的是 `talos.bat` 里的 `chcp 65001` —— `once()`
+    (`-p` / EXAM / benchmark)不走那个 bat,无人值守那条路一直在拿乱码。
+
+    换行自己收:`text=True` 顺带做的 CRLF → LF,拿 bytes 之后没人做了。"""
+    s = b.decode("utf-8", "replace")
+    if "�" in s:
+        alt = b.decode(locale.getpreferredencoding(False), "replace")
+        if alt.count("�") < s.count("�"):
+            s = alt
+    return s.replace("\r\n", "\n")
+
 
 def _workspace_hint(command: str, out: str, failed: bool) -> str:
     """`cd workspace` — typed while already standing in the workspace.
