@@ -3132,6 +3132,16 @@ def _tail_start(messages: list, keep: int) -> int:
             break
         j -= 1
     i = max(i, j)                              # 两个上限取更紧的那个
+    # **尾巴不许是空的。** 上面那个字符预算可以把 `j` 顶到 `len(messages)` —— 只要
+    # **最后一条自己**就超过 `COMPACT_TAIL_CHARS`(一次长回答、一个大文件读回来,
+    # 都到得了)。那样退回的正是 `maybe_compact` 开头记的那条回归:「整段历史压成 2 条,
+    # 尾部一条不留」,实测代价是模型花约十次调用重读它刚读过的东西。
+    # **而这个坏情况被写进了它自己的判据当豁免**(`or _ctx_chars(msgs[-1:]) > ...`),
+    # 于是「已知的坏」被改判成「允许的」,再没人回来看。实测后果比重读更狠:
+    # 尾巴一空,压缩合成的那条 assistant 就落到了最后一条,deepseek 思考模型带 tools
+    # 时当场 400(`reasoning_content` 必须回传),**整轮直接死**。
+    # 留一条、超长的那条由 `maybe_compact` 截断 —— 截断看得见,丢掉看不见。
+    i = min(i, len(messages) - 1)
     # **往前退,不往后挪。** 并行工具调用会让结尾连着好几条 `tool`,往后挪会一路走出
     # 列表末尾、把尾巴挪成空的;往前退是退到发起它们的那条 assistant —— 不会落单,
     # 而且留下的上下文更多,正是这一改想要的。
@@ -3192,10 +3202,19 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
             + clean + [{"role": "user", "content": "把以上压成简报。"}]))
     summary = resp.choices[0].message.content or "(空)"
     tail = messages[cut:]
-    ui.note(f"🗜 上下文已压缩({len(messages)} 条 → {2 + len(tail)} 条,"
+    # 留下的那条可能自己就超预算(`_tail_start` 现在宁可留一条也不留空)。**截断,别丢掉** ——
+    # 截断模型看得见,丢掉它只会去重读一遍。
+    for m in tail:
+        if isinstance(m.get("content"), str) and len(m["content"]) > COMPACT_TAIL_CHARS:
+            m["content"] = m["content"][:COMPACT_TAIL_CHARS] + "\n…(尾部过长,已截断)"
+    # **不再合成一条 assistant。** 原来这里补一句「了解,以上是之前的进展」,让摘要读起来
+    # 像是已经确认过的上下文。代价:那是一条**凭空造的 assistant 消息**,而思考模型要求
+    # 历史里的 assistant 必须带回 `reasoning_content` —— 造的那条没有。
+    # 实测:deepseek 思考模型 + tools,它一旦成为最后一条消息,请求当场 400,整轮死掉
+    # (尾巴被压成空的时候就正好是它殿后)。摘要放在一条 user 里就够了,不用替模型说话。
+    ui.note(f"🗜 上下文已压缩({len(messages)} 条 → {1 + len(tail)} 条,"
             f"最近 {len(tail)} 条原样留着)")
-    return [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary},
-            {"role": "assistant", "content": "了解,以上是之前的进展,我们继续。"}] + tail
+    return [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary}] + tail
 
 def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
     """Stub OLD, bulky tool outputs in place so they stop getting resent every step (token saver).

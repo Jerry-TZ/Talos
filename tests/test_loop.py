@@ -585,9 +585,13 @@ def test_compaction_must_actually_get_under_the_threshold(ws, monkeypatch):
     assert A._ctx_chars(out) < A.COMPACT_AT, (
         f"压完还是 {A._ctx_chars(out)} 字符,超过阈值 {A.COMPACT_AT} —— "
         "下一步会立刻再压一次,每次都是一次全量缓存作废加一次模型调用")
-    # 别为了压下去把尾巴整个丢了:尾部保留这件事本身还得成立
-    assert len(out) > 2 or A._ctx_chars(msgs[-1:]) > A.COMPACT_TAIL_CHARS, \
-        "尾巴全丢了 —— 那就退回成「只剩摘要」,下一步接不上刚才那一步"
+    # 别为了压下去把尾巴整个丢了:尾部保留这件事本身还得成立。
+    # **豁免删掉了。** 上一版这条写的是 `or _ctx_chars(msgs[-1:]) > COMPACT_TAIL_CHARS`——
+    # 也就是「最后一条自己超预算的话,尾巴全丢也算过」。那把一个**已知的坏情况**
+    # 从「坏」改判成了「允许」,于是再没人回来看它。实测代价见 FINDINGS 六十九节:
+    # 尾巴一空,合成的那条 assistant 殿后,思考模型带 tools 当场 400,整轮死。
+    # 超长的那条现在由 maybe_compact 截断,不再是丢掉。
+    assert len(out) > 1, "尾巴全丢了 —— 那就退回成「只剩摘要」,下一步接不上刚才那一步"
 
 
 def test_the_summary_can_see_what_the_tools_actually_did(ws, monkeypatch):
@@ -729,6 +733,47 @@ def test_prune_old_tool_results():
     m2 = [{"role": "user", "content": "x"}] * 3 + [recent]
     A._prune_old_tool_results(m2)
     assert recent["content"] == "Y" * 1000                       # 最近的不动
+
+
+def test_compaction_never_fabricates_an_assistant_turn(ws, monkeypatch):
+    """压缩不许凭空造一条 assistant 消息 —— 思考模型会当场拒掉整个请求。
+
+    原来这里补一句「了解,以上是之前的进展,我们继续。」,让摘要读起来像已确认的上下文。
+    而思考模型要求历史里的 assistant 必须带回 `reasoning_content`,造的那条没有。
+    **实测(deepseek-v4-flash + tools):它一旦是最后一条,请求 400,整轮死掉。**
+    不带 tools 不报,带 tools 才报 —— 而 agent 循环永远带 tools。
+
+    两个 bug 叠在一起才致命:`_tail_start` 把尾巴压成空的(见下一条判据),
+    合成的那条才会殿后。任一条修掉都不再崩,两条都修是因为它们各自都是坏的。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "_chat", lambda c, **kw: _msg(content="简报"))
+    msgs = ([{"role": "user", "content": "干活"}]
+            + [{"role": "assistant", "content": "步骤 " + "x" * 4000} for _ in range(9)])
+    out = A.maybe_compact(None, "m", msgs, force=True)
+    assert out[0]["role"] == "user" and "简报" in out[0]["content"]
+    assert not any(m.get("role") == "assistant" and not m.get("tool_calls")
+                   and m.get("content", "").startswith("了解") for m in out), \
+        "压缩又造了一条 assistant —— 思考模型带 tools 时它会让整个请求 400"
+
+
+def test_the_tail_is_never_empty_even_when_one_message_blows_the_budget(ws):
+    """尾巴不许是空的,哪怕最后一条自己就超过 `COMPACT_TAIL_CHARS`。
+
+    `_tail_start` 的字符预算是个 while 循环:最后一条自己超预算就立刻 break,
+    `j` 停在 `len(messages)`,尾巴归零。而空尾巴正是 `maybe_compact` 开头记着的那条
+    回归(「整段历史压成 2 条」,代价是模型花约十次调用重读刚读过的东西)。
+
+    **这个坏情况原来被写进它自己的判据当豁免了** —— `assert len(out) > 2 or
+    最后一条超预算`。已知的坏改判成允许,就再没人回来看它。
+    实测:尾巴一空,压缩合成的 assistant 殿后,思考模型带 tools 当场 400。"""
+    import agent as A
+    msgs = [{"role": "user", "content": "干活"},
+            {"role": "assistant", "content": "短"},
+            {"role": "assistant", "content": "长" * (A.COMPACT_TAIL_CHARS + 100)}]
+    cut = A._tail_start(msgs, A.COMPACT_KEEP)
+    assert cut < len(msgs), \
+        f"尾巴被压成空的(cut={cut},共 {len(msgs)} 条)—— 超长的那条该截断,不是丢掉"
 
 
 def test_a_subagents_answer_is_never_pruned_because_it_cannot_be_re_read():
