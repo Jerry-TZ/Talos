@@ -178,13 +178,47 @@ _MUT_ARGS = ["-m", "pytest", "tests", "-x", "-q", "-p", "no:cacheprovider",
              "--ignore=tests/test_mutation.py", "--ignore=tests/test_docs.py"]
 
 
-class _DropRaise(ast.NodeTransformer):
-    def __init__(self, target):
-        self.target, self.seen = target, 0
+def _is_refusal(node) -> bool:
+    """`return False, "理由"` —— 权限闸说「不行」的那个出口。
+
+    **守卫不只有 `raise` 这一种形状。** 第一版只扫 `raise`,而 README 管权限框叫安全边界,
+    那道边界的每一次拒绝走的都是这个 return —— 整片最要紧的面,一处都没被扫到。
+    「立完闸没问『这片面还有几条路』」这句话在这份记录里出现过三次,这是第四次。"""
+    return (isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
+            and len(node.value.elts) == 2
+            and isinstance(node.value.elts[0], ast.Constant) and node.value.elts[0].value is False)
+
+
+def _guard_sites(tree) -> list:
+    """两种形状的守卫,按源码顺序。"""
+    return sorted((n for n in ast.walk(tree) if isinstance(n, ast.Raise) or _is_refusal(n)),
+                  key=lambda n: (n.lineno, n.col_offset))
+
+
+class _DropGuard(ast.NodeTransformer):
+    """把**指定位置**那一处守卫拆掉,其余原样。
+
+    按**位置**认,不按第几个认。上面 `_sweep` 那段注释记着第一版栽在哪:`ast.walk` 是广度
+    优先、`NodeTransformer` 是深度优先,两边序号对不上,于是「几条没判据」是对的、
+    「哪几条」全是错的。那一版靠给 sites 排序绕过去,而**序号这个耦合还在**;
+    现在两种形状混在一起数,它只会更脆。按 `(lineno, col_offset)` 认就没有这回事了。
+
+    `raise` 换成 `pass`;`return False, 理由` 换成 `return True, ""` —— 后者不能也换成
+    `pass`:那样函数返回 None,调用方拆包当场炸,**每个变异体都"被抓到",而抓到的是崩溃
+    不是守卫**。闸的反面不是「什么都不返回」,是「放行」。"""
+
+    def __init__(self, pos):
+        self.pos = pos
 
     def visit_Raise(self, node):
-        hit, self.seen = self.seen, self.seen + 1
-        return ast.copy_location(ast.Pass(), node) if hit == self.target else node
+        if (node.lineno, node.col_offset) != self.pos:
+            return node
+        return ast.copy_location(ast.Pass(), node)
+
+    def visit_Return(self, node):
+        if (node.lineno, node.col_offset) != self.pos or not _is_refusal(node):
+            return node
+        return ast.copy_location(ast.parse('return (True, "")').body[0], node)
 
 
 def _suite_green(src: str, repo: str) -> bool:
@@ -225,18 +259,17 @@ def _off_platform(tree, plat: str = "") -> set:
             continue
         for stmt in node.body:             # **只走 body,不走 orelse** —— else 那支是照常执行的
             for sub in ast.walk(stmt):
-                if isinstance(sub, ast.Raise):
+                if isinstance(sub, ast.Raise) or _is_refusal(sub):
                     out.add((sub.lineno, sub.col_offset))
     return out
 
 
 def _agent_sweep():
-    """agent.py 的每一处 raise 换成 pass,跑全套。返回 [(位置, 摘掉后是否还全绿, 这格跑不跑得到)]。"""
+    """agent.py 的每一处守卫拆掉一次,跑全套。返回 [(位置, 拆掉后是否还全绿, 这格跑不跑得到)]。"""
     src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
     off = _off_platform(ast.parse(src))
-    sites = sorted((n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Raise)),
-                   key=lambda n: (n.lineno, n.col_offset))
-    assert sites, "agent.py 里一处 raise 都没找到 —— 这个扫描失效了"
+    sites = _guard_sites(ast.parse(src))
+    assert sites, "agent.py 里一处守卫都没找到 —— 这个扫描失效了"
     out = []
     with tempfile.TemporaryDirectory() as tmp:
         repo = os.path.join(tmp, "repo")
@@ -246,8 +279,8 @@ def _agent_sweep():
         assert _suite_green(ast.unparse(ast.parse(src)), repo), (
             "控制组就红了:副本本身跑不过全套(unparse 改了行为,或者副本缺东西)——"
             "这个扫描的结论全部无效")
-        for i, site in enumerate(sites):
-            mutant = _DropRaise(i).visit(ast.parse(src))
+        for site in sites:
+            mutant = _DropGuard((site.lineno, site.col_offset)).visit(ast.parse(src))
             ast.fix_missing_locations(mutant)
             out.append((f"agent.py:{site.lineno} {_label(site)}",
                         _suite_green(ast.unparse(mutant), repo),
@@ -282,16 +315,21 @@ def test_the_sweep_knows_which_guards_this_platform_cannot_reach():
 
 
 @pytest.mark.skipif(not os.environ.get("TALOS_SWEEP"),
-                    reason="全扫要 4 分钟(30 个变异体 × 一遍全套)。CI 跑一格,本地 TALOS_SWEEP=1")
+                    reason="全扫要 5 分钟(37 个变异体 × 一遍全套)。CI 跑一格,本地 TALOS_SWEEP=1")
 def test_every_guard_in_agent_has_a_case_that_dies_without_it():
-    """摘掉 agent.py 里任何一处 `raise`,271 条判据必须有人红。
+    """拆掉 agent.py 里任何一处守卫,全套判据必须有人红。
 
-    **第一次跑就抓到 5 条**(30 条里):两条启动闸(provider 打错字、缺 key)、
-    `read_file` 读到目录、以及两处 `raise KeyboardInterrupt`(人在权限框上按 Ctrl-C)。
+    **第一版只扫 `raise`,第一次跑就抓到 5 条**(30 条里):两条启动闸(provider 打错字、
+    缺 key)、`read_file` 读到目录、两处 `raise KeyboardInterrupt`(人在权限框上按 Ctrl-C)。
     最后那两条尤其难看 —— 它们在真实会话里天天走,而摘掉之后没有任何判据会红。
 
-    扫的是 `raise`,不是全部守卫:返回拒绝串的那些(`permission denied: ...`、
-    `error: ...`)不在里面。**这是覆盖面的边界,写在这里免得有人把它读成"全查过了"。**"""
+    **第二版补上了另一种形状:`return False, "理由"`** —— 权限闸说「不行」的那个出口,
+    也就是 README 管它叫安全边界的那道闸,整片 7 处,第一版一处都没扫到。
+    「立完闸没问『这片面还有几条路』」在这份记录里出现过三次,那是第四次。
+
+    **还剩下的边界写在这:** 返回拒绝串的那种(`return "error: …"`)不在里面 ——
+    它们的「反面」不是一个固定值,拆法要一处一个看,没有统一的变异。
+    写在这里免得有人把绿读成"全查过了"。"""
     rows = _agent_sweep()
     survivors = [n for n, green, off in rows if green and not off]
     assert not survivors, (
