@@ -451,9 +451,20 @@ def test_the_cache_instrument_watches_what_was_actually_sent(ws, monkeypatch):
     assert state["sys_now"] == sent["system"], \
         "记下的不是发出去的那一串 —— 量的是另一个东西"
 
-    # 非顶层不许写:子 agent 共享 state,写了就会盖掉顶层那份
+    # 非顶层不许写:子 agent 共享 state,写了就会盖掉顶层那份。
+    # **上一版这条是死的**,两处都错:① `or state["sys_now"]` 让它恒真(那是个非空字符串);
+    # ② 比较的对象也错 —— `sent["system"]` 会被子层那次调用**覆盖**,于是「相等」恰恰
+    # 意味着子层写进去了。摘掉 `agent_turn` 里的 `if top:` 全套一条不红,变异当场戳穿。
+    # 钉法:顶层跑完先把那一串**抄下来**,子层跑完再比抄下来的那一份。
+    top_sys = state["sys_now"]
+    # **两层的 system 必须真的不一样,否则这条判据没有能力发现覆盖。** 上一版两次调用
+    # 发出的是同一个字符串,于是子层就算写进去了,等式照样成立 —— 判据不是漏了断言,
+    # 是**断言的对象天生分不开**。`retrieve()` 的输出进 system,拿它造差别。
+    monkeypatch.setattr(A, "retrieve", lambda: "子层专属的一段回忆")
     A.agent_turn(None, "m", [{"role": "user", "content": "别的事"}], state)
-    assert state["sys_now"] == sent["system"] or state["sys_now"], "被子层覆盖了"
+    assert sent["system"] != top_sys, "前提没成立:子层发出去的 system 得跟顶层不一样"
+    assert state["sys_now"] == top_sys, \
+        "子层把顶层记下的 system 盖掉了 —— 缓存仪表量的会变成最后一个子 agent 的那串"
 
     # 消费端:只动 recall 那一段(retrieve() 不变),prefix_kept 必须掉
     head = "稳定的前缀" * 50
