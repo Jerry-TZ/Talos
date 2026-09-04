@@ -3221,6 +3221,16 @@ def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
         if (m.get("role") == "tool" and isinstance(m.get("content"), str)
                 and len(m["content"]) > 600 and not m["content"].startswith("[已省略")):
             what = by_id.get(m.get("tool_call_id"))
+            # **子代理的返回不剪。** 省略那句话是「需要就重新读」,而它读不回来:
+            # 子代理的上下文按设计已经销毁,重来一次是**重新派一次活**,不是重读一遍。
+            # 实测(chapter2 普查,五个子代理):四份返回全被换成占位符,父层拿到一句
+            # 它做不到的建议,于是改去自己读文件、把读预算烧穿 —— 76 次调用、120 万
+            # token、一行表都没交出来,而子代理干的活全在,只是没人拿得到。
+            # 上面那段注释修的是「读的是什么」,**没问「读不读得回来」**。
+            # 天花板:不设上限地留着。它本来就是压缩过的产物(实测 1~3 KB),
+            # 真撑大了还有 `maybe_compact` 兜底 —— 丢掉它的代价是整次派活白干。
+            if (what or "").startswith("spawn_subagent"):
+                continue
             m["content"] = (f"[已省略 {what} 的输出,{len(m['content'])} 字符 — 需要就重新读]"
                             if what else
                             f"[已省略工具输出,{len(m['content'])} 字符 — 需要就重新读]")

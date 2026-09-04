@@ -731,6 +731,35 @@ def test_prune_old_tool_results():
     assert recent["content"] == "Y" * 1000                       # 最近的不动
 
 
+def test_a_subagents_answer_is_never_pruned_because_it_cannot_be_re_read():
+    """省略的那句话是「需要就重新读」—— 而**子代理读不回来**:它的上下文按设计已经销毁。
+
+    实测(chapter2 的 tool schema 普查,五个子代理):四个子代理的返回
+    (2616 / 1467 / 1655 / 1326 字符)全被换成了占位符,父层拿到的是一句它做不到的建议。
+    于是它改去自己读文件,把读预算烧穿,**76 次调用、120 万 token,一行表都没交出来**。
+    子代理干的活全在,只是没人拿得到。
+
+    这个函数的 docstring 自己写着「那是一句无法执行的建议」—— 上一次修的是
+    **「读的是什么」**(占位符里补上出处),没问**「读不读得回来」**。
+    `spawn_subagent` 的返回是这堆工具输出里唯一一种既贵、又不可重来的。
+
+    天花板写明白:子代理返回不设上限地留着。实测 1~3 KB(它本来就是压缩过的产物),
+    真撑大了还有 `maybe_compact` 兜底 —— 而丢掉它的代价是整次派活白干。"""
+    import agent as A
+    sub = {"role": "tool", "tool_call_id": "s1", "content": "结论:" + "Z" * 2000}
+    red = {"role": "tool", "tool_call_id": "r1", "content": "Y" * 2000}
+    msgs = ([{"role": "assistant", "tool_calls": [
+                {"id": "s1", "function": {"name": "spawn_subagent",
+                                          "arguments": '{"task": "数一下有几个工具"}'}},
+                {"id": "r1", "function": {"name": "read_file",
+                                          "arguments": '{"path": "a.py"}'}}]},
+             sub, red] + [{"role": "user", "content": "x"}] * 10)
+    A._prune_old_tool_results(msgs)
+    assert red["content"].startswith("[已省略"), "普通工具输出该剪的还得剪"
+    assert sub["content"].startswith("结论:"), \
+        "子代理的返回被省略了 —— 而「需要就重新读」在它身上不成立,那次派活就是白干"
+
+
 def test_reading_less_can_cost_more_than_reading_more():
     """这道闸只省略 **>600 字符**的工具输出 —— 门槛底下的一条都不省,于是它们整轮都在被
     重发,累计量随步数**没有上限**;门槛上面的最多只有最近 8 条消息在场,是个常数。
