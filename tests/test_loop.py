@@ -815,6 +815,31 @@ def test_the_loop_snapshots_before_a_tool_can_overwrite(ws, monkeypatch):
              for n in os.listdir(A.TRASH_DIR)]
     assert "好数据" in saved, "覆盖之前没有存档 —— 数据就真没了"
 
+def test_the_snapshot_pins_the_file_the_tool_named(ws, monkeypatch):
+    """`archive_workspace` 会钉住点名的文件,不代表循环会去点名 —— 这两件事分开红。
+    (同一个形状今天已经吃过一次:单测直接调函数,于是「没接线」那个变异体一路绿。)"""
+    import os
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "TRASH_MAX_FILES", 3)
+    monkeypatch.chdir(ws)            # 同上:启动时 chdir 到工作区,相对路径才有意义
+    p = os.path.join(ws, "stable.conf")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("一年没动过的好数据")
+    os.utime(p, (1, 1))
+    for i in range(5):
+        with open(os.path.join(ws, f"new{i}.txt"), "w", encoding="utf-8") as f:
+            f.write("刚写的")
+    client = _Client([_msg(tool_calls=[_tc("write_file",
+                                           '{"path":"stable.conf","content":"覆盖掉"}')]),
+                      _msg(content="done")])
+    A.agent_turn(client, "m", [{"role": "user", "content": "hi"}],
+                 {"mode": "bypass", "allow": set()})
+    assert open(p, encoding="utf-8").read() == "覆盖掉", "前提没成立:它压根没被覆盖"
+    saved = [open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+             for n in os.listdir(A.TRASH_DIR)]
+    assert "一年没动过的好数据" in saved, "循环没把 write_file 的 path 传下去 —— 存了一堆,漏了那一个"
+
 def test_a_subagent_cannot_reset_the_parents_repeat_counter(ws, monkeypatch):
     """spawn_subagent 把调用方**同一个** state 交给嵌套的 agent_turn。打转计数原来挂在
     state 上,于是子agent 一进门就把父轮的计数清了 —— 恰好在这道闸该起作用的死循环里

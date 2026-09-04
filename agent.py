@@ -281,7 +281,7 @@ TRASH_MAX_FILES = 300                # 一次最多存这么多,别在大仓库�
 _TRASH_LAST_SKIP = 0                 # 上次报过的跳过数 —— 只有变多才再说一次
 _TRASH_SKIP = {".git", ".venv", "venv", "node_modules", "__pycache__", ".talos", ".pytest_cache"}
 
-def archive_workspace() -> int:
+def archive_workspace(must: str = "") -> int:
     """Copy every workspace file we haven't stored yet — BEFORE anything gets a chance to write.
 
     The delete gate watches for verbs: del, rm, rmdir, Remove-Item. A real run destroyed two
@@ -336,6 +336,20 @@ def archive_workspace() -> int:
         pass
     cands.sort(reverse=True)
     over = max(0, len(cands) - TRASH_MAX_FILES)
+    # **上限砍掉的,正好可能是这次唯一有危险的那一个。** 取前 300 是按 mtime 倒序,
+    # 而一个一年没动过的文件排在最末 —— 它恰恰是马上要被覆盖的那个。挂账原话是
+    # 「写文件前的快照保护对其中 320 个是不生效的」,而那 320 个并不是随机的 320 个。
+    # 这道网防的是「这一次写下去就没了」,不是「最近谁被动过」;后者只是前者的猜法,
+    # 而调用方**说得出**要动哪个文件的时候,就不该再去猜。钉在最前面,不占名额靠运气。
+    # 底下那一整套 guard(必须在保护根之下 / 密钥 / 硬链接 / 大小)一条都不绕过去。
+    # 解析用 `_in_workspace` 而不是 `abspath`:传进来的是模型写的那个 path,而 write_file
+    # 就是拿这一个函数把它变成真实路径的(还带前缀剥离)。两边用同一个解析器,才不会出现
+    # 「存的是一个路径、写的是另一个路径」这种最难看的失败 —— 网看着在,盖的不是同一张床。
+    if must:
+        try:
+            cands.insert(0, (float("inf"), _in_workspace(must)))
+        except Exception:
+            pass                               # 路径本身有问题,write_file 自己会抛,这里不掺和
     for _mt, p in cands[:TRASH_MAX_FILES]:
         # Same two guards every other file tool gets, for the same reason. Without them this
         # walk was a way around _in_workspace(): read_file REFUSES `.env` outright, while the
@@ -2715,7 +2729,10 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                 # a file: run_bash, write_file, edit_file, and self-written tools (which
                 # register as "bash", see load_custom_tools). Read-only calls skip it.
                 if cls in ("bash", "edit"):
-                    archive_workspace()
+                    # write_file / edit_file 说得出自己要动哪个文件,run_bash 说不出。
+                    # 说得出的就别让它去跟另外几百个文件抢那 300 个名额。
+                    tgt = args.get("path") if name in ("write_file", "edit_file") else None
+                    archive_workspace(tgt if isinstance(tgt, str) else "")
                 out, is_error = run_tool(name, args)
                 if view != "quiet":
                     ui.show_tool(name, args, out, is_error, full=(view in ("verbose", "transcript")))

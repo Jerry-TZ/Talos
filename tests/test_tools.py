@@ -558,6 +558,33 @@ def test_clearing_the_trash_does_not_switch_the_net_off(ws):
     shutil.rmtree(A.TRASH_DIR)                       # 用户按文档说的清空了回收站
     assert A.archive_workspace() == 1, "清空之后不再存档 —— 安全网被无声关掉了"
 
+def test_the_cap_must_not_drop_the_one_file_that_is_about_to_be_overwritten(ws, monkeypatch):
+    """上限按 mtime 倒序取前 N,于是**最久没动过的文件排在最末**,名额永远轮不到它 ——
+    而它恰恰是这次唯一真有危险的那个。真实运行里每轮都在印「回收站这次跳过了 320 个
+    较旧文件」,那 320 个不是随机的 320 个,是最不像会被碰、因此一旦被碰最没准备的那些。
+
+    「最近谁被动过」只是「这一次写下去会不会没」的一个猜法。调用方说得出要动哪个文件的
+    时候就不该再猜 —— 而 write_file / edit_file 每次都说得出。"""
+    import agent as A
+    monkeypatch.setattr(A, "TRASH_MAX_FILES", 3)
+    monkeypatch.chdir(ws)            # 真实运行里 cwd 就是工作区(`agent.py:276` 启动时 chdir),
+                                     # 模型写的相对路径靠这个才落在工作区里 —— fixture 不管这个
+    old = os.path.join(ws, "stable.conf")
+    with open(old, "w", encoding="utf-8") as f:
+        f.write("一年没动过的好数据")
+    os.utime(old, (1, 1))                              # mtime 最旧 —— 倒序排在最末
+    for i in range(5):
+        with open(os.path.join(ws, f"new{i}.txt"), "w", encoding="utf-8") as f:
+            f.write("刚写的")
+    def dumped():
+        return "".join(open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+                       for n in os.listdir(A.TRASH_DIR))
+    A.archive_workspace()
+    assert "一年没动过" not in dumped(), \
+        "前提没成立:它本该被上限砍掉。不砍的话下面那句什么都没测到"
+    A.archive_workspace("stable.conf")                 # 传的是模型写的那种相对路径
+    assert "一年没动过" in dumped(), "点名要动的文件仍然被上限砍掉了 —— 网正好漏在受力点上"
+
 def test_cd_into_the_workspace_from_inside_it_says_so(ws):
     """_strip_workspace_prefix 只管文件工具的 path 参数,run_bash 的命令串没走那条路 ——
     同一个错误于是原样撞进 shell:`cd workspace && python gen.py` 连失败三次,而 shell 报的

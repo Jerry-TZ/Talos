@@ -79,6 +79,13 @@ def test_the_line_counts_readme_invites_you_to_check_are_the_real_ones():
 # 写法是**开集**,这个正则只能追着跑;所以下面 `assert hits` 那句同样重要:哪天某份
 # 文档一句都不匹配了,先怀疑是这个正则瞎了,不是文档不写数了。
 _COUNT = re.compile(r"(\d{2,4})\s*(?:个测试|条[^\n]{0,3}判据|passed|条(?=[,。]))")
+# **数字不见了,这条判据看不见。** 昨天我用 grep 取测试数,输出是 GBK 乱码,于是往五处
+# 文档里写进了空串 ——「 条离线判据」。全套照绿:`_COUNT` 要求 `\d{2,4}`,一句掉了数字的
+# 宣传它根本不匹配,而 `assert hits` 只在**一份文档一句都不剩**时才响。
+# 陈了会红,没了反而不会红 —— 这是 FINDINGS 那条「判据结构上不可能红」的又一个实例。
+# 单位词单独再找一遍,每一处都必须正好是某个 `_COUNT` 匹配的结尾。
+# 不收 `条(?=[,。])`:散文里「最便宜的一条,」「逮到三条,」都长这样,收进来当场误伤。
+_NAKED = re.compile(r"个测试|条[^\n]{0,3}判据|passed")
 # 哪几份文档会声称这个数,是个**闭集**:README 和 DEVELOPMENT。FINDINGS/JUDGING 里
 # 的数字是**历史记录**(「175 条判据加 13 个变异体都没碰上」),钉它们等于逼人改历史。
 _CLAIMS = ("README.md", "DEVELOPMENT.md")
@@ -105,6 +112,9 @@ def test_the_test_count_the_docs_advertise_is_the_real_one():
         assert hits, f"{f} 里一句测试数都没有了 —— 要么文档改了写法,要么这半条判据自己瞎了"
         wrong += [f"{f}:{ln} 写「{txt}」" for ln, txt in hits
                   if int(re.match(r"\d+", txt).group()) != real]
+        ends = {m.end() for m in _COUNT.finditer(s)}
+        wrong += [f"{f}:{s[:m.start()].count(chr(10)) + 1} 写「{m.group(0)}」,前面的数字没了"
+                  for m in _NAKED.finditer(s) if m.end() not in ends]
     assert not wrong, (
         f"文档宣传的测试数跟 tests/ 里真实的 {real} 条对不上:\n  " + "\n  ".join(wrong)
         + "\n加判据是这个项目每天在干的事,所以这个数**每天都会陈** —— 这条就是为它存在的。")
