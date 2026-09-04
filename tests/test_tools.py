@@ -558,6 +558,20 @@ def test_clearing_the_trash_does_not_switch_the_net_off(ws):
     shutil.rmtree(A.TRASH_DIR)                       # 用户按文档说的清空了回收站
     assert A.archive_workspace() == 1, "清空之后不再存档 —— 安全网被无声关掉了"
 
+def test_reading_a_directory_says_it_is_a_directory(ws):
+    """变异扫描扫出来的空白之一。Windows 上 `open()` 一个目录抛的是光秃秃的
+    「Permission denied」—— 模型会以为是权限闸拦了它,于是去申请权限、换 `run_bash`
+    再试一次,而它要的只是列个目录。**错得像另一个错**,比错本身贵。"""
+    import agent as A
+    p = os.path.join(ws, "conf")
+    os.makedirs(p, exist_ok=True)
+    # **第一版这里传的是相对路径 `"conf"`,而 `ws` fixture 不 chdir** —— 于是 read_file
+    # 去仓库根下找 `conf`,抛的是「越界」,断言却照样绿。摘掉被测的那道闸,它**还是绿的**:
+    # 一条因为错误理由通过的判据。今天同一个坑踩了第二次(上一次是回收站那条)。
+    with pytest.raises(ValueError) as e:
+        A.read_file(p)
+    assert "目录" in str(e.value) and "dir" in str(e.value), "得说清它是目录、以及该用什么列"
+
 def test_the_cap_must_not_drop_the_one_file_that_is_about_to_be_overwritten(ws, monkeypatch):
     """上限按 mtime 倒序取前 N,于是**最久没动过的文件排在最末**,名额永远轮不到它 ——
     而它恰恰是这次唯一真有危险的那个。真实运行里每轮都在印「回收站这次跳过了 320 个

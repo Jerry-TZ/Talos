@@ -20,6 +20,7 @@
 """
 import ast
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -156,6 +157,84 @@ def test_the_layout_sample_is_hard_enough_to_notice_its_own_knobs():
     assert blind == set(_BLIND), (
         f"盲区变了。现在盲的: {sorted(blind)};记录在案的: {sorted(_BLIND)}\n"
         f"  多出来的 = 回归(样本变软了);少掉的 = 判官变强了,把它从 _BLIND 里删掉")
+
+
+# ── agent.py 那一侧:守卫是 `raise`,判官是这 270 多条判据本身 ──────────────────
+# **这个仓库最贵的东西没有这条不变量顶着。** 上面两支扫的是 drawio 那两个脚本,
+# 而 `agent.py` 的每一道闸,一直只靠我每次手工摘一个部件、看一眼红不红 —— 而
+# FINDINGS 自己写着「变异体这条路有效,**而它的覆盖面是我手写的**」。手写的覆盖面
+# 就是这份记录里所有结论共同的地基,也是唯一没人查的那一块。
+#
+# 三处跟上面不一样,每一处都是被逼出来的:
+# ① 判官不是 `--selfcheck` 而是**整套判据**。agent 的 selfcheck 只覆盖工具/档位/
+#    schema/工作区闸,拿它当判官会把「selfcheck 没覆盖」全报成「没有 case」。
+# ② 变异体跑在**整个仓库的副本**里,不是单文件临时目录:conftest 里写死了
+#    `sys.path.insert(0, HERE)`,PYTHONPATH 抢不过它,所以只能让 cwd 就是副本。
+# ③ 副本里必须去掉两支判据:`test_mutation.py`(否则每个变异体里又套一轮全扫)和
+#    `test_docs.py`(`ast.unparse` 会把注释全剥掉,行数表条条对不上 —— 那是**假红**,
+#    会让每个变异体都"被抓到",整张表变成永远报平安)。控制组那一关就是查这个的。
+_MUT_IGNORE = shutil.ignore_patterns(".git", ".venv", "__pycache__", ".pytest_cache", ".talos")
+_MUT_ARGS = ["-m", "pytest", "tests", "-x", "-q", "-p", "no:cacheprovider",
+             "--ignore=tests/test_mutation.py", "--ignore=tests/test_docs.py"]
+
+
+class _DropRaise(ast.NodeTransformer):
+    def __init__(self, target):
+        self.target, self.seen = target, 0
+
+    def visit_Raise(self, node):
+        hit, self.seen = self.seen, self.seen + 1
+        return ast.copy_location(ast.Pass(), node) if hit == self.target else node
+
+
+def _suite_green(src: str, repo: str) -> bool:
+    with open(os.path.join(repo, "agent.py"), "w", encoding="utf-8") as f:
+        f.write(src)
+    try:
+        r = subprocess.run([sys.executable] + _MUT_ARGS, capture_output=True, cwd=repo,
+                           env={**os.environ, "PYTHONIOENCODING": "utf-8"}, timeout=900)
+    except subprocess.TimeoutExpired:
+        return False              # 卡死也算被抓到:它至少不是"悄无声息地照常干活"
+    return r.returncode == 0
+
+
+def _agent_sweep():
+    """agent.py 的每一处 raise 换成 pass,跑全套。返回 [(位置, 摘掉后是否还全绿)]。"""
+    src = open(os.path.join(HERE, "agent.py"), encoding="utf-8").read()
+    sites = sorted((n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Raise)),
+                   key=lambda n: (n.lineno, n.col_offset))
+    assert sites, "agent.py 里一处 raise 都没找到 —— 这个扫描失效了"
+    out = []
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = os.path.join(tmp, "repo")
+        shutil.copytree(HERE, repo, ignore=_MUT_IGNORE)
+        # 控制组:只走一遍 unparse。这一关红过一次 —— 我当时把 benchmarks/ 也排除在
+        # 副本外,于是 test_report 找不到基准脚本。**没有这一关,那次会变成"30 条全有 case"。**
+        assert _suite_green(ast.unparse(ast.parse(src)), repo), (
+            "控制组就红了:副本本身跑不过全套(unparse 改了行为,或者副本缺东西)——"
+            "这个扫描的结论全部无效")
+        for i, site in enumerate(sites):
+            mutant = _DropRaise(i).visit(ast.parse(src))
+            ast.fix_missing_locations(mutant)
+            out.append((f"agent.py:{site.lineno} {_label(site)}", _suite_green(ast.unparse(mutant), repo)))
+    return out
+
+
+@pytest.mark.skipif(not os.environ.get("TALOS_SWEEP"),
+                    reason="全扫要 4 分钟(30 个变异体 × 一遍全套)。CI 跑一格,本地 TALOS_SWEEP=1")
+def test_every_guard_in_agent_has_a_case_that_dies_without_it():
+    """摘掉 agent.py 里任何一处 `raise`,271 条判据必须有人红。
+
+    **第一次跑就抓到 5 条**(30 条里):两条启动闸(provider 打错字、缺 key)、
+    `read_file` 读到目录、以及两处 `raise KeyboardInterrupt`(人在权限框上按 Ctrl-C)。
+    最后那两条尤其难看 —— 它们在真实会话里天天走,而摘掉之后没有任何判据会红。
+
+    扫的是 `raise`,不是全部守卫:返回拒绝串的那些(`permission denied: ...`、
+    `error: ...`)不在里面。**这是覆盖面的边界,写在这里免得有人把它读成"全查过了"。**"""
+    survivors = [name for name, still_green in _agent_sweep() if still_green]
+    assert not survivors, (
+        f"{len(survivors)} 处守卫摘掉之后全套照绿 —— 它们没有判据,等于没写:\n  "
+        + "\n  ".join(survivors))
 
 
 if __name__ == "__main__":                      # 直接跑给人看:python tests/test_mutation.py

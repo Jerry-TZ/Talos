@@ -1074,6 +1074,18 @@ def _child_state(parent: dict) -> dict:
     parent.setdefault("denied", set())        # 先让父拥有这个 set,子才好共享
     return {k: parent[k] for k in _CHILD_KEYS if k in parent}
 
+# 不明确要求就返回「这份报告**是讲什么的**」,而不是「这份报告**说了什么**」——
+# 而派它的那个 agent 看不见过程,两种回答在它眼里一样自信。这一句就是把那个差别说出来。
+#
+# **这是提示类的办法,按第一节的主结论应该打个问号。** 区别在于:第一节说的是诱导一个
+# **新动作**(「把数字定死在数据里」),那类一律无效;这里要的是同一个动作换个**形状**,
+# 而形状类的要求在这个仓库里成过(判断器的「只输出 JSON」)。
+# **判据只钉到「这句话确实发出去了」为止 —— 它有没有让摘要变好,没有验过。**
+# 要验得拿两组真跑对着看,而那要额度。
+_SUB_BRIEF = ("\n\n[交付要求] 回来只交**结论本身**,不交「我做了什么」:"
+              "带上具体的数字、文件名、原文片段。派你的人看不见你的过程 ——"
+              "「这份报告讲的是季度销售」和「Q3 收入 420 万、环比 -12%」在他那儿一样自信。")
+
 def spawn_subagent(task: str) -> str:
     depth = _RUNTIME.get("depth", 0)
     if depth >= 2:
@@ -1098,7 +1110,7 @@ def spawn_subagent(task: str) -> str:
     child = _child_state(parent)
     try:
         answer = agent_turn(_RUNTIME["client"], _RUNTIME["model"],
-                            [{"role": "user", "content": task}], child)
+                            [{"role": "user", "content": task + _SUB_BRIEF}], child)
     finally:
         _RUNTIME["depth"] = depth
     # Without this the caller sees only prose and cannot tell a real answer from a guessed one.
@@ -1630,6 +1642,9 @@ _TOKEN = re.compile(r"""[^\s"'|<>]+""")
 # 都不存在的词,`_targets` 返回**空集合** —— 拒绝了等于没记,粘性对带空格的文件名从来
 # 没生效过。而带空格的文件名在 Windows 上遍地都是。**第四次补同一个机制了。**
 _QUOTED = re.compile(r'"([^"\n]{1,260})"' r"|'([^'\n]{1,260})'")
+# ponytail: `denied` 是每条命令一个正则地扫过去的,所以展开要有个天花板。
+# 200 是拍的,不是量的 —— 超了会退成记目录,不会静默丢。真嫌粗了再往上调。
+_GLOB_MAX = 200
 
 def _targets(cmd: str) -> set:
     """命令里提到的文件。
@@ -1650,6 +1665,20 @@ def _targets(cmd: str) -> set:
     for tok in cand:
         if tok.startswith("-"):
             continue                                  # 是开关不是文件
+        if any(c in tok for c in "*?"):
+            # **通配符是最该记的那一种删除,而它一个字都记不下来。** `rm conf/*.ini`
+            # 作为字符串在磁盘上并不存在,于是下面那道「问文件系统」直接跳过 ——
+            # 实测拒绝它之后 `denied` 是**空集合**,下一条 `del conf\config1.ini` 连框都不弹。
+            # (这是同一个机制第五次补:先是只记按回车那条分支,再是 `cmd /c` 换写法,
+            #  再是没有扩展名,再是带空格的名字,现在是通配符。每次都只补了被撞见的那一条。)
+            # 展开成真实文件名正好对得上模型接下来的写法:它换写法逐个删时,名字就是这些。
+            hits = glob.glob(tok) or glob.glob(os.path.join(WORKSPACE, tok))
+            out.update(hits[:_GLOB_MAX])
+            if len(hits) > _GLOB_MAX:
+                # 截断不能是**静默**的:记不下全部,就退一格记住那个目录 ——
+                # `_mentions` 在 `del conf\x.ini` 上照样命中 `conf`。网变粗,但还在。
+                out.add(os.path.dirname(tok) or tok)
+            continue
         if os.path.exists(tok) or os.path.exists(os.path.join(WORKSPACE, tok)):
             out.add(tok)
     # 连**基名**一起记。同一个文件有无数种写法:`Makefile` / `.\Makefile` / 绝对路径。

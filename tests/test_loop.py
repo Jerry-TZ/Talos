@@ -67,6 +67,27 @@ def test_subagent_summary_counts_real_calls_and_leaks_nothing(ws, monkeypatch):
     assert "run_bash × 1" in seen and "查完了" in seen
     assert "SECRET" not in seen and "echo" not in seen
 
+def test_the_subagent_is_told_what_the_caller_actually_needs_back(ws, monkeypatch):
+    """不说清楚,子agent 交回来的是「这份报告**是讲什么的**」而不是「**说了什么**」——
+    而派它的人看不见过程,两种回答一样自信。
+
+    **这条只钉到「这句话确实跟着任务发出去了」为止。** 它有没有让摘要真的变好,
+    没有验过,也不该由这条判据假装验过 —— 那要两组真跑对着看。写在这里免得
+    下一个人把绿读成「摘要质量已解决」。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    sent = []
+    client = _Client([_msg(tool_calls=[_tc("spawn_subagent", '{"task":"读一下季报"}')]),
+                      _msg(content="查完了"),
+                      _msg(content="done")])
+    real = client._c
+    client.chat.completions.create = lambda **k: (sent.append(k["messages"][-1]), real(**k))[1]
+    A.agent_turn(client, "m", [{"role": "user", "content": "hi"}], {"mode": "bypass", "allow": set()})
+    sub = next((m["content"] for m in sent
+                if m.get("role") == "user" and "读一下季报" in str(m.get("content"))), None)
+    assert sub, "子agent 那一轮的任务消息没找着 —— 这条判据自己瞎了"
+    assert "交付要求" in sub and "过程" in sub, f"任务原样发下去了,一个字的交付要求都没带:{sub!r}"
+
 def test_subagent_that_ran_nothing_cannot_claim_otherwise(ws, monkeypatch):
     """子agent 说自己读了文件,轨迹说它一个工具都没调 —— 外层必须看得见这个矛盾。"""
     import agent as A
@@ -921,6 +942,27 @@ def test_the_client_bounds_how_long_one_call_can_hang(monkeypatch):
     assert t.connect == A.CONNECT_TIMEOUT and t.read == A.CHAT_TIMEOUT, \
         f"连接和读用了同一个预算:{t}"
     assert seen["max_retries"] == 0            # 重试归 _chat 管,别两层相乘
+
+
+def test_a_misconfigured_start_says_what_is_wrong_instead_of_starting(monkeypatch):
+    """两条启动闸,都是变异扫描扫出来的空白:摘掉它们,271 条判据一条都不红。
+
+    没有判据的话,`TALOS_PROVIDER=gemni` 打错一个字母会一路走到构造 client 才炸,
+    报的是 SDK 内部的错;缺 key 更糟 —— `api_key=None` 的 client 建得出来,
+    第一次真调用才 401,而那时人已经在等回答了。**启动期的错要在启动期说。**"""
+    import agent as A
+    monkeypatch.setattr(A, "PROVIDER", "gemni")           # 打错一个字母
+    with pytest.raises(SystemExit) as e:
+        A.make_client()
+    assert "gemni" in str(e.value) and "可选" in str(e.value), "得说清是哪个词错了、有哪些可选"
+
+    key_env = A.PROVIDERS["glm"][0]
+    monkeypatch.setattr(A, "PROVIDER", "glm")
+    monkeypatch.setattr(A, "_KEYS", {})
+    monkeypatch.delenv(key_env, raising=False)
+    with pytest.raises(SystemExit) as e:
+        A.make_client()
+    assert key_env in str(e.value), "缺 key 的报错得点名是哪个环境变量"
 
 def test_a_resumed_task_still_gets_its_learning_pass():
     """判据原来看的是**最后一轮**的调用数。一个跑了十五次调用的任务撞上连接错误、用「继续」

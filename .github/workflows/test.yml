@@ -30,3 +30,11 @@ jobs:
       # **凡是只在我本机跑过的判据,都要当成没跑过。**
       - run: python drawiocheck.py --selfcheck
       - run: python drawio_layout.py --selfcheck
+      # agent.py 的守卫变异扫描:30 个变异体 × 一遍全套,约 4 分钟,所以**只跑一格**。
+      # 但必须真的跑 —— 它本地默认 skip,而 skip 掉的判据等于不存在
+      # (这个仓库为「判据存在 ≠ 判据在被执行」已经付过一次账,就在上面那两行)。
+      # 挑 ubuntu:本机永远是 Windows,这一格才是我看不见的那一侧。
+      - if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
+        run: python -m pytest tests/test_mutation.py -q
+        env:
+          TALOS_SWEEP: "1"

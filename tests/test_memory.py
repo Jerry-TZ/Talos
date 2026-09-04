@@ -305,6 +305,88 @@ def test_a_run_of_dots_is_path_syntax_not_a_file(ws):
         os.chdir(cwd)
 
 
+def test_ctrl_c_at_the_permission_prompt_stops_everything_not_just_this_call(ws, monkeypatch):
+    """两处 `raise KeyboardInterrupt` 是变异扫描扫出来的空白 —— 摘掉,271 条一条都不红。
+
+    Ctrl-C 打在权限框上,意思是「整个停下」,不是「这一次不批,接着按原计划走」。
+    摘掉之后 `ans` 根本没赋上值,下一行 `_verdict(ans)` 抛 NameError —— 人按了停,
+    收到的是一个内部错误。**而这两条出口在真实会话里天天走**(人 Ctrl-C 得很勤)。
+
+    两个出口分开钉:一个是普通命令的 `ui.ask()`,一个是删除专用的 `ui.ask_yes()`;
+    第二个只有在人先按了 `a` 之后才到得了,所以它自己一条路。"""
+    import types
+    import agent as A
+
+    def boom():
+        raise EOFError                       # Ctrl-C 和管道关掉走同一条 except
+
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=boom, note=lambda *a: None, denied=lambda *a: None))
+    st = {"mode": "default", "allow": set(), "denied": set()}
+    with pytest.raises(KeyboardInterrupt):
+        A.check_permission(st, "bash", "run_bash", {"command": "python x.py"})
+
+    # 第二个出口:第一次敲了个错别字,系统重问一次,人在**重问**上 Ctrl-C。
+    # 这一条是变异扫描单独点出来的 —— 上面那条 `ask=boom` 压根走不到重问。
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "yy", note=lambda *a: None,
+        denied=lambda *a: None, ask_again=lambda prev: boom()))
+    with pytest.raises(KeyboardInterrupt):
+        A.check_permission(st, "bash", "run_bash", {"command": "python y.py"})
+
+    # 第三个出口:先按 `a`(删除不支持的档位),再在「这一次删不删」上 Ctrl-C
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, ask=lambda: "a", note=lambda *a: None,
+        denied=lambda *a: None, ask_yes=lambda p: boom()))
+    open(os.path.join(A.WORKSPACE, "gone.txt"), "w").close()
+    with pytest.raises(KeyboardInterrupt):
+        A.check_permission(st, "bash", "run_bash", {"command": "del gone.txt"})
+
+
+def test_a_wildcard_delete_is_the_one_most_worth_remembering_and_it_remembered_nothing(ws):
+    """`rm conf/*.ini` 一次点掉一批,而这个 token 在磁盘上**并不存在** —— 于是「问文件系统」
+    那一关直接跳过,`_targets` 返回空集合,粘性等于没有。
+
+    重放 FINDINGS 记的那一轮(glm 换四种写法提了四次删除),量下来挂账只对了一半:
+    `del workspace\\generate_conf.py` → `del generate_conf.py` 早就被基名接住了,
+    真正漏的是**第一条**,而它恰恰是杀伤面最大的那一条。"""
+    import os
+    import agent as A
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        os.makedirs("conf", exist_ok=True)
+        for p in ("conf/config1.ini", "conf/config2.ini"):
+            open(p, "w").close()
+        got = A._targets(r"rm conf/*.ini")
+        assert got, "通配符删除一个文件名都没记下 —— 拒绝了等于没拒"
+        # 记的必须是**接下来那条命令会写出来的名字**,不是通配符本身
+        assert any(A._mentions(os.path.normcase(r"del conf\config1.ini"), os.path.normcase(f))
+                   for f in got), f"记下了 {sorted(got)},但换个写法逐个删照样不弹框"
+    finally:
+        os.chdir(cwd)
+
+
+def test_a_wildcard_too_wide_to_record_falls_back_to_the_directory(ws, monkeypatch):
+    """展开有天花板(`_GLOB_MAX`),而**截断不能是静默的** —— 这个仓库里「静默跳过等于
+    没有网」已经写过两遍。超了就退一格记住目录:网变粗,但还在。"""
+    import os
+    import agent as A
+    monkeypatch.setattr(A, "_GLOB_MAX", 2)
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        os.makedirs("logs", exist_ok=True)
+        for i in range(5):
+            open(f"logs/a{i}.log", "w").close()
+        got = A._targets(r"del logs/*.log")
+        assert "logs" in got, f"超过上限之后没有退回目录,记下的是 {sorted(got)}"
+        assert A._mentions(os.path.normcase(r"del logs\a4.log"), "logs"), \
+            "退回目录之后,提到这个目录的命令仍然不弹框 —— 那这一格退了个寂寞"
+    finally:
+        os.chdir(cwd)
+
+
 def test_verifying_that_you_kept_a_file_must_not_look_like_deleting_it(ws):
     """冒烟第二轮:模型写的删除脚本末尾带一段**验证保留**的代码 ——
 
