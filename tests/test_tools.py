@@ -1268,14 +1268,9 @@ def test_autocommit_looks_at_the_file_write_file_actually_wrote(ws, monkeypatch)
 
     同一条规则两处实现,这个仓库记过四次。判据钉的是「两边拿到同一个路径」。"""
     import agent as A
-    # **工作区必须真的叫 `workspace`。** 前缀剥离只在 `head == basename(WORKSPACE)` 时发生,
-    # 而 `ws` fixture 给的临时目录叫 `test_autocommit_…`,于是两边**根本不会分叉**,
-    # 摘掉修复这条判据照样绿(第一版就是这样,变异当场戳穿)。
-    # 用例的布局得跟生产一样,那个 bug 才有地方出现。
-    real = os.path.join(ws, "workspace")
-    os.makedirs(real, exist_ok=True)
-    monkeypatch.setattr(A, "WORKSPACE", os.path.realpath(real))
-    monkeypatch.chdir(real)                     # 生产里 cwd 就是工作区
+    # **工作区必须真的叫 `workspace`,cwd 也得就在里面** —— 前缀剥离只在
+    # `head == basename(WORKSPACE)` 时发生,两边不分叉的话摘掉修复照样绿(第一版就是这样)。
+    # 这两条现在都由 `ws` 自己保证。
     seen = []
     monkeypatch.setattr(A, "_autotest", lambda full: seen.append(full) or "")
     A.run_tool("write_file", {"path": "workspace/nested.py", "content": "v1\n"})
@@ -1289,12 +1284,8 @@ def test_the_trash_covers_every_file_the_write_tools_may_touch(ws, monkeypatch):
     于是点名要存的那个文件如果是个工具,解析出来又被「不在保护根之下」悄悄丢掉。
     **网看着在,那一份没存。**"""
     import agent as A
-    # **`tools/` 必须在工作区外面。** `ws` fixture 把两者放在同一个临时目录下,于是工具文件
-    # 顺带落在 WORKSPACE 里,保护根少一个也照样存得下 —— 摘掉修复这条判据仍然绿
-    # (第一版就是这样)。生产布局是 `HOME/tools` 和 `HOME/workspace` 并列。
-    monkeypatch.setattr(A, "WORKSPACE", os.path.realpath(os.path.join(ws, "workspace")))
-    monkeypatch.setattr(A, "TOOLS_DIR", os.path.join(ws, "tools"))
-    os.makedirs(A.WORKSPACE, exist_ok=True)
+    # **`tools/` 必须在工作区外面**,否则保护根少一个也照样存得下,摘掉修复这条仍然绿
+    # (第一版就是这样)。这一条现在由 `ws` 自己保证 —— 它的布局跟生产同构。
     os.makedirs(A.TOOLS_DIR, exist_ok=True)
     p = os.path.join(A.TOOLS_DIR, "mytool.py")
     with open(p, "w", encoding="utf-8") as f:

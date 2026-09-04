@@ -1602,11 +1602,8 @@ def test_the_guard_and_the_file_tools_must_resolve_paths_the_same_way(ws, monkey
     「模型会照抄 workspace/ 这个前缀」。** 上一轮我收敛了三个拼法,正好停在第四个之前。"""
     import agent as A, os
     monkeypatch.setattr(A, "ui", _ui())
-    # `_strip_workspace_prefix` 脱的是**工作区自己的名字**,所以工作区必须真叫 workspace ——
-    # ws 夹具给的是 tmp_path,名字是随机的,拿它测这条等于没测。
-    real = os.path.join(A.WORKSPACE, "workspace")
-    os.makedirs(real, exist_ok=True)
-    monkeypatch.setattr(A, "WORKSPACE", os.path.realpath(real))
+    # `_strip_workspace_prefix` 脱的是**工作区自己的名字**,所以工作区必须真叫 workspace,
+    # 名字随机的话拿它测这条等于没测 —— 现在由 `ws` 自己保证。
     p = os.path.join(A.WORKSPACE, "v.py")
     open(p, "w", encoding="utf-8").write("x = 1\n")
     spells = ("v.py", "./v.py", "workspace/v.py", p)

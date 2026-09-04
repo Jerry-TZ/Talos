@@ -1055,11 +1055,11 @@ def test_recall_does_not_repeat_what_the_system_prompt_already_says(ws):
     只断言前一条的话,**整行删掉也会绿**,而那会连指针一起删掉。"""
     import agent as A
     import recall as R
-    os.makedirs(os.path.join(ws, "skills"), exist_ok=True)
+    os.makedirs(A.SKILLS_DIR, exist_ok=True)   # 技能挂 HOME,不在工作区里
     for name, desc, body in (
             ("zork-report", "用于:给 zork 做 grue 统计报告", "1. 打开 zork\n2. 数 grue\n"),
             ("zork-cleanup", "用于:清理 zork 的 grue 残留", "1. 清 grue\n")):
-        with open(os.path.join(ws, "skills", name + ".md"), "w", encoding="utf-8") as f:
+        with open(os.path.join(A.SKILLS_DIR, name + ".md"), "w", encoding="utf-8") as f:
             f.write("---\nname: %s\ndescription: %s\n---\n%s" % (name, desc, body))
 
     assert "grue 统计报告" in A.retrieve(), \
