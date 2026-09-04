@@ -1240,3 +1240,67 @@ def test_a_tool_whose_required_is_not_a_list_is_refused_at_registration(ws, monk
         f.write("TOOL = {'description': 'd', 'parameters': {'path': {'type': 'string'}}, "
                 "'required': ['path']}\ndef run(args): return 'ok'\n")
     assert A._load_tool(good) == "good"
+
+def test_a_tool_that_calls_sys_exit_does_not_take_the_agent_with_it(ws):
+    """`SystemExit` 不是 `Exception` —— 它从 `run_tool` 的 except 里**穿过去**,
+    而 `repl()` 只接 `Exception` 和 `KeyboardInterrupt`。于是自建工具里一句
+    `sys.exit(1)`(模型处理坏输入时的常规写法)会让整个进程退出,这一轮还没落盘。
+    一个工具的错误不该有权力结束宿主。
+
+    顺带钉住空消息:`raise ValueError()` 原来产出光秃秃的 `"error: "`,
+    模型看着它只能猜是什么错。"""
+    import agent as A
+    A.TOOLS["_boom"] = (lambda a: sys.exit(2), {}, [], "d", "bash")
+    A.TOOLS["_mute"] = (lambda a: (_ for _ in ()).throw(ValueError()), {}, [], "d", "bash")
+    try:
+        out, err = A.run_tool("_boom", {})            # 逃出来的话这一行直接 SystemExit
+        assert err and "2" in out, f"工具 sys.exit 之后应该是一条普通的工具错误:{out!r}"
+        out, err = A.run_tool("_mute", {})
+        assert out.strip() != "error:", "消息为空时得说清是什么错,不能只留一个 error:"
+        assert "ValueError" in out, out
+    finally:
+        del A.TOOLS["_boom"], A.TOOLS["_mute"]
+
+def test_autocommit_looks_at_the_file_write_file_actually_wrote(ws, monkeypatch):
+    """`_autotest` 原来自己 `realpath(args["path"])`,而 `write_file` 走 `_in_workspace`
+    (它还会剥掉 `workspace/` 前缀)。模型写 `workspace/x.py` 时两边差一层目录 ——
+    自动提交对着一个不存在的路径问「变了吗」,答「没变」,一声不吭地什么都不提交。
+
+    同一条规则两处实现,这个仓库记过四次。判据钉的是「两边拿到同一个路径」。"""
+    import agent as A
+    # **工作区必须真的叫 `workspace`。** 前缀剥离只在 `head == basename(WORKSPACE)` 时发生,
+    # 而 `ws` fixture 给的临时目录叫 `test_autocommit_…`,于是两边**根本不会分叉**,
+    # 摘掉修复这条判据照样绿(第一版就是这样,变异当场戳穿)。
+    # 用例的布局得跟生产一样,那个 bug 才有地方出现。
+    real = os.path.join(ws, "workspace")
+    os.makedirs(real, exist_ok=True)
+    monkeypatch.setattr(A, "WORKSPACE", os.path.realpath(real))
+    monkeypatch.chdir(real)                     # 生产里 cwd 就是工作区
+    seen = []
+    monkeypatch.setattr(A, "_autotest", lambda full: seen.append(full) or "")
+    A.run_tool("write_file", {"path": "workspace/nested.py", "content": "v1\n"})
+    assert seen, "write_file 之后没调 _autotest"
+    assert os.path.exists(seen[0]), \
+        f"_autotest 拿到的是一个不存在的路径 {seen[0]!r} —— 它和真正被写的那个不是同一个"
+
+def test_the_trash_covers_every_file_the_write_tools_may_touch(ws, monkeypatch):
+    """可写的集合和被保护的集合必须是同一个。`_in_workspace` 明确允许 `write_file`
+    改自建工具(`tools/`),而回收站的保护根是 `[WORKSPACE, SKILLS_DIR]` ——
+    于是点名要存的那个文件如果是个工具,解析出来又被「不在保护根之下」悄悄丢掉。
+    **网看着在,那一份没存。**"""
+    import agent as A
+    # **`tools/` 必须在工作区外面。** `ws` fixture 把两者放在同一个临时目录下,于是工具文件
+    # 顺带落在 WORKSPACE 里,保护根少一个也照样存得下 —— 摘掉修复这条判据仍然绿
+    # (第一版就是这样)。生产布局是 `HOME/tools` 和 `HOME/workspace` 并列。
+    monkeypatch.setattr(A, "WORKSPACE", os.path.realpath(os.path.join(ws, "workspace")))
+    monkeypatch.setattr(A, "TOOLS_DIR", os.path.join(ws, "tools"))
+    os.makedirs(A.WORKSPACE, exist_ok=True)
+    os.makedirs(A.TOOLS_DIR, exist_ok=True)
+    p = os.path.join(A.TOOLS_DIR, "mytool.py")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("要被覆盖的好代码")
+    assert A._in_workspace(p), "前提没成立:工具文件本来就不该可写"
+    A.archive_workspace(must=p)
+    dumped = "".join(open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
+                     for n in os.listdir(A.TRASH_DIR)) if os.path.isdir(A.TRASH_DIR) else ""
+    assert "要被覆盖的好代码" in dumped, "自建工具被覆盖前没有副本 —— 它是可写的,就该被保护"

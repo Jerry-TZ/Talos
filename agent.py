@@ -258,9 +258,20 @@ def make_client():
 #   HOME      — the agent's brain: skills, self-written tools, memory, sessions.
 #   WORKSPACE — the only place file tools may touch. Point it elsewhere and the source is safe.
 #   the .py source itself — never writable once WORKSPACE is not HOME.
+def _under(full: str, root: str) -> bool:
+    # **定义提到这儿,是为了让下面那道启动闸用得上同一个函数。** 它原来长在四百行开外,
+    # 于是启动那道闸只能自己写个 `==`,而运行时那道闸也写了个 `==` —— 同一条不变式
+    # 两处实现、都写窄了。这个仓库为「一条规则两处实现,只修了一处」记过三次。
+    try:
+        return os.path.commonpath([full, root]) == root
+    except ValueError:                        # 不同盘符(Windows)= 肯定在外面
+        return False
+
 HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
 WORKSPACE = os.path.realpath(os.environ.get("TALOS_WORKSPACE", "."))
-if WORKSPACE == HOME:
+if _under(HOME, WORKSPACE):
+    # 判据是 `_under` 不是 `==`:从**上一级**目录起 `python talos-public\agent.py`,
+    # 默认的 "." 是父目录,源码照样在牢笼里,而 `==` 那一版一声不吭地放行。
     # `python agent.py` 从仓库根目录跑 —— 默认的 "." 就是 HOME。而 _in_workspace 只问
     # "在不在 WORKSPACE 里",于是 agent.py、recall.py 自己也落进牢笼内,模型能覆写正在
     # 跑的循环。那条不变式是 _in_workspace 的 docstring 明写的("the agent still cannot
@@ -318,7 +329,10 @@ def archive_workspace(must: str = "") -> int:
     # 用的是同一套 write_file/edit_file。P0 原文说了要保它们,实现却只 os.walk(WORKSPACE) ——
     # 默认布局下 SKILLS_DIR 在 HOME 下、不在工作区里,于是整个脑子一直在保护圈外。
     cands = []
-    roots = [WORKSPACE, SKILLS_DIR]
+    # `tools/` 也要保:`_in_workspace` 明确允许 `write_file` 改自建工具,而这里原来不收它,
+    # 于是「正要被覆盖的那个文件」如果是个工具,`must` 解析出来又被下面的 `base is None`
+    # 悄悄丢掉 —— 网看着在,那一份没存。可写的集合和被保护的集合必须是同一个。
+    roots = [WORKSPACE, SKILLS_DIR, TOOLS_DIR]
     for base in roots:
         if not os.path.isdir(base):
             continue
@@ -413,12 +427,6 @@ def archive_workspace(must: str = "") -> int:
                           + ([f"{big} 个大于 {TRASH_MAX_BYTES // 1024 // 1024}MB 的文件"] if big else []))
                 + " —— 这些文件被覆盖了就没有副本。")
     return saved
-
-def _under(full: str, root: str) -> bool:
-    try:
-        return os.path.commonpath([full, root]) == root
-    except ValueError:                        # 不同盘符(Windows)= 肯定在外面
-        return False
 
 # Reads are never gated, so nothing stops a prompt-influenced read_file('.env') — and its
 # output goes straight into provider-bound history and the plaintext session log. Deny the
@@ -1337,10 +1345,21 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
             out = asyncio.run(out)              # — run it rather than handing back a coroutine repr
         out = str(out)
         if name in ("write_file", "edit_file") and args.get("path"):
-            out += _autotest(os.path.realpath(args["path"]))   # once per edit, not once per nested call
+            # **用 `_in_workspace`,不是 `realpath`。** `write_file` 就是拿它把模型写的
+            # 路径变成真实路径的(还带 `workspace/` 前缀剥离),而这里另起一套 ——
+            # 模型写 `workspace/x.py` 时两边差一层目录,自动提交于是对着一个不存在的
+            # 路径问「变了吗」,答「没变」,一声不吭地什么都不提交。
+            # 又一次「同一条规则两处实现」。
+            out += _autotest(_in_workspace(args["path"]))   # once per edit, not once per nested call
         return _scrub(out), False
-    except Exception as e:                      # tool errors go back to the model, not crash
-        return _scrub(f"error: {e}"), True
+    except (Exception, SystemExit) as e:        # tool errors go back to the model, not crash
+        # **SystemExit 不是 Exception。** 自建工具里一句 `sys.exit(1)`(模型处理坏输入
+        # 时的常规写法)会**穿过**这个 except,而 `repl()` 只接 Exception 和
+        # KeyboardInterrupt —— 于是整个进程退出,这一轮还没落盘。一个工具的错误
+        # 不该有权力结束宿主。
+        # 消息为空也要说清是什么错:`raise ValueError()` 原来产出光秃秃的 "error: ",
+        # 模型看着它只能猜。
+        return _scrub(f"error: {e}" if str(e) else f"error: {type(e).__name__}"), True
 
 # ── learned knowledge: memory (facts) + skills (procedures) ───────────────────
 # Learning = notes the agent writes for itself, read back later. Not training.
@@ -1771,7 +1790,13 @@ def _named_in_request(state: dict, args: dict) -> list:
     if not _DESTRUCTIVE.search(cmd):
         return []
     asked = state.get("asked", "")
-    return sorted({f for f in _targets(_with_scripts(cmd)) if f and _mentions(asked, f)})
+    # 两边都 normcase。粘性那条路(`check_permission` 里)早就是 `os.path.normcase` 比的,
+    # 这里没跟上 —— Windows 上 `Report.md` 和 `report.md` 是**同一个文件**,而用户在请求里
+    # 写的大小写跟模型敲的命令几乎不会一致。于是最该弹出来的那句「你点名要过它」
+    # 一声不吭地消失了。同一条规则两处实现,只改了一处。
+    low = os.path.normcase(asked)
+    return sorted({f for f in _targets(_with_scripts(cmd))
+                   if f and _mentions(low, os.path.normcase(f))})
 
 def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool, str]:
     """Decide + (if needed) prompt. Returns (allowed, reason-when-denied)."""
@@ -2160,7 +2185,14 @@ def _chat(client, **kwargs):
             # 每次要烧满 `CONNECT_TIMEOUT × 主机的地址条数`,重一次就是再等一遍。
             # 判据按 `__cause__` 的类型,**不按字符串**:openai 把它包成 `APITimeoutError`,
             # 文本是 `'Request timed out.'` —— 里面一个和「连接」有关的词都没有。
-            if "Connect" in type(e.__cause__).__name__:
+            #
+            # **认全名,不认「含 Connect」。** 上一版写的是 `"Connect" in 类型名`,它同时
+            # 命中 `ConnectTimeout` 和 `ConnectError` —— 而后者(拒绝连接 / DNS 失败 /
+            # 握手时被复位)**几毫秒就回来**,正是上面那句「掉线常常下一秒就通」说的那种,
+            # 最该重试的一档反倒被掐了。写这行的时候我脑子里只有超时那一种。
+            # 而我为它写的判据之所以绿:用例造的异常**没有 `__cause__`**,
+            # 而生产里 openai 的 `APIConnectionError` 永远是 `raise ... from err`。
+            if type(e.__cause__).__name__ == "ConnectTimeout":
                 if ui is not None:
                     ui.note(f"⚠️ 连不上 {kwargs.get('model', '')} 的服务器 —— "
                             f"{CONNECT_TIMEOUT:g}s 内没握上手,不重试(重试只是再等一遍)。\n"
@@ -2723,7 +2755,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
 
         for c in tool_calls:
             state["tok"]["calls"] += 1
-            name = c.function.name
+            name = (c.function.name or "").strip()   # `run_tool` 也 strip,两边得认同一个名字
             # 记 read_file 次数:png2epub.py 508 行、READ_MAX_LINES=250,读全文至少三次,
             # 而每次都要重发整个已积累的上下文。分页上限是为省 token 设的,但在"需要读全文"
             # 的任务上可能是净亏 —— 省下的是被读的行数,付出的是上下文重发。n=1,所以先量。
@@ -2752,7 +2784,12 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                 # 名字不认识就别问权限 —— check_permission 会弹框,而框一弹就晚了。
                 allowed, reason = (False, "") if cls is None else check_permission(state, cls, name, args)
             if cls is None:
-                out, is_error = f"error: unknown tool {name}", True
+                # **别在这儿另写一句话。** `run_tool` 那边为「模型把自己的调用语法漏进
+                # 名字里」专门写了一段有用的提示(说清名字只能是纯名字、参数放 arguments、
+                # 并列出现有工具),而循环自己先拦下了,吐一句光秃秃的回声 ——
+                # 于是那段提示**在真实路径上一次都没被用过**,下一次尝试还是瞎猜。
+                # 同一条规则两处实现的又一例:走过去拿那一份。
+                out, is_error = run_tool(name, args)
             elif bad is not None:
                 out, is_error = f"error: {bad}", True
             elif not allowed:
@@ -3261,11 +3298,23 @@ def _workspace_refusal(new: str) -> str:
     先问这片面还有几条路」。而「拿 Talos 改 Talos」恰恰是最容易敲出这一句的场景。
 
     抽成函数是为了能测:原来这段逻辑长在 `repl()` 的命令分支里,判据够不着。"""
-    if os.path.realpath(new) == HOME:
-        return (f"拒绝:{new} 就是 Talos 自己的目录。工作区设成它,模型就能覆写正在跑的"
+    # **判据是「源码会不会落进牢笼」,不是「这两个路径是不是同一个」。** 上一版写的是
+    # `== HOME`,而工作区设成 HOME 的**上一级**,源码照样在里面 —— 实测
+    # `/workspace D:\…\github_find`(父目录)返回空串放行,之后 `_in_workspace` 对
+    # `agent.py` 直接放行,`_in_workspace` docstring 里那句「模型仍然改不了它正在跑的
+    # 循环」当场不成立。这条闸的注释自己写着「立完一道闸,先问这片面还有几条路」,
+    # 而它只堵了 `==` 那一条,祖先目录一整条都没堵。是外部复核读出来的。
+    full = os.path.realpath(new)
+    if _under(HOME, full):
+        return (f"拒绝:{new} 装得下 Talos 自己的目录。工作区设成它,模型就能覆写正在跑的"
                 f"循环(agent.py / recall.py),`.talos/` 里的明文会话日志也一起变成可读。"
                 f"要在这儿干活就用 `/workspace {os.path.join(new, 'workspace')}`,"
                 "跟启动时的默认档一致;真要改源码,请你自己动手。")
+    # `.talos/` 不装源码,所以上面那条够不着它 —— 而上面那段话自己许诺了「明文会话日志」
+    # 也归这道闸管。会话日志里是用户逐字的提问,把工作区设进去等于把它们变成可写可读。
+    if _under(full, os.path.join(HOME, ".talos")):
+        return (f"拒绝:{new} 在 `.talos/` 里 —— 那是明文会话日志和缓存,"
+                "工作区设进去,历次对话的原文就成了模型能读能改的东西。")
     return ""
 
 def _budget_note(state: dict) -> str:
@@ -3476,6 +3525,14 @@ def repl(resume=None) -> None:
             continue
         except Exception as e:
             _seal(messages)                        # keep the work; just make the history valid again
+            # **落盘,跟上面 Ctrl-C 那支一样。** 原来这支只 `_seal`,不 `save` ——
+            # 于是「这一轮的进度都还在」只在内存里成立:报完错直接退出,这一轮就没了。
+            # 而崩掉的那一份恰恰最值钱(昨天 `once()` 修的是同一句话)。
+            # 两条出口对同一件事只做了一半,又是「一条规则两处实现」。
+            try:
+                sess.save(messages)
+            except Exception as _e:
+                ui.note(f"⚠️ 会话没存下来:{_e}")
             ui.error(e)
             ui.note("这一轮的进度都还在 —— 说「继续」可以接着做。")
             continue

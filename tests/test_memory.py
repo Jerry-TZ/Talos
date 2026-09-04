@@ -1142,6 +1142,38 @@ def test_switching_the_workspace_cannot_unlock_the_source_tree(ws):
         "正常的子目录被误拒了"
     assert not A._workspace_refusal(ws), "临时工作区被误拒了"
 
+    # **上一版只堵了 `== HOME`,而这片面不止一条路。** 工作区设成 HOME 的任何一级祖先,
+    # 源码照样落在牢笼里 —— 实测 `/workspace <父目录>` 放行,之后 `_in_workspace`
+    # 对 `agent.py` 直接返回路径,`_in_workspace` docstring 那句「模型仍然改不了它正在
+    # 跑的循环」当场不成立。这条闸自己的注释写着「立完一道闸,先问这片面还有几条路」。
+    # 是外部复核读出来的,不是我看出来的。
+    up = os.path.dirname(A.HOME)
+    assert A._workspace_refusal(up), f"工作区设成 HOME 的父目录 {up} 放行了 —— 源码可写"
+    assert A._workspace_refusal(os.path.dirname(up)), "祖父目录也一样,源码还在里面"
+    # `.talos/` 不装源码,但上面那段拒绝理由自己许诺了它也归这道闸管:里面是逐字的会话原文。
+    assert A._workspace_refusal(os.path.join(A.HOME, ".talos")), "会话日志目录放行了"
+    assert A._workspace_refusal(os.path.join(A.HOME, ".talos", "sessions")), "会话日志放行了"
+
+
+def test_starting_from_one_level_up_still_locks_the_source_tree(tmp_path):
+    """启动那条路也只写了 `==`。**同一条不变式、同一个写窄的判据、两处实现** ——
+    这个仓库为「一条规则两处实现,只修了一处」记过三次,这是第四次。
+
+    触发方式再普通不过:在上一级目录敲 `python talos-public\\agent.py`,
+    默认的 `"."` 就是父目录,源码照样在工作区里,而旧判据一声不吭地放行。"""
+    import subprocess
+    import sys
+    import agent as A
+    up = os.path.dirname(A.HOME)
+    code = ("import sys, os;sys.path.insert(0, r'%s');import agent as A;"
+            "print(A.WORKSPACE);"
+            "print(A._in_workspace(os.path.join(A.HOME, 'agent.py')))" % A.HOME)
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace",
+                       env={**os.environ, "TALOS_WORKSPACE": up, "PYTHONIOENCODING": "utf-8"})
+    assert "越界" in (r.stdout + r.stderr), \
+        f"从上一级起,agent.py 仍然可写 —— 工作区没被下移。输出:{r.stdout[:200]}"
+
 
 def test_stale_memory_is_flagged_by_time(ws):
     """曾经有用但很久没再想起 —— 用量看不出来,只有时间能。"""
@@ -1856,3 +1888,23 @@ def test_dead_never_proposes_something_forget_would_refuse_to_delete(ws):
         h[k] = {**h[k], "seen": 99} if isinstance(h[k], dict) else h[k]
     assert {kind for kind, _t, _w in R.dead(min_seen=1)} <= {"事实"}, \
         "dead() 提议了非「事实」的东西,而 forget() 只会删事实 —— 点了头也不会发生任何事"
+
+def test_the_name_the_user_typed_matches_however_they_capitalised_it(ws):
+    """`_named_in_request`(给人看的 ⚠️ 那一行)按原样比大小写,而两个函数之后的
+    粘性判据早就是 `os.path.normcase` 比的。Windows 上 `Report.md` 和 `report.md`
+    是**同一个文件**,而用户在请求里写的大小写跟模型敲的命令几乎不会一致 ——
+    于是最该弹出来的那句「这个名字你点名要过」一声不吭地消失了。
+
+    同一条规则两处实现、只改了一处,这个仓库记过四次;这是外部复核读出来的第五次。"""
+    import agent as A
+    open(os.path.join(A.WORKSPACE, "Report.md"), "w").close()
+    cwd = os.getcwd()
+    os.chdir(A.WORKSPACE)
+    try:
+        st = {"asked": "把结果写进 Report.md"}
+        assert A._named_in_request(st, {"command": "del report.md"}), \
+            "用户写 Report.md、模型敲 report.md —— 同一个文件,提示行却沉默了"
+        assert A._named_in_request(st, {"command": "del Report.md"}), "同样大小写反而也该命中"
+        assert not A._named_in_request(st, {"command": "del other.md"}), "不相干的文件不该命中"
+    finally:
+        os.chdir(cwd)

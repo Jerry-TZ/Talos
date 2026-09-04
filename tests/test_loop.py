@@ -784,6 +784,20 @@ def test_a_dropped_connection_is_retried_not_raised(monkeypatch):
     monkeypatch.setattr(A, "ui", _ui())
     assert A._chat(_Client([Exception("Connection error."), "OK"])) == "OK"
 
+    # **上一句是一条只在实验室里成立的判据。** 它造的异常没有 `__cause__`,而生产里
+    # openai 是 `raise APIConnectionError(...) from err` —— `__cause__` 永远在,
+    # 类型是 `httpx.ConnectError`。后来加的「连接类不重试」看的正是 `__cause__` 的类型,
+    # 于是**真掉线一次都不再重试了,而这条判据一路绿**:它模拟的那个对象在生产里不存在。
+    # 补上真实形状。(拒绝连接 / DNS 失败 / 握手被复位 都是 ConnectError,几毫秒就回来。)
+    class ConnectError(Exception):        # 只有类名要紧,判据看的就是它
+        pass
+
+    dropped = Exception("Connection error.")
+    dropped.__cause__ = ConnectError("[Errno 111] Connection refused")
+    assert A._chat(_Client([dropped, "OK"])) == "OK", \
+        "真实形状的掉线(APIConnectionError from httpx.ConnectError)没被重试 —— " \
+        "「连接超时不重试」那道闸开过头,把最该重试的一档也掐了"
+
 def test_a_long_turn_prunes_inside_the_loop(ws, monkeypatch):
     """两道上下文护栏原来只在 REPL 每轮末尾跑,而那次是死在**一轮之内**:六十来次工具调用,
     历史涨过窗口,400 Prompt exceeds max length,整轮白做。MAX_STEPS 守的是空转,守不了
@@ -1001,8 +1015,13 @@ def test_a_tool_that_does_not_exist_never_reaches_the_permission_prompt(monkeypa
     messages = [{"role": "user", "content": "hi"}]
     A.agent_turn(_Client(script), "m", messages, {"mode": "default", "allow": set()})
     assert asked == [], f"不存在的工具走到了权限门: {asked}"
-    said = [m["content"] for m in messages if m.get("role") == "tool"]
-    assert any("unknown tool" in str(c) for c in said), said
+    said = " ".join(str(m["content"]) for m in messages if m.get("role") == "tool")
+    # **上一版钉的是 `"unknown tool"` —— 那正好是那句没用的回声。** `run_tool` 里为这件事
+    # 写了一段有用的话(名字只能是纯名字、参数放 arguments、并列出现有工具),而循环自己
+    # 先拦下了,那段话在真实路径上一次都没被用过,判据还把这个状态钉住了。
+    # 现在钉的是**模型照着能改**的那几样东西。
+    assert "没有名叫" in said and "del_probe" in said, said
+    assert "现有工具" in said, f"没告诉它有哪些工具,下一次还是瞎猜:{said}"
 
 def test_reflection_looks_at_the_task_that_just_finished(monkeypatch):
     """REPL 的 messages 跨轮累积,而 reflect() 原来正向取第一条 user 消息 —— 于是从第二轮起,
@@ -1967,3 +1986,26 @@ def test_a_connect_timeout_is_not_retried_but_a_busy_server_is(monkeypatch):
     with pytest.raises(Exception):
         A._chat(counted(SomethingBusy), model="m", messages=[])
     assert n["c"] > 1, "对面忙那条路也不重试了 —— 这条闸开过头了"
+
+def test_both_abnormal_exits_of_the_repl_put_the_turn_on_disk():
+    """Ctrl-C 那支 `_seal` + `save`,报错那支原来只 `_seal` —— 于是「这一轮的进度都还在」
+    只在**内存里**成立:报完错直接退出,这一轮就没了。而崩掉的那一份恰恰最值钱
+    (`once()` 昨天修的是同一句话)。
+
+    两条非正常出口对同一件事只做了一半 —— 又是「一条规则两处实现」。
+    判据从 AST 上读:找到包着 `agent_turn` 的那个 try,要求**每一个** handler
+    的正文里都有 `sess.save`。结构判据,不是行为判据 —— 它证不了存下来的内容对,
+    只证两条出口没有一条忘了存。写在这里免得有人把绿读成更多。"""
+    import ast
+    import inspect
+    import textwrap
+    import agent as A
+    tree = ast.parse(textwrap.dedent(inspect.getsource(A.repl)))
+    tries = [n for n in ast.walk(tree) if isinstance(n, ast.Try)
+             and "agent_turn(" in ast.unparse(ast.Module(body=n.body, type_ignores=[]))]
+    assert tries, "没找到包着 agent_turn 的 try —— 这条判据自己瞎了"
+    for t in tries:
+        for h in t.handlers:
+            kind = ast.unparse(h.type) if h.type else "裸 except"
+            assert "sess.save" in ast.unparse(ast.Module(body=h.body, type_ignores=[])), \
+                f"`except {kind}` 这条出口没有落盘 —— 它印的「进度都还在」只在内存里成立"
