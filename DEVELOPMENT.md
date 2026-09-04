@@ -150,7 +150,7 @@ def check_permission(state, cls, name, args):                       # 决策 + �
 
 ```bash
 python agent.py --selfcheck        # 零依赖、零网络、零 key。改完先跑这个
-python -m pytest tests/ -q         # 288 条。CI 跑 ubuntu/windows × 3.10/3.13
+python -m pytest tests/ -q         # 289 条。CI 跑 ubuntu/windows × 3.10/3.13
 ```
 
 `--selfcheck` 覆盖 4 个工具的读/写/改、`edit_file` 的"找不到 / 不唯一"两种报错、
@@ -190,7 +190,7 @@ set TALOS_MAX_STEPS=12
 | **行为类** | **模型读到守卫那条消息之后干什么** | ❌ 必须用你真在用的那个 |
 
 「拒绝之后会不会改用 `python -c` 绕路」是那个具体模型的性格,换了模型不算数。
-而**行为类正是 live 测试唯一还值钱的部分** —— 管道通不通,288 条判据已经免费覆盖了。
+而**行为类正是 live 测试唯一还值钱的部分** —— 管道通不通,289 条判据已经免费覆盖了。
 
 按这条界,**目标闸的 live 判据是行为类的**:离线判据已经证明判断器拿得到 `read_file`、
 越界会被驳回、判不出来时不假装成功;它们证明不了的是**这个具体模型拿到只读工具之后

@@ -323,6 +323,37 @@ def test_run_bash_reads_back_what_a_native_command_printed(ws):
     assert word in out, f"原生命令的输出解错码了:拿到 {out.strip()!r},要的是 {word!r}"
 
 
+def test_editing_an_approved_tool_says_so_at_the_time(ws):
+    """`create_tool` 造完、`edit_file` 改两版 —— 最普通的流程,而它把工具锁死。
+
+    哈希只有 `create_tool` 和 `--approve-tools` 更新。`edit_file` 不更新,**也不能更新**:
+    那等于模型自己给自己发批准,这把锁就没有了(`_in_workspace` 的注释写的就是这句)。
+    于是改完当场没有任何动静,**下一次启动**才报「批准后被改过」,而那句话读起来像篡改。
+
+    真事:`figcheck.py` 就是这么死的 —— 造完两分钟内自己 `edit_file` 了两次,
+    然后每次启动报了一个月。上一次调查改的是措辞(把两种原因拆开写),
+    **没往下问一句「那它到底是谁改的」** —— 答案就在会话记录里,一条 grep 的距离。
+
+    能补的不是批准,是**在改的那一刻说一声**:模型此刻还在这个文件上,还接得住。"""
+    import agent as A
+    os.makedirs(A.TOOLS_DIR, exist_ok=True)
+    p = os.path.join(A.TOOLS_DIR, "figcheck.py")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("def figcheck():\n    return 1\n")
+    A._approve_tool(p)
+    out, err = A.run_tool("edit_file", {"path": p, "old": "return 1", "new": "return 2"})
+    assert not err, out
+    assert "--approve-tools figcheck" in out, \
+        "改完一个已批准的工具,当场什么都没说 —— 它下次启动就不执行了,而模型不知道"
+
+    # **反面同样要钉住**:普通文件改一下不许报这句,否则每次编辑都在喊狼来了。
+    q = os.path.join(ws, "note.py")
+    with open(q, "w", encoding="utf-8") as f:
+        f.write("x = 1\n")
+    out2, err2 = A.run_tool("edit_file", {"path": q, "old": "x = 1", "new": "x = 2"})
+    assert not err2 and "--approve-tools" not in out2, "普通文件被误报成工具"
+
+
 def test_bad_calls_get_actionable_errors(ws):
     """模型偶尔会吐畸形调用 —— 报错要说清正确形状,否则它只能换个姿势再猜。"""
     import agent as A
@@ -398,6 +429,9 @@ def test_the_quarantine_notice_says_which_kind_of_quarantine_it_is(ws, monkeypat
         "「批准后被改过」是这把锁真正要拦的那一种,必须单独说出来,"
         "不能跟「没批准过」揉成一个『或』。实际说的是:" + msg)
     assert "stranger.py(没批准过)" in msg, "陌生文件那一种也得写清楚。实际:" + msg
+    # **原因说对了,来由还得说对。** 上一版这句让人按「篡改」去查,而实测最常见的
+    # 是「造完又自己改了一版」—— 按篡改查什么也查不到,于是下次就当噪音划过去。
+    assert "造完又改过" in msg, "「被改过」最常见的来由要写在前面,实际:" + msg
 
 def test_read_file_refuses_oversized(ws, monkeypatch):
     """#7:read_file 不设防会被超大文件 OOM(它是 read 类,不过权限门)。"""

@@ -966,6 +966,30 @@ def _save_tool_hashes(d: dict) -> None:
     with open(p, "w", encoding="utf-8") as f:
         json.dump(d, f)
 
+def _tool_approval_hint(full: str) -> str:
+    """改了一个已批准的工具 —— 批准**当场作废**,而现在什么都不说,下次启动才报。
+
+    哈希只有 `create_tool` 和 `--approve-tools` 更新。`edit_file` 不更新,**也不能更新**:
+    那等于模型自己给自己发批准,这把锁就没有了(`_in_workspace` 里那段注释说的就是这句)。
+    所以能补的不是批准,是**在改的那一刻说一声** —— 模型此刻还在这个文件上,还接得住;
+    等到下次启动,人看到的是一句「批准后被改过」,而它读起来像篡改。
+
+    真事:`figcheck.py` 就是这么死的 —— `create_tool` 造完两分钟内自己 `edit_file`
+    了两次,然后每次启动报了一个月。上一次调查改的是**措辞**(把「没批准过」和
+    「被改过」拆开写),**没往下问一句「那它到底是谁改的」** —— 答案就在会话记录里,
+    一条 grep 的距离。诊断停在措辞上,于是告警继续响,继续被当成噪音。"""
+    try:
+        if os.path.dirname(full) != os.path.realpath(TOOLS_DIR):
+            return ""
+        stem = os.path.splitext(os.path.basename(full))[0]
+        if os.path.basename(full) not in (_load_tool_hashes() or {}):
+            return ""      # 没批准过的本来就不自动加载,这时候喊等于狼来了
+        return (f"\n⚠️ {stem} 是**已批准的工具**,你刚改了它 —— 批准当场作废,"
+                f"下次启动它会被隔离(不执行)。让人看过改动之后跑 "
+                f"`python agent.py --approve-tools {stem}` 重新批准。")
+    except Exception:
+        return ""
+
 def _approve_tool(path: str) -> None:               # gated creation => allowed to auto-load later
     d = _load_tool_hashes() or {}
     d[os.path.basename(path)] = _sha(path)
@@ -1044,10 +1068,15 @@ def load_dynamic_tools() -> list:
             # 关于守卫的那句话不精确,于是真报警被磨成了噪音。**
             quarantined.append(name + ("(批准后被改过)" if name in approved else "(没批准过)"))
     if quarantined and ui is not None:
+        # **「被改过」不等于「被人动了手脚」。** 上一版这句写的是「你自己没动过它,
+        # 就当成篡改来查」—— 而实测最常见的原因是 create_tool 造完、模型自己又 edit 了
+        # 一版(figcheck.py 就是这么死的,然后报了一个月)。把最常见的那种写在前面,
+        # 否则读的人按「篡改」去查,查不到东西,下一次就当噪音划过去了。
         ui.note(f"⚠️ 已隔离 {len(quarantined)} 个工具(不会执行): {', '.join(quarantined)}。"
-                "括号里是原因:「批准后被改过」是这把锁真正要拦的那一种 —— "
-                "你自己没动过它,就当成篡改来查。"
-                "看过确认可信,再跑 `python agent.py --approve-tools` 批准。")
+                "括号里是原因:「批准后被改过」最常见的来由是**造完又改过** —— "
+                "create_tool 批的是当时那一版,之后任何一次 edit 都让批准作废;"
+                "要是确定没人改过它,那才按篡改查。"
+                "看过改动确认可信,再跑 `python agent.py --approve-tools` 批准。")
     return loaded
 
 # ── delegation: spawn a sub-agent (广度, not 深度) ─────────────────────────────
@@ -1373,7 +1402,9 @@ def run_tool(name: str, args: dict) -> tuple[str, bool]:
             # 模型写 `workspace/x.py` 时两边差一层目录,自动提交于是对着一个不存在的
             # 路径问「变了吗」,答「没变」,一声不吭地什么都不提交。
             # 又一次「同一条规则两处实现」。
-            out += _autotest(_in_workspace(args["path"]))   # once per edit, not once per nested call
+            full = _in_workspace(args["path"])
+            out += _autotest(full)                     # once per edit, not once per nested call
+            out += _tool_approval_hint(full)           # 改了已批准的工具:现在说,别等下次启动
         return _scrub(out), False
     except (Exception, SystemExit) as e:        # tool errors go back to the model, not crash
         # **SystemExit 不是 Exception。** 自建工具里一句 `sys.exit(1)`(模型处理坏输入
