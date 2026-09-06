@@ -460,10 +460,55 @@ def test_clearing_the_goal_clears_every_field_the_state_table_calls_a_goal_field
     # 捕获就空了 —— 变异全扫的控制组当场红:副本本身跑不过全套,40 个点会因此
     # **全部显示为「已杀死」**,全扫报绿。判据写成文本形状,挡住的假绿是自己造的。
     tree = ast.parse(textwrap.dedent(inspect.getsource(A.repl)))
-    cleared = {e.value for n in ast.walk(tree)
-               if isinstance(n, ast.For) and isinstance(n.iter, ast.Tuple)
-               and "state.pop(k, None)" in ast.unparse(n)
-               for e in n.iter.elts if isinstance(e, ast.Constant)}
-    assert cleared, "没找到 /goal clear 那个循环 —— 判据自己瞎了"
+    # **一个循环必须清全,不能几个循环凑。** `/goal <新目标>` 那条路上也有一个
+    # `for k in (...): state.pop(k, None)`(清派生字段),取并集的话它会替 clear
+    # 那条把漏掉的字段补上 —— 判据就被自己新加的代码架空了。
+    loops = [{e.value for e in n.iter.elts if isinstance(e, ast.Constant)}
+             for n in ast.walk(tree)
+             if isinstance(n, ast.For) and isinstance(n.iter, ast.Tuple)
+             and "state.pop(k, None)" in ast.unparse(n)]
+    assert loops, "没找到 /goal clear 那个循环 —— 判据自己瞎了"
     declared = {k for k in A.STATE_LOCAL if k.startswith("goal")}
-    assert declared <= cleared, f"/goal clear 漏清了:{sorted(declared - cleared)}"
+    assert any(declared <= c for c in loops), (
+        f"没有哪个循环清全了 goal 字段;各循环清的是 {[sorted(c) for c in loops]},"
+        f"该清的是 {sorted(declared)}")
+
+
+def test_a_crash_after_a_block_says_the_deliverable_is_known_wrong(ws, monkeypatch):
+    """判断器判过「未达成」,然后这一轮崩了 —— **工作区里躺着一份已知是错的产物**。
+
+    真事(2026-09-06):`-p` 带目标跑,判断器第一次就打回(「唯一值数与实际不符」),
+    模型改了一版还是错的,然后供应商 429。输出末尾只有错误面板和「会话已存」。
+    `🎯 目标未达成(1/3)` 那行在滚动条上面几屏,而这条路上没人在读 transcript。
+
+    「一次都没检查过」那条兜底在这里**不该响**(判断器确实跑了),但它盖不住这一种:
+    检查过、**判的是没达成**、然后死了。两种都是「别把停下了当成做完了」,
+    只有前一种有出口。
+
+    区分要靠**判词**,不能靠 `goal_last` —— 它对 ok 和 block 都会被写。
+    """
+    import agent as A
+    import console_ui
+    notes = []
+    monkeypatch.setattr(console_ui, "note", lambda s, *a, **k: notes.append(s))
+    monkeypatch.setattr(console_ui, "error", lambda *a, **k: None)
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("TALOS_GOAL", "report.md 里 8 个数都对")
+    client = _Client([
+        _msg(tool_calls=[_tc("write_file", '{"path":"report.md","content":"8"}')]),
+        _msg(content="算好了。"),
+        _judge(ok=False, reason="唯一值数与实际不符"),   # 判过,而且判的是没达成
+        RuntimeError("429"),                              # 然后死在下一轮
+    ])
+    monkeypatch.setattr(A, "make_client", lambda: (client, "m"))
+
+    with pytest.raises(SystemExit):
+        A.once("统计一下")
+    # **只看收尾之后那几条。** 第一版写成「notes 里有没有出现『未达成』」,当场就绿了 ——
+    # 因为循环里那条打回消息 `🎯 目标未达成(1/3)` 措辞一模一样,而它在滚动条上面几屏。
+    # 判据分不出「循环中说过」和「收尾时说过」,就等于什么也没钉(见第七十节)。
+    idx = max(i for i, n in enumerate(notes) if "会话" in n)   # finally 里落盘那条
+    tail = notes[idx:]
+    said = [n for n in tail if "未达成" in n or "已知" in n]
+    assert said, f"崩之前判过「没达成」,收尾一个字没提 —— 产物还在工作区里:{tail}"
+    assert "唯一值数与实际不符" in "".join(said), "没说清差在哪,人得回去翻滚动条"

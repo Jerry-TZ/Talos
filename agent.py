@@ -1127,7 +1127,7 @@ STATE_LOCAL = ("capped", "last_tok", "last_calls",   # 只描述"刚刚这一轮
                # 会话目标达成。判断器只在 top 跑,所以子那份 state 里这四个字段永远是空的
                # —— 继承过去就是个读不到的死字段,不如在这儿把边界说明白。
                "goal", "goal_checks", "goal_last", "goal_tok",
-               "goal_noted")                          # 「没检查过」这话说过没有,同样只在 top
+               "goal_noted", "goal_verdict")          # 说过没有 / 最后一次判的什么,都只在 top
 
 _CHILD_KEYS = STATE_INHERIT + STATE_SHARED
 
@@ -2803,6 +2803,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
                 verdict, why = evaluate_goal(client, model, goal, messages, state)
                 state["goal_checks"] = state.get("goal_checks", 0) + 1
                 state["goal_last"] = why
+                state["goal_verdict"] = verdict   # `goal_last` 对 ok 也写,分不出好坏
                 if verdict == "block" and blocks < GOAL_MAX_BLOCKS:
                     blocks += 1
                     if view != "quiet":
@@ -3337,6 +3338,13 @@ def once(task: str, mode: str = "bypass") -> str:
         # 再多一条出口也不会漏;`goal_noted` 只是躲开上面那两条已经说过话的路。
         if state.get("goal") and not state.get("goal_checks") and not state.get("goal_noted"):
             ui.note(_unchecked_goal_note(state, True, "这一轮崩了或被中断").strip())
+        # 另一种,上面那条盖不住:**判断器跑过,判的是没达成,然后这一轮死了。**
+        # 真事(2026-09-06):429 挂掉时工作区里躺着一份判断器已经点名说错的 report.md,
+        # 而输出末尾只有错误面板 ——「目标未达成」那行在滚动条上面几屏。
+        # 「一次都没检查过」和「检查过而且没过」是两件事,前者有出口,后者原来没有。
+        elif state.get("goal") and state.get("goal_verdict") not in (None, "ok"):
+            ui.note(f"⚠️ 最后一次判定:**未达成** — {state.get('goal_last')}。"
+                    f"工作区里那份产物是**已知不对**的,别当成做完了。")
     ui.answer(result)
     t = state.get("last_tok") or {}
     if t.get("in") or t.get("out"):
@@ -3570,12 +3578,14 @@ def repl(resume=None) -> None:
             if arg.lower() in _GOAL_CLEAR:
                 # 五个字段一起清。留着 goal_tok 会让下一个目标的 `/goal` 打出
                 # 「已判断 0 次 · 判断器花了 47821 tok」—— 同一行自相矛盾。
-                for k in ("goal", "goal_checks", "goal_last", "goal_tok", "goal_noted"):
+                for k in ("goal", "goal_checks", "goal_last", "goal_tok",
+                          "goal_noted", "goal_verdict"):
                     state.pop(k, None)
                 ui.note("目标已清除,退出条件回到「模型不调工具就停」")
                 continue
             state["goal"], state["goal_checks"] = arg, 0
-            state.pop("goal_last", None)
+            for k in ("goal_last", "goal_verdict", "goal_noted"):   # 派生字段别跨目标
+                state.pop(k, None)
             ui.note(f"🎯 目标:{arg}")
             task = arg               # 设完立刻开工,不用再输一句「开始」
 
