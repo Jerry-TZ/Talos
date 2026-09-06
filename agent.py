@@ -3308,6 +3308,14 @@ def once(task: str, mode: str = "bypass") -> str:
     if t.get("in") or t.get("out"):
         ui.note(f"🎫 {t.get('steps', 1)} 次调用 · {t['in']}+{t['out']}={t['in'] + t['out']} tok"
                 + (f" · 缓存命中 {t['cached']}" if t.get("cached") else ""))
+    # 判断器的账单**只在这儿有出口**。goal gate 那段注释承诺「开了就该看见账单
+    # (state["goal_tok"])」—— 交互里 `/goal` 兑现了,`-p` 没有:state 到这一行就扔了,
+    # 会话 JSONL 存的是消息不是状态。而上面那句注释推荐开判断器的正是这条路。
+    # 承诺写在通用的地方,兑现只兑现了看得见的那一半 —— 这个仓库的老形状。
+    gt = state.get("goal_tok") or {}
+    if gt.get("calls"):
+        ui.note(f"🎯 判断器另计 {gt['calls']} 次 · "
+                f"{gt['in']}+{gt['out']}={gt['in'] + gt['out']} tok")
     return result
 
 CACHE_TRACE = os.path.join(HOME, ".talos", "cache_trace.jsonl")

@@ -348,3 +348,34 @@ def test_hitting_the_step_cap_must_say_the_goal_was_never_checked(ws, monkeypatc
     plain = A.agent_turn(_Client([spin] * 10), "m", [{"role": "user", "content": "x"}],
                          {"mode": "bypass", "allow": set(), "view": "quiet"}, top=True)
     assert "一次都没被检查过" not in plain, f"没设目标也在喊:{plain}"
+
+
+def test_the_judges_bill_reaches_the_screen_on_the_unattended_path(ws, monkeypatch):
+    """**分开记账**和**看得见**是两件事,而 goal gate 那段注释承诺的是后者。
+
+    原话:「它要花 token,而且是每轮结束时花。默认不开;**开了就该看见账单
+    (state["goal_tok"])**」。交互里 `/goal` 兑现了这句;`-p` 没有 —— `once()` 打的
+    `🎫` 只报 `last_tok`,退出时 state 直接扔掉,会话 JSONL 里存的是消息不是状态。
+    而 `once()` 自己的注释推荐的正是这条路(「无人值守正是「说完成了但没完成」
+    代价最大的地方」)。于是这道闸最该被看见花销的那条路,一个数字都不打。
+
+    又是这个仓库的老形状:**注释把话说全了,代码只兑现了看得见的那一半。**
+    """
+    import agent as A
+    import console_ui
+    notes = []
+    monkeypatch.setattr(console_ui, "note", lambda s, *a, **k: notes.append(s))
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("TALOS_GOAL", "out.txt 存在")
+    u = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20, prompt_tokens_details=None)
+    client = _Client([
+        _msg(tool_calls=[_tc("write_file", '{"path":"out.txt","content":"a"}')]),
+        _msg(content="写好了。"),
+        _msg(content='{"ok": true, "reason": "在"}', usage=u),
+    ])
+    monkeypatch.setattr(A, "make_client", lambda: (client, "m"))
+    A.once("写个 out.txt")
+
+    bill = [n for n in notes if "判断器" in n]
+    assert bill, f"判断器的账单一次都没上屏 —— 实际打出来的是:{notes}"
+    assert "120" in bill[0], f"账单里没有它实际花掉的 token 数:{bill[0]}"
