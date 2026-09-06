@@ -1388,3 +1388,39 @@ def test_no_module_level_constant_is_silently_redefined():
              for t in n.targets if isinstance(t, ast.Name)]
     dupes = sorted({n for n in names if names.count(n) > 1})
     assert not dupes, (f"模块级重名(后一个无声盖掉前一个,而注释还在描述前一个):{dupes}")
+
+
+def test_every_entry_point_announces_a_disabled_skill():
+    """技能被红旗隔离时,`-p` 一个字都不说。
+
+    `技能已停用` 全仓库只出现在 `repl()` 里。`-p` 上被命中的技能从常驻清单
+    (`retrieve` 把它筛掉)和检索(`recall(blocked=…)`)里**同时消失**,没有任何输出。
+    大小写那道闸是启发式(`_SKILL_RED_FLAGS` 七条正则全带 `re.I`),误伤过真技能:
+    `mutation-testing.md` 因为正文一句「natural_key 的数字转 int」被整条隔离。
+
+    对照组就在同一个启动序列里:**工具**那条隔离告警发在 `load_dynamic_tools()`
+    **函数内部**(靠 `ui is not None` 守着),所以两条路都打得出来;技能那条写在
+    `repl()` 的调用方。同一类事件,两种接法 —— 不对称就是这么来的。
+
+    后果不在「有没有人写过承诺」上:EXAM / benchmark 跑在 `-p`,一条技能悄悄消失
+    会让分数变了而没人看得出原因;SECURITY.md 把这道启动扫描列为恶意技能的缓解措施,
+    而排除真发生了、没人被告知去看那个文件,于是它永远留在 `skills/` 里没人复核。
+
+    判据**从「谁调 load_dynamic_tools」推导**出启动路径,不写死 repl/once 两个名字。
+    """
+    import ast
+    import inspect
+    import agent as A
+    tree = ast.parse(inspect.getsource(A))
+    # **查 Call 节点,不查子串。** 第一版用 `"load_dynamic_tools()" in ast.unparse(fn)`,
+    # 而 `ast.unparse` 出来的 `def load_dynamic_tools() -> list:` 自己就含这个子串,
+    # 于是它把被调的那个函数当成了启动路径 —— 判据写成文本形状,第二次栽在同一件事上。
+    def _calls(fn, name):
+        return any(isinstance(n, ast.Call) and getattr(n.func, "id", "") == name
+                   for n in ast.walk(fn))
+    entries = [fn for fn in ast.walk(tree) if isinstance(fn, ast.FunctionDef)
+               and _calls(fn, "load_dynamic_tools")]
+    assert entries, "没找到任何启动路径 —— 这条判据自己瞎了"
+    missing = [fn.name for fn in entries if not _calls(fn, "_note_disabled_skills")]
+    assert not missing, (f"这些启动路径不会说技能被停用了:{missing} —— "
+                         f"被误伤的技能从常驻清单和检索里同时消失,而没人被告知")

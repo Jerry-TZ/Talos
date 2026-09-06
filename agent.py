@@ -3298,6 +3298,7 @@ def once(task: str, mode: str = "bypass") -> str:
     import session as S
     client, model = make_client()
     load_dynamic_tools()
+    _note_disabled_skills()      # 无人值守也要说 —— 见该函数的注释
     # 无人值守正是「说完成了但没完成」代价最大的地方 —— 没人在读 transcript,而 EXAM 就跑在
     # 这条路上。TALOS_GOAL="每列的非空/唯一数都实际打印出来了" 就给这一次开上判断器。
     state = {"mode": mode, "allow": set(), "view": "normal", "asked": task,
@@ -3474,6 +3475,20 @@ def _budget_note(state: dict) -> str:
             "接着做就 `/compact` 压一下,能收尾就开个新会话。")
 
 
+def _note_disabled_skills() -> None:
+    """被红旗隔离的技能,**每条启动路径都要说一声**。
+
+    对照就在同一段启动序列里:工具那条隔离告警发在 `load_dynamic_tools()` 函数内部,
+    两条路都打得出来;技能这条原来写在 `repl()` 的调用方,于是 `-p` 一个字不说 ——
+    而被命中的技能从常驻清单(`retrieve` 筛掉)和检索(`recall(blocked=)`)里同时消失。
+    那道闸是启发式,误伤过真技能(`mutation-testing.md` 因为正文一句话被整条隔离);
+    EXAM 和 benchmark 都跑在 `-p`,分数变了而没人看得出原因。"""
+    if ui is None:
+        return
+    for path, why in scan_skills().items():
+        ui.note(f"⚠️ 技能已停用: {os.path.basename(path)} — 含{'、'.join(why)}。"
+                f"自己看过确认没问题再删掉那几行,或删除该文件。")
+
 def repl(resume=None) -> None:
     global ui
     import console_ui as ui              # the 界面 (needs rich); lazy so --selfcheck stays dep-free
@@ -3493,9 +3508,7 @@ def repl(resume=None) -> None:
     made = load_dynamic_tools()                        # re-load tools the agent built in past sessions
     if made:
         ui.note(f"已加载 {len(made)} 个自建工具: {', '.join(made)}")
-    for path, why in scan_skills().items():            # loudly, before any task can trigger them
-        ui.note(f"⚠️ 技能已停用: {os.path.basename(path)} — 含{'、'.join(why)}。"
-                f"自己看过确认没问题再删掉那几行,或删除该文件。")
+    _note_disabled_skills()                            # loudly, before any task can trigger them
     while True:
         try:
             task = ui.read_task(state["mode"])
