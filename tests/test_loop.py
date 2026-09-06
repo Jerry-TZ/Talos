@@ -2134,3 +2134,70 @@ def test_both_abnormal_exits_of_the_repl_put_the_turn_on_disk():
             kind = ast.unparse(h.type) if h.type else "裸 except"
             assert "sess.save" in ast.unparse(ast.Module(body=h.body, type_ignores=[])), \
                 f"`except {kind}` 这条出口没有落盘 —— 它印的「进度都还在」只在内存里成立"
+
+
+def test_every_inner_agent_turn_goes_through_child_state():
+    """内层轮次一律拿 `_child_state`,**判据挂在「所有非 top 的调用」上,不挂在名单上**。
+
+    `_child_state` 的 docstring 举的例子就是 `capped`:子 agent 撞上限把它写进父 state,
+    父任务明明成功返回,repl 却因为这个标记跳过整个任务的复盘。后来 `reflect` 补上了,
+    注释里还写着「同一条不变式两条路,只守了一条」—— 而当时**有三条**:
+    `consolidate` 从头到尾传的是裸 `state`,`agent.py:1084` 的注释甚至把它和 reflect
+    并排点了名。
+
+    必然的后果是 `state["reads"]`:`agent_turn` 累加它时不看 `top`,于是 `/consolidate`
+    读的每个文件都记到父账上,下一次真实请求的 cache_trace 里混着整理技能的读数 ——
+    逐字就是 `reflect()` 注释里点名的那句话。
+
+    **结构判据,不是行为判据**:它只要求「这个函数里出现过 `_child_state`」,
+    因为 `spawn_subagent` 是先赋值给 `child` 再传的。绕过它只要写一行没用的赋值 ——
+    写在这里免得有人把绿读成更多。
+    """
+    import ast
+    import inspect
+    import agent as A
+    tree = ast.parse(inspect.getsource(A))
+    bad = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        for call in ast.walk(fn):
+            if not (isinstance(call, ast.Call) and getattr(call.func, "id", "") == "agent_turn"):
+                continue
+            if any(k.arg == "top" for k in call.keywords):
+                continue                       # 顶层轮次,本来就该用父那份
+            if "_child_state" not in ast.unparse(fn):
+                bad.append(f"{fn.name}() 第 {call.lineno} 行")
+    assert not bad, ("这些内层 agent_turn 拿的是父 state,本轮字段会漏回去:\n  "
+                     + "\n  ".join(bad))
+
+
+def test_every_place_that_saves_a_half_dead_turn_seals_it_first():
+    """把一份可能带着**裸 tool_calls** 的历史落盘之前,必须先 `_seal`。
+
+    `_seal` 的 docstring:一条 assistant 带 tool_calls 而没有对应结果的消息留在历史里,
+    下一次请求就 400,**而且不会自愈 —— 这个会话废了**。`repl` 两条出口都 seal 了;
+    `once()` 的 `finally` 只 save 不 seal。而 `run_tool` 只接 `(Exception, SystemExit)`,
+    **不接 KeyboardInterrupt** —— Ctrl-C 落在 run_bash 的子进程上时,带 tool_calls 的
+    assistant 已经进了 messages,tool 结果一条都还没进。
+
+    `-p` 改成留轨迹正是为了「崩掉的那一份最值钱」,而存下来的那一份 `--resume` 打不开。
+
+    判据同时走 `repl` 和 `once`,条件是「这个 try 的非正常出口里只要有 save 就必须有 seal」
+    —— **不点名是哪几条出口**,以后再多一条也跑不掉。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import agent as A
+    for fn in (A.repl, A.once):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+        tries = [n for n in ast.walk(tree) if isinstance(n, ast.Try)
+                 and "agent_turn(" in ast.unparse(ast.Module(body=n.body, type_ignores=[]))]
+        assert tries, f"{fn.__name__} 里没找到包着 agent_turn 的 try —— 这条判据自己瞎了"
+        for t in tries:
+            abnormal = ast.unparse(ast.Module(
+                body=[s for h in t.handlers for s in h.body] + list(t.finalbody),
+                type_ignores=[]))
+            if "sess.save" in abnormal:
+                assert "_seal" in abnormal, (
+                    f"{fn.__name__} 的非正常出口把历史存下来了,却没先 _seal —— "
+                    f"存下来的会话 --resume 上去第一次请求就 400")

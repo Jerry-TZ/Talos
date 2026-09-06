@@ -346,3 +346,30 @@ def test_an_unattended_run_that_crashes_still_leaves_its_transcript(ws, monkeypa
     rows = S.list_sessions()
     assert len(rows) == 1, f"崩掉的那一轮什么都没留下:{rows}"
     assert S.open_session(rows[0][0]).load()[0]["content"] == "这一轮会崩"
+
+
+def test_the_return_value_of_delete_is_never_dropped():
+    """`delete()` 的返回值**存在的唯一理由**就是那句「已删除」该不该印。
+
+    它自己的 docstring:「返回值只在**真的删干净了**才为 True —— 打印「deleted」的那行
+    就靠它,删剩一半还报成功就是把上面那个谎换了个地方说。」同一段开头是
+    「**说删了却没删,比删多了更糟。**」
+
+    CLI 的 `--delete` 用了(`print(... if S.delete(sid) else "not found")`),
+    repl 的 `/delete` 把它丢了,`ui.note("已删除 …")` 无条件执行。Windows 上一个没带
+    delete-sharing 的句柄就够让 `os.remove` 抛 OSError,而会话文件里躺着明文提问原文。
+
+    上面那条 `S.delete(...) is False` 的判据钉的是**存储层**,一直是绿的 ——
+    **没有任何判据钉过调用方有没有用它**。闸造好了,接线没接。
+
+    判据形状:`S.delete(` 不许作为**裸表达式语句**出现。一般化的,不点名哪个调用点。
+    """
+    import ast
+    import inspect
+    import agent as A
+    tree = ast.parse(inspect.getsource(A))
+    bad = [n.lineno for n in ast.walk(tree)
+           if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+           and ast.unparse(n.value).startswith("S.delete(")]
+    assert not bad, (f"agent.py 第 {bad} 行把 S.delete 的返回值丢了 —— "
+                     f"删失败照样会印「已删除」")

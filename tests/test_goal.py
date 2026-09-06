@@ -408,3 +408,62 @@ def test_a_crashed_unattended_run_says_the_goal_was_never_checked(ws, monkeypatc
     with pytest.raises(SystemExit):
         A.once("统计一下")
     assert any("一次都没被检查过" in n for n in notes), f"崩掉的这一轮只字未提目标:{notes}"
+
+
+def test_every_abnormal_exit_of_the_repl_also_says_the_goal_was_never_checked(ws):
+    """`once()` 补完之后我在 FINDINGS 里写「四条出口接了两条」—— **数漏了 repl 的两条。**
+
+    非自愿出口实际有六条:`agent_turn` 两条(撞上限、打转)、`once()` 两条、
+    **`repl()` 两条**(KeyboardInterrupt、Exception)。而 repl 里的目标是会话级的
+    (`/goal` 设完一直挂着),跑到一半供应商 500,人看到的是错误面板加一句
+    「这一轮的进度都还在」,关于「判断器一次都没跑过」只字未提 ——
+    逐字就是那次真实事故的措辞。
+
+    更难堪的是那个 `except` 分支里已经写着一句注释:「两条出口对同一件事只做了一半,
+    又是『一条规则两处实现』」—— 那是在说 `sess.save`。**同一个分支、同一个形状,
+    我从它旁边走过去没看见。**
+
+    判据要求**每一个** handler 都提到它,不点名是哪几条 —— 记录这个错误的那次提交
+    自己犯的就是点名的毛病。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import agent as A
+    tree = ast.parse(textwrap.dedent(inspect.getsource(A.repl)))
+    tries = [n for n in ast.walk(tree) if isinstance(n, ast.Try)
+             and "agent_turn(" in ast.unparse(ast.Module(body=n.body, type_ignores=[]))]
+    assert tries, "没找到包着 agent_turn 的 try —— 这条判据自己瞎了"
+    for t in tries:
+        for h in t.handlers:
+            kind = ast.unparse(h.type) if h.type else "裸 except"
+            body = ast.unparse(ast.Module(body=h.body, type_ignores=[]))
+            assert "_unchecked_goal_note" in body, (
+                f"repl 的 `except {kind}` 这条出口没说「目标一次都没被检查过」 —— "
+                f"用户会把「停下了」当成「做完了」")
+
+
+def test_clearing_the_goal_clears_every_field_the_state_table_calls_a_goal_field():
+    """`/goal clear` 清 3 个,`STATE_LOCAL` 里 goal 开头的有 5 个。
+
+    留下的 `goal_tok` 会让下一个目标的 `/goal` 打出「已判断 **0** 次 · 判断器花了
+    **47821** tok」—— 同一行里自相矛盾,而那笔账是上一个目标花的。
+    goal gate 那段注释承诺的是「开了就该看见账单」,看见的却是一笔跨目标的账。
+
+    判据**从 `STATE_LOCAL` 推导**,不写死名单:以后再加一个 goal 字段,忘了清就红。
+    """
+    import ast
+    import inspect
+    import textwrap
+    import agent as A
+    # **AST,不是正则。** 第一版按源码文本抓,`ast.unparse` 把双引号重排成单引号之后
+    # 捕获就空了 —— 变异全扫的控制组当场红:副本本身跑不过全套,40 个点会因此
+    # **全部显示为「已杀死」**,全扫报绿。判据写成文本形状,挡住的假绿是自己造的。
+    tree = ast.parse(textwrap.dedent(inspect.getsource(A.repl)))
+    cleared = {e.value for n in ast.walk(tree)
+               if isinstance(n, ast.For) and isinstance(n.iter, ast.Tuple)
+               and "state.pop(k, None)" in ast.unparse(n)
+               for e in n.iter.elts if isinstance(e, ast.Constant)}
+    assert cleared, "没找到 /goal clear 那个循环 —— 判据自己瞎了"
+    declared = {k for k in A.STATE_LOCAL if k.startswith("goal")}
+    assert declared <= cleared, f"/goal clear 漏清了:{sorted(declared - cleared)}"

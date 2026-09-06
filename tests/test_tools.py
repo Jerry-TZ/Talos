@@ -1363,3 +1363,28 @@ def test_the_trash_covers_every_file_the_write_tools_may_touch(ws, monkeypatch):
     dumped = "".join(open(os.path.join(A.TRASH_DIR, n), encoding="utf-8").read()
                      for n in os.listdir(A.TRASH_DIR)) if os.path.isdir(A.TRASH_DIR) else ""
     assert "要被覆盖的好代码" in dumped, "自建工具被覆盖前没有副本 —— 它是可写的,就该被保护"
+
+
+def test_no_module_level_constant_is_silently_redefined():
+    """`_QUOTED` 被定义了两次,`run_bash` 那道闸运行时拿到的是**权限闸那一版**。
+
+    776 行:`re.compile(r'"[^"\n]*"')`,注释写「成对的双引号段 —— 里面是搜索串」,
+    docstring 写「**先把双引号里的内容挖空再找**」。
+    1725 行同名重定义:带捕获组、双引号**和单引号**、内容 1~260 字符,给 `_targets` 用。
+
+    实测(不是推断)`echo it's here; ls x's`:
+      · 776 那版挖空后 -> 命中 `; ls`(按注释,该拦)
+      · 实际生效的那版 -> None(放行)
+    命令里出现两个单引号,夹在中间的整段被当引号内容挖空,里面的 bashism 就看不见了。
+    776 行是彻底执行不到的死定义,而注释描述的正是它。
+
+    判据是**一般形式**:模块级不许有同名赋值。下一个重名不需要有人恰好读到这两行。
+    """
+    import ast
+    import inspect
+    import agent as A
+    tree = ast.parse(inspect.getsource(A))
+    names = [t.id for n in tree.body if isinstance(n, ast.Assign)
+             for t in n.targets if isinstance(t, ast.Name)]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert not dupes, (f"模块级重名(后一个无声盖掉前一个,而注释还在描述前一个):{dupes}")

@@ -773,7 +773,10 @@ _BASHISM = re.compile(
     r"\$\("                                                  # command substitution, anywhere
     r"|(?:^|[|&;]\s*)(ls|pwd|cat|grep|wc|head|tail|awk|sed|uniq|touch|which|export|source)\b",
     re.IGNORECASE)                                           # …the rest only in command position
-_QUOTED = re.compile(r'"[^"\n]*"')     # 成对的双引号段 —— 里面是搜索串,不是命令,见 run_bash
+# **只挖双引号,别改回 `_QUOTED`** —— 1725 行有个同名的(双引号+单引号,给权限闸用)。
+# 这两个曾经重名,后一个无声盖掉了前一个:`echo it's here; ls x's` 里夹在两个单引号之间的
+# `; ls` 被当成引号内容整段挖空,这道闸看不见了,而注释还在描述被盖掉的那一版。
+_DQUOTED = re.compile(r'"[^"\n]*"')     # 成对的双引号段 —— 里面是搜索串,不是命令,见 run_bash
 _BASH_HINTS = {
     "wc": "数行数用 `find /c /v \"\"`。", "ls": "列目录用 `dir`。", "pwd": "当前目录用 `chdir`。",
     "cat": "看文件用 read_file 工具。", "grep": "搜内容用 `findstr`。", "export": "设变量用 `set`。",
@@ -806,7 +809,7 @@ def run_bash(command: str) -> str:
         # 报错里 `bashism.group(0)` 指的还是原命令里那一段。
         # 引号不成对时(`echo "$(`)剩下的部分照旧被扫 —— 拿不准就拦,这道闸的代价是
         # 模型换个写法,漏掉的代价是一条静默跑歪的命令。
-        bashism = _BASHISM.search(_QUOTED.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"',
+        bashism = _BASHISM.search(_DQUOTED.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"',
                                               command))
         if bashism:
             hint = _BASH_HINTS.get(bashism.group(1) or bashism.group(0), "")
@@ -2471,9 +2474,13 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
     文件在这一轮里没被改过的话,读第七遍不会读出新东西,而每读一遍都要把整个
     已积累的上下文重发一次。翻页上限本来是为省 token 设的,翻不动就成了纯烧钱。
 
-    键上带 `"read"` 前缀,和 `_repeat_guard` 的 sha1 摘要共用同一个 per-turn dict 而
-    不会撞车 —— 一个是 tuple,一个是 str。至于为什么必须是 per-turn 而不能挂 `state`,
-    见 `_repeat_guard` 的注释,同一个理由(子 agent 共享 state,会把计数清零)。"""
+    **计数不在 `state` 上,也不是 per-turn 的**,而是挂在 `_RUNTIME["reads"]`、
+    只在最外层那一轮清空 —— 故意跨子 agent 累计。理由见 `agent_turn` 里那段注释:
+    不累计的话父烧完 6 次读,派个子 agent 就又有 6 次,内容照样整份发回来。
+    这一点和 `_repeat_guard` **正相反**,两条守卫看着像一对,守的不是一回事:
+    前者守「这一轮卡住了」,per-turn 才对;这条守的是 token 预算。
+    (上一版这段写的是「和 `_repeat_guard` 共用同一个 per-turn dict」——
+    三句话全是假的,而它们比代码更容易被信。)"""
     if name in ("write_file", "edit_file"):
         # 改过的文件下一次读**确实**是新内容 —— 这条守卫的整个前提是「文件没变」,
         # 不在写的时候清零,就把「边写边看」这个最普通的循环给掐了(实测第 6 轮
@@ -2616,7 +2623,12 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
     hash to one value across unrelated tasks). Reflection is exactly when the task's own
     memories matter most."""
     _RUNTIME.update(client=client, model=model, state=state)   # let tools (spawn_subagent) reach the loop
-    flagged = scan_skills()                            # one quarantine set, shared by BOTH paths
+    # **不是同一个集合。** `retrieve()` 自己又调了一遍 `scan_skills()`(见 1577 行),
+    # 这里这份只喂给 recall。两份内容一致(函数确定性),所以隔离行为没问题 ——
+    # 错的是「一个集合」这句话,和它的代价:一次带复盘的顶层请求会跑到五六次 scan,
+    # 而 500 条技能时它量到过 2.76 秒。改注释不改代码:合并要么加缓存(得管失效),
+    # 要么给 retrieve 加参数(只省掉五次里的一次),两条都配不上这个收益。
+    flagged = scan_skills()                            # 只给 recall 用,retrieve 自己扫自己的
     learned = retrieve()                               # always-on: memory + skill descriptions
     query = query or next((m["content"] for m in reversed(messages)
                            if m.get("role") == "user" and isinstance(m.get("content"), str)), "")
@@ -3112,7 +3124,12 @@ def reflect(client, model: str, messages: list, state: dict) -> str:
     return out
 
 def consolidate(client, model: str, state: dict) -> str:
-    return agent_turn(client, model, [{"role": "user", "content": CONSOLIDATE_PROMPT}], state)
+    # `_child_state` —— 和 reflect 同一个理由,而这是**第三条**内层轮次。补 reflect 那次的
+    # 注释写的是「同一条不变式两条路,只守了一条」,当时就漏数了这一条(1084 行的注释还把
+    # 它和 reflect 并排点了名)。必然的后果是 `state["reads"]`:整理技能读的每个文件都记到
+    # 父账上,下一次真实请求的 cache_trace 里混着它的读数。
+    return agent_turn(client, model, [{"role": "user", "content": CONSOLIDATE_PROMPT}],
+                      _child_state(state))
 
 # ── context compression (仿 Claude Code 的 auto-compact) ───────────────────────
 
@@ -3300,7 +3317,13 @@ def once(task: str, mode: str = "bypass") -> str:
         sys.exit(1)
     finally:
         # 崩掉和被中断的那一份**最值钱**,所以存在 finally 里,不在成功路径上。
+        # **先 _seal 再落盘。** `run_tool` 只接 `(Exception, SystemExit)`,不接
+        # KeyboardInterrupt —— Ctrl-C 落在 run_bash 的子进程上时,带 tool_calls 的
+        # assistant 已经进了 messages,tool 结果一条都还没进。那份历史存下来
+        # `--resume` 上去第一次请求就 400,而且不会自愈(见 `_seal`)。
+        # repl 两条出口都 seal 了,这条只做了落盘那一半 —— 又是「一条规则两处实现」。
         try:
+            _seal(messages)
             sess.save(messages)
             ui.note(f"会话 {sess.sid} · 存于 .talos/sessions/")
         except Exception as e:                    # 存不下来不许把原来那个错误顶掉
@@ -3532,7 +3555,9 @@ def repl(resume=None) -> None:
                             + (f"\n最近理由:{state['goal_last']}" if state.get("goal_last") else ""))
                 continue
             if arg.lower() in _GOAL_CLEAR:
-                for k in ("goal", "goal_checks", "goal_last"):
+                # 五个字段一起清。留着 goal_tok 会让下一个目标的 `/goal` 打出
+                # 「已判断 0 次 · 判断器花了 47821 tok」—— 同一行自相矛盾。
+                for k in ("goal", "goal_checks", "goal_last", "goal_tok", "goal_noted"):
                     state.pop(k, None)
                 ui.note("目标已清除,退出条件回到「模型不调工具就停」")
                 continue
@@ -3615,11 +3640,17 @@ def repl(resume=None) -> None:
             if not sid:
                 ui.note("没找到该会话 — 用 /history 看编号")
             elif ui.ask_yes(f"确认删除会话 {sid}?(不可恢复)"):
-                if sid == sess.sid:                    # 删的是当前会话 → 开一个新空会话
-                    sess = S.Session.new()
-                    messages[:] = []
-                S.delete(sid)
-                ui.note(f"已删除 {sid}")
+                # **先删,成功了再动内存里的会话。** 反过来的话删失败时三件事同时发生:
+                # 内存里的会话没了、盘上的文件还在、屏幕上写着「已删除」。
+                # 返回值不是可选的 —— `delete()` 的 docstring 说它存在的理由就是这句话:
+                # 「说删了却没删,比删多了更糟。」CLI 的 --delete 一直在用,这条路丢了。
+                if S.delete(sid):
+                    if sid == sess.sid:                # 删的是当前会话 → 开一个新空会话
+                        sess = S.Session.new()
+                        messages[:] = []
+                    ui.note(f"已删除 {sid}")
+                else:
+                    ui.note(f"⚠️ 没删掉 {sid} —— 文件还在 .talos/sessions/,会话没动")
             continue
         mark = len(messages)
         # Kept for the whole session, not just this turn: a file you named three turns ago is
@@ -3631,7 +3662,8 @@ def repl(resume=None) -> None:
         except KeyboardInterrupt:                  # Ctrl-C: stop this turn, keep the REPL and the work
             _seal(messages)
             sess.save(messages)
-            ui.note("⛔ 已停下。做过的都留着 —— 直接说新的要求就行,或者「继续」接着做。")
+            ui.note(_unchecked_goal_note(state, True, "被中断")
+                    + "⛔ 已停下。做过的都留着 —— 直接说新的要求就行,或者「继续」接着做。")
             continue
         except Exception as e:
             _seal(messages)                        # keep the work; just make the history valid again
@@ -3644,7 +3676,10 @@ def repl(resume=None) -> None:
             except Exception as _e:
                 ui.note(f"⚠️ 会话没存下来:{_e}")
             ui.error(e)
-            ui.note("这一轮的进度都还在 —— 说「继续」可以接着做。")
+            # 目标是会话级的,而这一轮的判断器根本没跑到。补 `once()` 那次我数的是
+            # 「四条出口」,漏掉了 repl 这两条 —— 而上面那段注释正在说同一个形状。
+            ui.note(_unchecked_goal_note(state, True, "这一轮崩了")
+                    + "这一轮的进度都还在 —— 说「继续」可以接着做。")
             continue
         ui.answer(result)
         _tk = state.get("last_tok") or {}
