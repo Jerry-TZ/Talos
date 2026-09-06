@@ -1123,7 +1123,8 @@ STATE_LOCAL = ("capped", "last_tok", "last_calls",   # 只描述"刚刚这一轮
                # 目标是**会话级**的,和 `capped` 同一个道理:子 agent 干完子任务不等于
                # 会话目标达成。判断器只在 top 跑,所以子那份 state 里这四个字段永远是空的
                # —— 继承过去就是个读不到的死字段,不如在这儿把边界说明白。
-               "goal", "goal_checks", "goal_last", "goal_tok")
+               "goal", "goal_checks", "goal_last", "goal_tok",
+               "goal_noted")                          # 「没检查过」这话说过没有,同样只在 top
 
 _CHILD_KEYS = STATE_INHERIT + STATE_SHARED
 
@@ -2374,6 +2375,7 @@ def _unchecked_goal_note(state: dict, top: bool, why: str) -> str:
     **没判断过,就别让人以为判断过了。**"""
     if not (state.get("goal") and top):
         return ""
+    state["goal_noted"] = True          # 让 `once()` 的兜底知道这条路已经说过了
     return (f"⚠️ 目标**一次都没被检查过**(判断器挂在正常收尾那个出口上,{why}走不到)—— "
             f"别把「停下了」当成「做完了」。目标:{state['goal']}\n\n")
 
@@ -3303,6 +3305,14 @@ def once(task: str, mode: str = "bypass") -> str:
             ui.note(f"会话 {sess.sid} · 存于 .talos/sessions/")
         except Exception as e:                    # 存不下来不许把原来那个错误顶掉
             ui.note(f"⚠️ 会话没存下来:{e}")
+        # 崩掉 / Ctrl-C 也是「非自愿结束」,而 `_unchecked_goal_note` 只接在
+        # agent_turn 里那两条(撞上限、打转)。它自己的注释写的是「**每一条出口**」,
+        # 括号里的枚举却成了实现范围 —— 正是它警告过的那种漏法。真事(2026-09-06):
+        # `-p` 带目标跑,第 12 分钟供应商 500,判断器一次没跑,输出只字未提目标。
+        # **条件挂在 goal_checks 上,不挂在出口上** —— 判断器跑没跑它自己知道,
+        # 再多一条出口也不会漏;`goal_noted` 只是躲开上面那两条已经说过话的路。
+        if state.get("goal") and not state.get("goal_checks") and not state.get("goal_noted"):
+            ui.note(_unchecked_goal_note(state, True, "这一轮崩了或被中断").strip())
     ui.answer(result)
     t = state.get("last_tok") or {}
     if t.get("in") or t.get("out"):

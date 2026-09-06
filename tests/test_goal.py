@@ -9,6 +9,8 @@ import json
 import os
 import types
 
+import pytest
+
 from test_loop import _Client, _msg, _tc, _ui
 
 
@@ -379,3 +381,30 @@ def test_the_judges_bill_reaches_the_screen_on_the_unattended_path(ws, monkeypat
     bill = [n for n in notes if "判断器" in n]
     assert bill, f"判断器的账单一次都没上屏 —— 实际打出来的是:{notes}"
     assert "120" in bill[0], f"账单里没有它实际花掉的 token 数:{bill[0]}"
+
+
+def test_a_crashed_unattended_run_says_the_goal_was_never_checked(ws, monkeypatch):
+    """`_unchecked_goal_note` 的注释写的是「**非自愿结束的每一条出口**」,接的是两条。
+
+    它自己那段话:「写成一个函数而不是抄两遍,是因为这片面上的路不止一条(撞步数上限、
+    打转被打断),而抄的那一份迟早只改好其中一遍」—— 然后那句括号里的枚举就成了实现范围。
+    非自愿出口有四条,另外两条(API 崩、Ctrl-C)在 `once()` 里,一条都没接。
+
+    真事(2026-09-06):`-p` 带 TALOS_GOAL 跑,第 12 分钟供应商 500,判断器一次没跑,
+    输出里没有一个字提目标 —— 而这条路上没人在读 transcript,正是这道闸存在的理由。
+
+    判据挂在 `goal_checks` 上而不是「哪几条出口」上:判断器跑没跑它自己知道,
+    这样再多一条出口也不会漏 —— **枚举出口正是上面那段注释犯的错。**
+    """
+    import agent as A
+    import console_ui
+    notes = []
+    monkeypatch.setattr(console_ui, "note", lambda s, *a, **k: notes.append(s))
+    monkeypatch.setattr(console_ui, "error", lambda *a, **k: None)
+    monkeypatch.chdir(ws)
+    monkeypatch.setenv("TALOS_GOAL", "report.md 里有 8 个数")
+    monkeypatch.setattr(A, "make_client", lambda: (_Client([RuntimeError("boom")]), "m"))
+
+    with pytest.raises(SystemExit):
+        A.once("统计一下")
+    assert any("一次都没被检查过" in n for n in notes), f"崩掉的这一轮只字未提目标:{notes}"
