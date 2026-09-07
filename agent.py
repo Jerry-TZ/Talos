@@ -2083,15 +2083,31 @@ def _tool_call_entry(c) -> dict:
     return out
 
 def _json_object(text: str):
-    """从模型输出里抠出第一个 JSON 对象 —— 它常常裹在 ```json 里或带一句前言。"""
-    m = re.search(r"\{.*\}", text or "", re.S)
-    if not m:
-        return None
-    try:
-        d = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return None
-    return d if isinstance(d, dict) else None
+    """从模型输出里抠出**结论**那个 JSON 对象 —— 它常常裹在 ```json 里、带一句前言,
+    或者前面还压着一整段 <think>。
+
+    取「最后一个能解析的对象」,不是最宽的那一段。老版本那条正则贪婪:从第一个左花括号
+    一直吃到最后一个右花括号。推理模型在 think 里先摆一个 ok=true 的例子、末尾再给真
+    结论,这一段就横跨两个对象 —— 解析失败,**正确的结论被扔进 error 出口**。
+    live 实测(glm-z1-flash):harness 已经回问过一次「只输出一个 JSON 对象」,模型
+    照办了、末尾给了合规 JSON,还是被这一行扔了 —— 回问那道补救对它完全无效。
+    也不能改成「取第一个」:第一个往往正是 think 里那个例子,那是**假的达成**,
+    比 error 贵得多。结论在最后,就从前往后扫、留最后一个。
+
+    要求带 ok / impossible 键。**唯一的调用者是判断器**,而同一次实测里那个模型
+    把整串流式分片当正文吐了回来 —— 里面随便一个 delta 对象都能解析成 dict,
+    不认键的话它就成了一次「有结论」的判定。"""
+    dec, out, end = json.JSONDecoder(), None, -1
+    for m in re.finditer(r"\{", text or ""):
+        if m.start() < end:                    # 嵌在上一个对象里面的,不是新对象
+            continue
+        try:
+            d, end = dec.raw_decode(text, m.start())
+        except ValueError:
+            continue
+        if isinstance(d, dict) and ("ok" in d or "impossible" in d):
+            out = d
+    return out
 
 def _workspace_listing(limit: int = GOAL_LISTING_MAX) -> str:
     """判断器得先知道有哪些文件才谈得上去读。

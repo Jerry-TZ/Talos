@@ -290,6 +290,30 @@ def test_json_object_tolerates_fences_and_preamble():
     assert A._json_object("[1,2,3]") is None            # 数组不是对象
 
 
+def test_the_verdict_survives_a_thinking_block_that_shows_a_json_example():
+    """结论前面压着一整段 think,而 think 里摆了个 JSON 例子 —— 结论仍然要取到。
+
+    live 实测(glm-z1-flash,任务1):harness 已经回问过一次「只输出一个 JSON 对象」,
+    模型**照办了**,末尾给了合规 JSON。结论还是被扔了 —— 老版本那条正则贪婪,
+    从 think 里第一个左花括号一直吃到最后一个右花括号,横跨两个对象,解析失败。
+    也不能改成「取第一个」:第一个正是 think 里那个 ok=true 的**例子**,
+    那是假的达成,比 error 更贵。所以断言钉的是「取最后一个」。"""
+    import agent as A
+    think = ('<think>比如全对就 {"ok": true, "reason": "满足所有条件", "impossible": false},'
+             '不对就 {"ok": false, "reason": "缺哪一项"}</think>')
+    d = A._json_object(think + '{"ok": false, "reason": "city 唯一值数不对", "impossible": false}')
+    assert d is not None, "结论被贪婪匹配吃掉了"
+    assert d["ok"] is False and "city" in d["reason"], f"取错了对象:{d}"
+    # 嵌套的对象不算「另一个对象」。里层要是**也带 ok**,不跳过就把它当成了结论 ——
+    # 而那个方向是假的达成。(第一版这条断言的里层没有 ok 键,被键检查顺手挡了,
+    #  于是「跳过嵌套」那两行删掉它照样绿 —— 是全扫把这条没分辨力的断言翻出来的。)
+    assert A._json_object('{"ok": false, "reason": "差一项", "细项": {"ok": 2}}')["ok"] is False
+    # 一串流式分片被当正文吐了回来(实测同一个模型干过):每个 delta 都能解析成 dict,
+    # 但没有一个是结论 —— 不认键的话这就成了一次「有结论」的判定。
+    assert A._json_object('{"index":0,"delta":{"role":"assistant"}}'
+                          '{"index":0,"finish_reason":"stop","delta":{"content":null}}') is None
+
+
 def test_a_correct_verdict_that_forgot_the_json_wrapper_is_asked_again_not_thrown_away(ws, monkeypatch):
     """判断器**把活干对了、格式没给对**,不许当场丢掉结论。
 
