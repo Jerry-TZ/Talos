@@ -1627,3 +1627,37 @@ def test_editing_a_crlf_file_does_not_leave_mixed_line_endings(ws):
     assert not err, out
     raw = open(p, "rb").read()
     assert b"\n" not in raw.replace(b"\r\n", b""), f"混合换行:{raw!r}"
+
+
+def test_ordinary_config_values_are_not_mistaken_for_api_keys(ws):
+    """`.env` 里的普通配置不该被当成 API key 整值抹掉。
+
+    实测三例(启动目录就是用户自己的项目时):`NODE_ENV=development`、
+    `DJANGO_SETTINGS_MODULE=mysite.settings`、`API_URL=http://localhost:3000`。
+    抹掉之后 `read_file webpack.config.js` 回的是
+    `mode: '[已抹掉:这是你的 API key]'` —— 而模型照着这个内容 `edit_file`,
+    **标记就写进了真文件**。`_scrub` 上面那段注释自己描述过这个后果。
+
+    形状门槛不是「长度加数字」。**那个会漏掉字母组成的长口令**
+    (`DB_PASSWORD=correcthorsebatterystaple` 没有一个数字,它照样是秘密),
+    而 `http://localhost:3000` 有数字、有 21 个字符,照样会被抹。
+    判据钉的是「有没有一段够长的**不间断**串」——密钥是不透明的整块,
+    普通配置是被 `.` `/` `:` 空格切开的短段。
+
+    两向都钉:普通值放行,秘密一个不漏。只钉一向的话,把这条规则改成永远为假也能绿。"""
+    import agent as A
+    keep = {"NODE_ENV": "development",
+            "DJANGO_SETTINGS_MODULE": "mysite.settings",
+            "API_URL": "http://localhost:3000",
+            "LOG_FORMAT": "%(asctime)s %(name)s %(message)s",
+            "PYTHONPATH": "src/main/python"}
+    secret = {"GITHUB_TOKEN": "ghp_AbCdEf0123456789AbCdEf0123456789",
+              "DB_PASSWORD": "correcthorsebatterystaple",              # 一个数字都没有
+              "DATABASE_URL": "postgres://u:pw3333@h/db",      # 口令只有 6 位,靠 URL 结构认
+              "OPENAI_API_KEY": "sk-proj-AbCdEfGhIjKlMnOpQrStUv"}
+    got = A._dotenv_secrets({**keep, **secret})
+    for k, v in keep.items():
+        assert k not in got, f"{k}={v!r} 是普通配置,抹了它正常输出就花了"
+    for k in secret:
+        assert k in got, f"{k} 是秘密 —— 漏一个就是泄露"
+    assert "TALOS_MODEL" not in A._dotenv_secrets({"TALOS_MODEL": "deepseek-v4-flash-preview"})

@@ -111,6 +111,17 @@ PROVIDER = os.environ.get("TALOS_PROVIDER", "claude").lower()
 # 换不掉运行时形态,主进程必须握着明文才发得出请求。这里买的是「子进程看不见」。
 _KEYS = {e: os.environ.pop(e) for e, _, _ in PROVIDERS.values() if e in os.environ}
 
+# 一段够长的**不间断**串 = 这个值里有个不透明的整块。密钥长这样,`mysite.settings`
+# 和 `http://localhost:3000` 不长这样(它们被 `.` `/` `:` 切成短段)。
+# 长度取 16 而不是 `_RUN`(10):`development` 有 11 个字符,而它是个常见英文词。
+_OPAQUE = re.compile(r"[A-Za-z0-9+/=_-]{16,}")
+# 光有「不间断串」不够,而这个洞是**已有判据**逮出来的:`postgres://u:pw3333@h/db`
+# 里那段口令只有 6 位,最长的不间断串是 `postgres`(8)—— 漏了。而这条正是设计里
+# 点名的那个 case(名字里一个提示字都没有,密码躺在值里)。
+# URL 的 userinfo 段按 RFC 3986 定义就是凭据,不是我猜的:`://` 之后、第一个 `/`
+# 之前出现 `@`。`http://localhost:3000` 没有 `@`,路径里的 `@` 也不算。
+_URL_CRED = re.compile(r"://[^/\s]*@")
+
 def _dotenv_secrets(env: dict) -> dict:
     """`.env` 带进来的、不该出现在工具结果里的值。
 
@@ -124,10 +135,25 @@ def _dotenv_secrets(env: dict) -> dict:
     `DATABASE_URL` 的 10 字符片段去抹,`postgresql`、`localhost:` 这些正常输出里的词
     当场被抹成「这是你的 API key」。所以这些值走单独一张 `_ENV_SECRETS`,只做整值匹配。
 
+    **形状门槛兑现的正是上面那句「别糊花正常输出」。**光有长度下限不够:启动目录就是
+    用户自己项目的时候,`.env` 里躺的是 `NODE_ENV=development`、
+    `DJANGO_SETTINGS_MODULE=mysite.settings`、`API_URL=http://localhost:3000` ——
+    三个都过了长度线,于是 `read_file webpack.config.js` 回的是
+    `mode: '[已抹掉:这是你的 API key]'`,而模型照着这个内容 `edit_file`,
+    **标记就写进了真文件**(下面 `_scrub` 那段注释描述过这个后果)。
+
+    门槛**不是「长度 + 有数字」**:那会漏掉字母组成的长口令
+    (`DB_PASSWORD=correcthorsebatterystaple` 一个数字都没有,它照样是秘密),
+    而 `http://localhost:3000` 有数字、21 个字符,照样会被抹 —— 两头都错。
+    钉的是**有没有一段够长的不间断串**:密钥是不透明的整块,普通配置是被
+    `.` `/` `:` 空格切开的短段。`postgresql://u:s3cr3t...@h:5432/db` 里那段口令
+    自己就是一整块,照样命中。
+
+    这条**只放宽「哪些值进表」,不放宽匹配方式** —— 进了表还是整值匹配,和以前一样。
     天花板:记的是**文件里**那份值。真环境变量覆盖掉 `.env` 的时候,shell 里那份不在
     这儿 —— 那是用户在 `.env` 之外自己设的,不归这条管。"""
     return {k: v for k, v in env.items()
-            if not k.upper().startswith("TALOS_") and len(v) >= _RUN}
+            if not k.upper().startswith("TALOS_") and (_OPAQUE.search(v) or _URL_CRED.search(v))}
 
 
 # **不 pop,只抹。** provider key 能 pop,是因为没人需要它进子进程 —— 请求是 Talos
