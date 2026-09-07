@@ -2201,3 +2201,47 @@ def test_every_place_that_saves_a_half_dead_turn_seals_it_first():
                 assert "_seal" in abnormal, (
                     f"{fn.__name__} 的非正常出口把历史存下来了,却没先 _seal —— "
                     f"存下来的会话 --resume 上去第一次请求就 400")
+
+
+def test_compaction_keeps_the_words_the_human_actually_typed(ws, monkeypatch):
+    """压缩可以换掉任何东西,**除了人自己打的那几行字**。
+
+    真事(2026-09-07,第一趟真活儿):一轮 27 次调用的任务压缩了两次,收工时会话文件里
+    41 行、user 消息只剩 **1 条,内容是模型写的转述**。用户原话
+    「这是一个投研看板,查一下 data.py 里面有没有可能崩的地方」在文件里**一个字都没有**。
+    连文件名都是从摘要里取的:`20260907-023546__早前对话的压缩摘要-①-当前任务目标-检查-d`。
+
+    三处代价:会话文件不再是原始记录(它是唯一的原始记录);`/history` 的标题成了废话;
+    冻结验证集抽的就是 `role == "user"` 那些行,于是干了一件真活儿、语料进账 0 条。
+
+    而压缩提示词自己写着「②用户明确说过的约束…**一个字都不许漏**」——
+    它把这件事托付给另一次模型调用去转述,而原文当场丢掉。
+    **要一个字不漏,就别把原文删了。**
+
+    认哪几条不靠前缀匹配(harness 自己也往 messages 里塞 user 消息:`[系统]`、
+    `[目标检查]`、`# 回忆(`、上一次的摘要)—— 靠**对象身份**:人的那几条 dict
+    是 repl / once 亲手 append 进去的同一个对象,记在 `state["asks"]` 里。
+    字符串判据会随着下一个新前缀失效,身份不会。"""
+    import agent as A
+    monkeypatch.setattr(A, "_chat", lambda client, **kw: types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="一段简报"))]))
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        note=lambda *a: None, thinking=lambda: contextlib.nullcontext()))
+
+    ask = {"role": "user", "content": "这是一个投研看板,查一下 data.py 里面有没有可能崩的地方"}
+    messages = [ask]
+    for i in range(30):                       # 撑出一个头部,好让 cut > 0
+        messages.append({"role": "assistant", "content": f"第 {i} 步" + "x" * 400})
+        messages.append({"role": "user", "content": "[系统] 这条是 harness 塞的,不必留"})
+
+    out = A.maybe_compact(None, "m", messages, force=True, asks=[ask])
+
+    texts = [m["content"] for m in out if m.get("role") == "user"]
+    assert ask["content"] in texts, f"人的原话被压没了 —— 会话文件里就再也没有它:{texts[:2]}"
+    assert texts[0] == ask["content"], "原话得排在摘要前面,不然 _first_user 拿到的还是转述"
+    # 尾部原样留着的那几条 harness 消息不算 —— 钉的是**摘要前面**那一段:
+    # 它只能是人的原话,不能混进 harness 自己塞的东西(会一路挤到会话标题上)。
+    idx = next(i for i, m in enumerate(out)
+               if str(m.get("content", "")).startswith("【早前对话的压缩摘要】"))
+    head = [m["content"] for m in out[:idx]]
+    assert head == [ask["content"]], f"摘要前面留的不只是人的原话:{head}"

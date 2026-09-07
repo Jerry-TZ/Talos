@@ -1918,3 +1918,41 @@ def test_the_name_the_user_typed_matches_however_they_capitalised_it(ws):
             assert not got, f"这是两个不同的文件,不该报「你点名要过它」:{got}"
     finally:
         os.chdir(cwd)
+
+
+def test_a_refusal_says_what_was_refused_instead_of_something_that_never_happened(ws, monkeypatch):
+    """拒绝理由是**说给模型听的**,它照着走下一步 —— 所以它一个字都不能是假的。
+
+    真事(2026-09-07):模型清自己的临时脚本,`del scan_calls.py scan_risky.py scan_out.txt`。
+    这几个脚本里写着 `SRC = "data.py"`,而 data.py 正是用户请求里点名的文件。
+    弹出来的框说「这条命令**要跑的脚本**里提到了 data.py」—— `del` 不跑脚本,它删脚本。
+    用户照着按了 N,于是模型收到「**用户拒绝删除 data.py**」。用户没有。
+    模型信了,还把这句写进了给用户的最终答复里,临时脚本一个都没清掉。
+
+    `_named_in_request` 上面那段注释早就写过同一件事(「那句话是假的,人照着它按了 N,
+    模型连自己的临时脚本都清不掉」),并且给了结论:**分不出「提到」和「要删」,
+    但说话可以不撒谎。**那次只把这条原则用在了给人看的提示上,给模型看的拒绝理由没跟上
+    —— 同一条规则两处实现,只修了一处。"""
+    import os
+    import types
+    import agent as A
+    for name, body in (("scan_calls.py", 'SRC = "data.py"\n'), ("data.py", "# 真文件\n")):
+        with open(os.path.join(A.WORKSPACE, name), "w", encoding="utf-8") as f:
+            f.write(body)
+    notes = []
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        preview=lambda *a: None, note=lambda *a: notes.append(" ".join(map(str, a))),
+        ask=lambda: "n"))
+    state = {"mode": "default", "allow": set(),
+             "asked": "这是一个投研看板,查一下 data.py 里面有没有可能崩的地方"}
+
+    ok, why = A.check_permission(state, "bash", "run_bash", {"command": "del scan_calls.py"})
+    assert not ok
+    assert "拒绝删除 data.py" not in why, f"这条命令根本没删 data.py,别这么告诉模型:{why}"
+    assert "scan_calls.py" in why, f"得让它知道被拒的到底是哪条命令:{why}"
+
+    # 给人看的那句也不许撒谎:`del a.py` 点到了 a.py,但它**删**它、不**跑**它。
+    # 人就是照着这句按的 N,所以这半条判据和上面那半条一样重。
+    shown = "\n".join(notes)
+    assert "data.py" in shown, f"该提醒的没提醒:{shown}"
+    assert "要跑的脚本" not in shown, f"del 不跑脚本,它删脚本:{shown}"

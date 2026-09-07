@@ -1121,6 +1121,8 @@ STATE_INHERIT = ("mode", "allow", "view",    # 子轮该按同样的权限和显
 STATE_SHARED = ("tok", "trace")              # 汇总:子轮的消耗算在父这次请求头上
 STATE_LOCAL = ("capped", "last_tok", "last_calls",   # 只描述"刚刚这一轮"
                "since_reflect", "reads",             # 只在顶层那份 state 上累
+               "asks",                               # 人打的那几条,是会话级的;子轮的 messages
+                                                     # 是另一批对象,继承过去也认不出来
                "budget_said",                        # 预算说到第几档:子轮继承了就会各说各的
                "sys_hash", "sys_prev", "sys_now",    # 缓存仪表,同样不跨层
                # 目标是**会话级**的,和 `capped` 同一个道理:子 agent 干完子任务不等于
@@ -1894,6 +1896,12 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
     _drain_stdin()                      # before preview: the wait that filled the buffer is over
     ui.preview(name, args)
     named = _named_in_request(state, args) if name == "run_bash" else []
+    # **算在这儿,给人看的提示和给模型看的拒绝理由共用一份。** 上一版只在下面那个
+    # `if` 里算,于是拒绝那条路自己拼了一句「用户拒绝删除 {named}」—— 用的是并集,
+    # 而并集里有一半根本不是这条命令的目标。同一条规则两处实现,只修了一处(第三次)。
+    cmd = args.get("command", "")
+    direct = [f for f in named if _mentions(cmd, f)]
+    indirect = [f for f in named if f not in direct]
     if named and ui is not None:
         # **名字在命令里,和名字在脚本里,不是同一句话。** 前者这条命令确实在删它;
         # 后者只知道脚本**提到**了它 —— 而提到不等于删。实测:模型写的删除脚本末尾有
@@ -1905,14 +1913,14 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # 分不出「提到」和「要删」不是这里能解决的(脚本可以 `for f in targets:
         # os.remove(f)`,名字和删除动作根本不在一行)—— 但**说话可以不撒谎**:
         # 看得见的就断言,看不见的就让人自己去看。两句都是真的,覆盖面一点没少。
-        cmd = args.get("command", "")
-        direct = [f for f in named if _mentions(cmd, f)]
-        indirect = [f for f in named if f not in direct]
         if direct:
             ui.note("⚠️  " + "、".join(direct) + " —— 你在请求里点名要过它,删了就没了")
         if indirect:
-            ui.note("⚠️  这条命令要跑的脚本里提到了 " + "、".join(indirect)
-                    + " —— 你在请求里点名要过它们,看清楚脚本对它们做什么")
+            # **别写「要跑的脚本」。** `del scan_calls.py` 点到了那个脚本,但它删它、
+            # 不跑它 —— 而这句话正是那次让人按下 N、模型连临时文件都清不掉的开头。
+            ui.note("⚠️  这条命令点到的脚本里提到了 " + "、".join(indirect)
+                    + " —— 你在请求里点名要过它们。**提到不等于要删**,"
+                      "看清楚这条命令对那个脚本做的是什么")
     try:
         ans = ui.ask()
     except (KeyboardInterrupt, EOFError):
@@ -1998,8 +2006,20 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
             # 出现过不等于是产出:「读一下 source.py 再分析」里 source.py 出现过,
             # 「把 old.log 删了」里 old.log 出现过而且用户就是要删它。把「名字出现过」升格
             # 成「它是交付物」,是判据替用户做了它没做的判断。
-            return False, (f"用户拒绝删除 {'、'.join(named)}。这几个名字在用户的请求里出现过 ——"
-                           "别再尝试删它们,换个收尾动作;真要删就在回答里说清理由,让用户自己定。")
+            # **只说这条命令确实做了的事。** 上一版说「用户拒绝删除 {并集}」,而并集里
+            # 那些只在脚本正文里出现过的名字,这条命令根本没碰 —— 实测里模型收到
+            # 「用户拒绝删除 data.py」,而它删的是自己的 scan_calls.py,于是它既没敢重试、
+            # 又把这句假话原样写进了给用户的最终答复。
+            said = []
+            if direct:
+                said.append(f"命令里点到了 {'、'.join(direct)}")
+            if indirect:
+                said.append(f"命令点到的脚本里提到了 {'、'.join(indirect)}"
+                            f"(这条命令**不一定**在删它们)")
+            return False, (f"用户拒绝了这条命令:`{cmd[:120]}`。"
+                           + ";".join(said) + " —— 这些名字在用户的请求里出现过。"
+                           "别再换个写法重跑同一条;换个收尾动作,"
+                           "真要删就在回答里说清理由,让用户自己定。")
         if _DESTRUCTIVE.search(args.get("command", "")):
             # Same defect as the `a` branch above, milder: a bare "用户拒绝了这次调用" reads
             # as a coin flip, so the model re-sent `del scan_deps.py` after a plain refusal
@@ -2778,7 +2798,8 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
         # only pay for a summarising call if stubbing the old tool output did not get us under.
         _prune_old_tool_results(messages)
         if _ctx_chars(messages) > COMPACT_AT:
-            messages[:] = maybe_compact(client, model, messages)
+            messages[:] = maybe_compact(client, model, messages,
+                                        asks=state.get("asks", ()))
         with ui.thinking():
             resp = _chat(client, model=model,
                          messages=([{"role": "system", "content": system}]
@@ -3196,13 +3217,21 @@ def _tail_start(messages: list, keep: int) -> int:
         i -= 1
     return i
 
-def maybe_compact(client, model: str, messages: list, force: bool = False) -> list:
+def maybe_compact(client, model: str, messages: list, force: bool = False, asks=()) -> list:
     """History got long? Summarize the head, keep the tail verbatim. Returns the new list.
 
     **上一版把整段历史压成 2 条,尾部一条不留。** 实测代价:一轮 32 步的任务压缩之后,
     模型花了约十次调用重新读它刚读过的文件、重新列它刚列过的目录,直到重复熔断把它拽出来。
     摘要能告诉它「做过什么」,但**「刚才那一步的原文」是摘要写不出来的** —— 而下一步
     恰恰接在那上面。
+
+    **`asks` 里那几条一个字都不动。**它们是人自己打的字,而这份 messages 落盘之后
+    就是**唯一的原始记录**。上一版把它们一起压掉了:一轮 27 次调用的真活儿压缩两次,
+    收工时会话文件里 user 消息只剩一条模型写的转述,原话在文件里一个字都没有,
+    连文件名都是从摘要里取的。而这段提示词自己写着「用户明确说过的约束一个字都不许漏」
+    —— 它把这件事托付给另一次模型调用去转述,而原文当场丢掉。要一个字不漏,就别删原文。
+    认哪几条靠**对象身份**不靠前缀:harness 自己也往 messages 里塞 user 消息
+    (`[系统]`、`[目标检查]`、`# 回忆(`、上一次的摘要),字符串判据会随着下一个新前缀失效。
 
     分两级(抄 opencode 的分级治理):**先用不花钱的手段腾空间,LLM 是最后手段。**
     `_prune_old_tool_results` 本来就存在,但它跑在压缩**之后**,于是压缩每次都对着
@@ -3259,7 +3288,10 @@ def maybe_compact(client, model: str, messages: list, force: bool = False) -> li
     # (尾巴被压成空的时候就正好是它殿后)。摘要放在一条 user 里就够了,不用替模型说话。
     ui.note(f"🗜 上下文已压缩({len(messages)} 条 → {1 + len(tail)} 条,"
             f"最近 {len(tail)} 条原样留着)")
-    return [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary}] + tail
+    # 人的原话排在摘要**前面**:`_first_user` 拿第一条 user 消息去起会话标题,
+    # 排后面的话标题还是那段转述。
+    kept = [m for m in messages[:cut] if any(m is a for a in asks)]
+    return kept + [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary}] + tail
 
 def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
     """Stub OLD, bulky tool outputs in place so they stop getting resent every step (token saver).
@@ -3320,7 +3352,9 @@ def once(task: str, mode: str = "bypass") -> str:
     # 这条路上。TALOS_GOAL="每列的非空/唯一数都实际打印出来了" 就给这一次开上判断器。
     state = {"mode": mode, "allow": set(), "view": "normal", "asked": task,
              "goal": os.environ.get("TALOS_GOAL", "").strip() or None}
-    messages: list = [{"role": "user", "content": task}]
+    ask = {"role": "user", "content": task}       # 同一个对象也交给 state["asks"],理由见 repl
+    state["asks"] = [ask]
+    messages: list = [ask]
     # **跑批也要留下轨迹。** 上一版这条路一个会话都不开(`S.` 的调用全在 `repl()` 里),
     # 于是上面那句「没人在读 transcript」成了真的:不是没人读,是**没有可读的东西**。
     # EXAM 和 benchmarks 都跑在这条路上,跑完不可回溯 —— 而这正是最该回溯的一条路。
@@ -3570,7 +3604,8 @@ def repl(resume=None) -> None:
             continue
         if task == "/compact":
             try:
-                messages[:] = maybe_compact(client, model, messages, force=True)
+                messages[:] = maybe_compact(client, model, messages, force=True,
+                                            asks=state.get("asks", ()))
                 sess.save(messages)
             except Exception as e:
                 ui.error(e)
@@ -3695,7 +3730,11 @@ def repl(resume=None) -> None:
         # Kept for the whole session, not just this turn: a file you named three turns ago is
         # still yours, and reflection — which is where the deletions happened — runs after.
         state["asked"] = state.get("asked", "") + "\n" + task
-        messages.append({"role": "user", "content": task})
+        # **同一个 dict 对象**同时进 messages 和 state["asks"] —— 压缩靠身份认它,
+        # 认得出来就一个字都不动。这是会话文件里唯一不能被转述替换的东西。
+        ask = {"role": "user", "content": task}
+        state.setdefault("asks", []).append(ask)
+        messages.append(ask)
         try:
             result = agent_turn(client, model, messages, state, top=True)
         except KeyboardInterrupt:                  # Ctrl-C: stop this turn, keep the REPL and the work
@@ -3743,7 +3782,8 @@ def repl(resume=None) -> None:
             except Exception as e:
                 ui.error(e)
         try:
-            messages[:] = maybe_compact(client, model, messages)   # auto-compact if history got long
+            messages[:] = maybe_compact(client, model, messages,   # auto-compact if history got long
+                                        asks=state.get("asks", ()))
         except Exception as e:
             ui.error(e)
         _prune_old_tool_results(messages)                          # stub old bulky tool outputs (token saver)
