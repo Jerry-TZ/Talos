@@ -1559,10 +1559,15 @@ def test_console_decoding_does_not_break_when_python_is_forced_into_utf8_mode(ws
 
     monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "utf-8")
     if os.name == "nt":
-        assert A._console_encoding() != "utf-8", "UTF-8 模式下回退变成了空转"
+        assert "utf-8" not in A._console_encodings(), "UTF-8 模式下回退变成了空转"
+        # **ANSI 和 OEM 都要在候选里。**同一条 run_bash 里两种字节都可能出现:
+        # `type` 一个 ANSI 文件原样吐 ANSI 字节,而 `dir` 打印文件名是 cmd 按 OEM 编的。
+        # 中文 Windows 上两者都是 936,这个区别在我的机器上不存在 —— 写死成 OEM 那一版
+        # 本机全绿,是 CI 的英文 runner(ANSI=1252 / OEM=437)把 café 变成 cafΘ 才红的。
+        assert set(A._console_encodings()) == {"ansi", "oem"}
 
     # 接线本身平台无关:回退用哪个编码,就得真按那个编码解
-    monkeypatch.setattr(A, "_console_encoding", lambda: "gbk")
+    monkeypatch.setattr(A, "_console_encodings", lambda: ("gbk",))
     assert A._decode_console("中文.txt".encode("gbk")) == "中文.txt"
 
 

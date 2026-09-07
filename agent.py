@@ -928,18 +928,21 @@ def run_bash(command: str) -> str:
         out = out[:BASH_MAX_CHARS] + f"\n…(输出共 {len(out)} 字符,已截断到 {BASH_MAX_CHARS};用更精确的命令/grep 缩小范围)"
     return _workspace_hint(command, out, p.returncode != 0)
 
-def _console_encoding() -> str:
-    """回退用的那个编码。**Windows 上是 `oem`,不是 `locale.getpreferredencoding`。**
+def _console_encodings() -> tuple:
+    """回退候选,按优先级。**Windows 上 ANSI 和 OEM 是两个不同的代码页。**
 
-    两件事一起修:
-    ① `PYTHONUTF8=1` 是中文 Windows 上最常见的「万能修法」,而它让
-       `getpreferredencoding` 返回 'UTF-8' —— 于是「utf-8 解不动就换本地码页」
-       变成「utf-8 解不动就再 utf-8 一遍」,回退整个空转。`oem` 不受 UTF-8 模式影响。
-    ② `_decode_console` 的注释说的是「**控制台**代码页」,而 `getpreferredencoding`
-       给的是 **ANSI** 代码页。中文 Windows 上两者恰好都是 936,所以一直没露馅;
-       西欧 Windows 上 ANSI=1252 / OEM=850,`Bär.txt` 解成 `B„r.txt` ——
-       而它 **0 个 U+FFFD**,于是被那个「谁的问号少选谁」的判据选中。"""
-    return "oem" if os.name == "nt" else locale.getpreferredencoding(False)
+    ① 别用 `locale.getpreferredencoding`:`PYTHONUTF8=1`(中文 Windows 上最常见的
+       「万能修法」)让它返回 'UTF-8',于是「utf-8 解不动就换本地码页」变成
+       「utf-8 解不动就再 utf-8 一遍」,回退整个空转。`ansi` / `oem` 这两个编解码器
+       绑的是真实代码页,不受 UTF-8 模式影响。
+    ② **两个都要试。**同一条 run_bash 里两种字节都可能出现:`type 一个 ANSI 文件`
+       原样吐的是 ANSI 字节;而 `dir` 打印文件名是 cmd 自己按**控制台(OEM)**代码页编的。
+       中文 Windows 上两者都是 936,所以这个区别在我的机器上不存在 —— 而它正是
+       CI 的英文 runner(ANSI=1252 / OEM=437)红给我看的:我把回退写死成 OEM,
+       `café` 的 `é` 当场变成 `Θ`。**本机跑绿不等于对。**
+    ③ ANSI 在前:平局时保持原来的行为(那条判据写的就是 ANSI 那一侧)。
+       两边都 0 个问号的时候谁也分不出来 —— 那是字节本身的歧义,不是这里能解决的。"""
+    return ("ansi", "oem") if os.name == "nt" else (locale.getpreferredencoding(False),)
 
 def _decode_console(b: bytes) -> str:
     """UTF-8 优先,明显不是 UTF-8 就按**控制台代码页**再解一次。
@@ -954,9 +957,10 @@ def _decode_console(b: bytes) -> str:
     换行自己收:`text=True` 顺带做的 CRLF → LF,拿 bytes 之后没人做了。"""
     s = b.decode("utf-8", "replace")
     if "�" in s:
-        alt = b.decode(_console_encoding(), "replace")
-        if alt.count("�") < s.count("�"):
-            s = alt
+        for enc in _console_encodings():          # 谁的问号少谁赢,平局保持第一个
+            alt = b.decode(enc, "replace")
+            if alt.count("�") < s.count("�"):
+                s = alt
     return s.replace("\r\n", "\n")
 
 
