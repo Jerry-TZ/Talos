@@ -12,14 +12,19 @@ python recall_benchmark.py selftest
 
 ## 1. Extract candidates
 
-Use the last commit that changed/tuned recall scoring as the cutoff. A whole session is
-excluded when its timestamped filename is at or before the cutoff; messages have no own
-timestamp, so treating a pre-cutoff session as held out would be unverifiable.
+The cutoff is the last commit that changed `recall.py`, and the tool computes it itself.
+**Do not pass a sha by hand.** An earlier version of this file printed one for you to copy;
+`recall.py` then changed 17 more times, and that stale line made 44 queries look "held out"
+when the true count was 0. A number that has to track the code cannot live in prose.
+`--cutoff-commit` still exists, but only to move the line *later* — anything earlier than the
+last tuning commit is refused.
+
+A whole session is excluded when its timestamped filename is at or before the cutoff;
+messages have no own timestamp, so treating a pre-cutoff session as held out would be unverifiable.
 
 ```powershell
 python recall_benchmark.py extract `
   --repo D:\projects\ClaudeCode_projects\github_find\talos-public `
-  --cutoff-commit 9296ab5 `
   --out candidates.jsonl
 ```
 
@@ -74,7 +79,6 @@ negative from being called “hard.”
 python recall_benchmark.py freeze `
   --repo D:\projects\ClaudeCode_projects\github_find\talos-public `
   --dataset dataset.jsonl `
-  --cutoff-commit 9296ab5 `
   --out manifest.json
 ```
 

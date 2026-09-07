@@ -12,12 +12,27 @@ import glob
 import json
 import os
 import re
+import sys
 import time
 import warnings
 
 HOME = os.path.realpath(os.environ.get("TALOS_HOME") or os.path.dirname(os.path.abspath(__file__)))
 SESS_DIR = os.path.join(HOME, ".talos", "sessions")   # sessions follow the agent, not the cwd
-BATCH = "batch-"     # 跑批(`once()`)会话的 slug 前缀 —— 见 `list_sessions` 的注释
+BATCH = "batch-"     # **没有人在敲**的那种会话的 slug 前缀 —— 见 `list_sessions` 的注释。
+                     # 不只是 `once()`:拿脚本喂 stdin 的 repl 也是。判据是「作者是不是人」,
+                     # 不是「走的哪个入口」—— 只认入口的那一版让 44 条我自己写的任务串
+                     # 混进了冻结验证集(benchmarks/recall 那条 `_is_batch` 记了这件事)。
+
+
+def _typed_by_a_human() -> bool:
+    """有没有人在敲。stdin 不是 tty = 它被脚本接管了。
+
+    单独拎成一个函数只为**能被判据换掉** —— 直接在 `new()` 里写 `sys.stdin.isatty()`,
+    测试里 pytest 早把 stdin 换成了一个 isatty() 恒假的东西,判据就分不出真假两侧。"""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError):     # stdin 被关掉 / 被换成没有 isatty 的东西
+        return False
 
 def _slug(text: str, n: int = 24) -> str:
     """把第一句 prompt 压成文件名安全的短标题(保留中英数字)。"""
@@ -48,7 +63,7 @@ class Session:
         self.batch = batch          # 只影响首次 save 起的名字;之后身份就写在文件名里了
 
     @classmethod
-    def new(cls, batch: bool = False) -> "Session":
+    def new(cls, batch: bool | None = None) -> "Session":
         """秒级时间戳**不保证唯一**,而这里的 id 是会话的全部身份。
 
         同一秒起两个会话就是同一个 sid。两个文件都写得出来(slug 不同),
@@ -84,6 +99,10 @@ class Session:
         # UTC 没有回拨。NTP 大幅校正仍然能撞,但那不是每年都发生的事,记在 FINDINGS 里。
         # 文件名的可读性代价:时间戳变成 UTC,看文件名对不上本地时钟 —— `/history`
         # 显示的时间走 mtime,不受影响。
+        # `batch=None` = 没人说,那就**看有没有人在敲**。默认值放在这儿而不是三个调用点上:
+        # `repl()` 里 `Session.new()` 有三处,枚举它们就是下一次漏掉一处。
+        if batch is None:
+            batch = not _typed_by_a_human()
         base = sid = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         os.makedirs(SESS_DIR, exist_ok=True)
         for stale in glob.glob(os.path.join(SESS_DIR, "*.claim")):

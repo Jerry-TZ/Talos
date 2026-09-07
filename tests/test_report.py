@@ -227,3 +227,40 @@ def test_an_unattended_run_is_not_a_user_query(tmp_path):
     # 常数跟 session.py 共用,不许两边各写各的(同一条规则两处实现,这仓库记过三次)
     import session
     assert B._BATCH_PREFIX == session.BATCH
+
+
+def test_the_cutoff_cannot_be_older_than_the_last_time_recall_was_tuned(tmp_path, monkeypatch):
+    """截止线比最后一次调参早,「未参与调参」这五个字就是假的 —— 而它是绿的。
+
+    真事(2026-09-07):README 里让人手抄的 cutoff 是 `9296ab5`(08-04),
+    而 `recall.py` 在那之后又改了 **17 次**,最后一次是 08-21。
+    拿 README 那个跑:**44 条合格、exit 0**;换成真正的最后一次:**0 条、exit 2**。
+    门槛看着是过的,过的理由是文档里那行字过期了。
+
+    **一个必须跟着代码走的数字,不能住在文档里** —— 住在那儿它只会在第一天是对的。"""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "benchmarks", "recall"))
+    import recall_benchmark as B
+    import datetime as dt
+    from pathlib import Path
+
+    (tmp_path / ".talos" / "sessions").mkdir(parents=True)
+    t0 = dt.datetime(2026, 8, 4, tzinfo=dt.timezone.utc)
+    monkeypatch.setattr(B, "_tuning_cutoff", lambda repo: "NEWER")
+    monkeypatch.setattr(B, "_commit_time", lambda repo, c: t0 + dt.timedelta(days=17 if c == "NEWER" else 0))
+
+    try:
+        B.collect_candidates(Path(tmp_path), "STALE")
+    except ValueError as e:
+        assert "NEWER" in str(e), f"报错里得指出该用哪个提交,不然人只会再抄一次:{e}"
+    else:
+        raise AssertionError("过期的截止线被收下了 —— 那 44 条「合格」就是这么来的")
+
+    # 等于最后一次调参那个提交,是合法的(它就是那条线本身)
+    monkeypatch.setattr(B, "_commit_time", lambda repo, c: t0)
+    B.collect_candidates(Path(tmp_path), "SAME")
+
+    # 不填就得自己算出来,不是把 None 一路传下去 ——「别让人抄」的另一半在这儿:
+    # 只挡住抄错的、却还要求人必须填,那行字迟早又会出现在某份文档里。
+    assert B._resolve_cutoff(Path(tmp_path), None) == "NEWER", "不填截止线时它没去算"

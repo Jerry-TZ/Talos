@@ -306,7 +306,9 @@ def test_a_batch_run_never_becomes_what_continue_lands_on(ws, monkeypatch):
     正是加这个功能的理由。所以隔的只有 `latest_sid` 一处,别的一律照旧。"""
     import glob
     import session as S
-    human = S.Session.new()
+    # 显式 `batch=False`:默认值现在看 stdin 是不是 tty,而 pytest 下它恒假 ——
+    # 这一条要的是「人自己开的」这个语义,不该跟跑测试的环境有没有终端挂钩。
+    human = S.Session.new(batch=False)
     human.save([{"role": "user", "content": "人自己开的"}])
     batch = S.Session.new(batch=True)                      # 后写 → mtime 更新
     batch.save([{"role": "user", "content": "跑批开的"}])
@@ -373,3 +375,26 @@ def test_the_return_value_of_delete_is_never_dropped():
            and ast.unparse(n.value).startswith("S.delete(")]
     assert not bad, (f"agent.py 第 {bad} 行把 S.delete 的返回值丢了 —— "
                      f"删失败照样会印「已删除」")
+
+
+def test_a_session_nobody_typed_into_does_not_count_as_a_human_asking(ws, monkeypatch):
+    """`-p` 不是唯一一条「不是人在问」的路 —— 拿脚本喂 stdin 的 repl 也是。
+
+    真事(2026-09-07):冻结验证集里 44 条「合格」查询,全是我自己写的基准任务串
+    (「在 workspace 建 shop/ 目录,用脚本生成 orders.csv 共 200 行…」),
+    只不过敲进的是交互 repl,不是 `-p`。`benchmarks/recall` 那条 `_is_batch` 的
+    docstring 说的理由是**作者是谁**(「它的用户消息是我自己写的任务串,不是人在问」),
+    实现买到的只是**文件名前缀**。理由比实现宽,而宽出来的那一档正好是最好走的那条。
+
+    判据不去数 `Session.new()` 有几个调用点 —— 数出来的名单永远落后一次改动。
+    钉的是**默认值本身**:没人指定的时候,它跟「有没有人在敲」是同一件事。
+
+    边界两条,都往保守一侧偏:人在一个没有 tty 的终端里用 Talos 会被算成跑批
+    (语料少几条,比把我写的任务当成真人查询安全);而脚本 `--resume` 一个人开的会话、
+    往里追加消息,那些消息仍然落在非跑批的文件里 —— 这一条 tty 看不见,记在 FINDINGS。"""
+    import session as S
+    monkeypatch.setattr(S, "_typed_by_a_human", lambda: False)
+    assert S.Session.new().batch is True, "脚本喂进去的会话被当成人在问了"
+    monkeypatch.setattr(S, "_typed_by_a_human", lambda: True)
+    assert S.Session.new().batch is False, "人在敲的会话被算成跑批,真语料会被排掉"
+    assert S.Session.new(batch=True).batch is True, "显式指定必须说了算"

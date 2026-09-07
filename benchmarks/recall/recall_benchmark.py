@@ -156,11 +156,42 @@ def _is_batch(path: Path) -> bool:
     return slug.startswith(_BATCH_PREFIX)
 
 
-def collect_candidates(repo: Path, cutoff_commit: str, min_chars: int = 12) -> list[dict]:
+def _tuning_cutoff(repo: Path) -> str:
+    """检索打分最后一次被动过的那个提交 —— 冻结验证集的截止线只能是它。
+
+    **不许手抄。** 上一版把它写在 README 里让人复制到命令行,而 `recall.py` 在那之后
+    又改了 17 次:拿 README 那个(2026-08-04)跑,44 条查询「合格」、exit 0;
+    换成真正的最后一次(2026-08-21),0 条、exit 2。**门槛是过的,过的理由是那行字过期了。**
+
+    边界:只看 `recall.py`。纯注释改动也会把线往后推 —— 那是**保守方向**(合格的更少),
+    比漏掉一次真调参安全得多。反过来:调参要是发生在 `agent.py` 那一侧,这条看不见。"""
+    out = _git(repo, "log", "-1", "--format=%H", "--", "recall.py")
+    if not out:
+        raise ValueError(f"{repo} 里查不到 recall.py 的提交历史 —— 截止线无从算起")
+    return out
+
+
+def _resolve_cutoff(repo: Path, cutoff_commit: str | None) -> str:
+    """定下截止线,并且**只许往后挪、不许往前挪**。
+
+    不填就用 `_tuning_cutoff`。填了也照样校验 —— 留这个口子是为了「想更保守」,
+    不是为了「想让更多查询合格」。挡在这儿而不是命令行:extract / freeze / run
+    三条路全都经过 `collect_candidates`,一处实现管住三条。"""
+    tuning = _tuning_cutoff(repo)
+    if cutoff_commit is None:
+        return tuning
+    if _commit_time(repo, cutoff_commit) < _commit_time(repo, tuning):
+        raise ValueError(
+            f"截止线 {cutoff_commit} 早于最后一次改动 recall.py 的提交 {tuning[:7]} —— "
+            f"这条线之前的查询都参与过调参,拿它们当验证集是自证。改用 {tuning[:7]}。")
+    return cutoff_commit
+
+
+def collect_candidates(repo: Path, cutoff_commit: str | None = None, min_chars: int = 12) -> list[dict]:
     sessions = repo / ".talos" / "sessions"
     if not sessions.is_dir():
         raise ValueError(f"missing sessions directory: {sessions}")
-    cutoff = _commit_time(repo, cutoff_commit)
+    cutoff = _commit_time(repo, _resolve_cutoff(repo, cutoff_commit))
     rows = []
     for path in sorted(sessions.glob("*.jsonl")):
         started = _session_time(path)
@@ -379,8 +410,8 @@ def cmd_freeze(args) -> int:
         "case_count": len(cases),
         "task_count": args.tasks,
         "stress_count": args.stress,
-        "cutoff_commit": args.cutoff_commit,
-        "cutoff_commit_time": _commit_time(repo, args.cutoff_commit).isoformat(),
+        "cutoff_commit": _resolve_cutoff(repo, args.cutoff_commit),
+        "cutoff_commit_time": _commit_time(repo, _resolve_cutoff(repo, args.cutoff_commit)).isoformat(),
         "repo_commit": _git(repo, "rev-parse", "HEAD"),
         "corpus_sha256": _corpus_hashes(repo),
     }
@@ -598,7 +629,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     e = sub.add_parser("extract", help="extract and audit real session queries")
     e.add_argument("--repo", required=True)
-    e.add_argument("--cutoff-commit", required=True)
+    # 不填就自己算(= 最后一次动过 recall.py 的提交)。填了也照样被 collect_candidates 校验:
+    # 留着这个口子只为「想更保守地往后挪」,不为「想往前挪」。
+    e.add_argument("--cutoff-commit", default=None)
     e.add_argument("--out", required=True)
     e.add_argument("--min-chars", type=int, default=12)
     e.add_argument("--require", type=int, default=DATASET_TASKS + DATASET_STRESS)
@@ -612,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
     f = sub.add_parser("freeze", help="validate and freeze a labeled dataset")
     f.add_argument("--repo", required=True)
     f.add_argument("--dataset", required=True)
-    f.add_argument("--cutoff-commit", required=True)
+    f.add_argument("--cutoff-commit", default=None)
     f.add_argument("--out", required=True)
     f.add_argument("--tasks", type=int, default=DATASET_TASKS)
     f.add_argument("--stress", type=int, default=DATASET_STRESS)
