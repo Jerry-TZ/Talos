@@ -90,11 +90,19 @@ def _frontmatter_desc(txt: str) -> str:
     if txt.startswith("---"):
         end = txt.find("\n---", 3)
         if end != -1:
+            # **和 `agent._parse_frontmatter` 用同一套切法**:`split(":", 1)` 再 strip。
+            # 上一版是 `line.startswith("name:")`,缩进一格就认不出 —— 于是同一个技能文件
+            # 在 agent 眼里有名字、在检索索引里只是正文前 60 个字符,命中率跟着塌,
+            # 而两边各自看都是对的,只有放在一起才看得出分歧。
+            # 判据钉的就是这个:tests/test_memory.py::…_two_frontmatter_parsers_never_disagree
             for line in txt[3:end].splitlines():
-                if line.startswith("name:"):
-                    name = line[5:].strip()
-                elif line.startswith("description:"):
-                    desc = line[12:].strip()
+                if ":" not in line:
+                    continue
+                k, v = line.split(":", 1)
+                if k.strip() == "name":
+                    name = v.strip()
+                elif k.strip() == "description":
+                    desc = v.strip()
     return skill_label(name, desc) or txt[:60]
 
 # 来源标记:复盘写的行会被打上 `<!-- reflect YYYY-MM-DD -->`(由代码补,不指望模型自觉)。

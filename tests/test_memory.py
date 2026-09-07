@@ -1988,3 +1988,50 @@ def test_an_env_template_is_documentation_not_a_credential_file(ws):
         assert A._is_secret_path(name), f"{name} 该拦"
     for name in (".env.example", ".env.sample", ".env.template", ".env.dist"):
         assert not A._is_secret_path(name), f"{name} 是模板,不是凭据"
+
+
+def test_the_two_frontmatter_parsers_never_disagree():
+    """同一份 frontmatter,`agent._parse_frontmatter` 和 `recall._frontmatter_desc`
+    必须认出同一个 name / description。
+
+    两份实现:agent 那份 `split(":", 1)` 再 strip,recall 那份 `line.startswith("name:")`。
+    于是 `  name: foo`(缩进一格)在 agent 眼里有名字,在检索索引里**没有** ——
+    那条技能进索引时用的是正文前 60 个字符,检索命中率跟着塌,而没有任何报错。
+    这是「同一条规则两处实现」在这个仓库里的第 N 次,也是最难看见的一次:
+    两边各自都是对的,只有**放在一起**才看得出分歧。
+
+    不合并(agent 惰性导入 recall,反过来会循环),改成钉住它们的**一致性** ——
+    任何一边漂了都红。判据里的用例是「容易写出来的手滑」,不是穷举。"""
+    import agent as A
+    R = A.recall_mod()
+    cases = [
+        "---\nname: a\ndescription: d\n---\n正文",
+        "---\n  name: a\n  description: d\n---\n正文",          # 缩进
+        "---\nname:   a\ndescription:\td\n---\n正文",           # 多余空白
+        "---\nname: a\ndescription: 用于:x:y\n---\n正文",       # 值里有冒号
+        "---\nname: a\n---\n正文",                              # 只有 name
+        "没有 frontmatter 的正文",
+    ]
+    for txt in cases:
+        meta, _body = A._parse_frontmatter(txt)
+        expect = R.skill_label(meta.get("name", ""), meta.get("description", ""))
+        if not expect:
+            continue                                            # 两边都退回正文,没什么好比的
+        assert R._frontmatter_desc(txt) == expect, (
+            f"两个解析器对同一份 frontmatter 给出不同答案:\n  agent -> {expect!r}\n"
+            f"  recall -> {R._frontmatter_desc(txt)!r}\n  输入:{txt!r}")
+
+
+def test_a_command_line_switch_is_not_the_rm_command(ws):
+    """`docker run --rm` 里那个 `--rm` 是开关,不是 rm。
+
+    `\brm\b` 会命中它(`-` 不是词字符),于是每一条 docker 命令都走危险路径:
+    多一次确认框,而且「本会话都允许」对删除不生效 —— 用 docker 的人每条都要按。
+    `--recurse` / `-rm` 之类同理。判据两向都钉,免得改成永不匹配也能绿。"""
+    import agent as A
+    for cmd in ("docker run --rm -it ubuntu", "tar --remove-files -cf a.tar b",
+                "npm ci --registry=x"):
+        assert not A._DESTRUCTIVE.search(cmd), f"开关被当成删除命令:{cmd}"
+    for cmd in ("rm -rf build", "sudo rm x", "del a.txt", "Remove-Item x",
+                "python -c 'x' && rm y"):
+        assert A._DESTRUCTIVE.search(cmd), f"这条真的在删东西:{cmd}"

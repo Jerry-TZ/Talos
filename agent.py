@@ -55,7 +55,13 @@ def _load_dotenv(path: str = ".env") -> None:
     if not os.path.exists(path):
         return
     skipped = []
-    with open(path, encoding="utf-8") as f:
+    # `utf-8-sig` + `errors="replace"`:`.env` 是**用记事本编辑**的那种文件。
+    # 记事本存的带 BOM,于是第一个键变成 `﻿TALOS_PROVIDER`,静默丢掉 ——
+    # 人改了 .env 却什么也没发生。一行本地码页的中文注释更狠:`UnicodeDecodeError`
+    # 在**导入时**抛出(这个函数跑在模块最外层,外面没有 try),Talos 直接起不来。
+    # 下面那段注释为「一个手滑的空键让 import 失败」修过一次,理由一模一样 ——
+    # 当时只补了空键那一格。
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -831,12 +837,16 @@ def edit_file(path: str, old: str, new: str) -> str:
             f"{path} 按 utf-8 和本机代码页都解不干净(里面有解不出来的字节),"
             "edit_file 拒绝写回去 —— 写回去会把那些字节永久替换掉。"
             "先确认它的真实编码,用 run_bash 里的工具改,或者另存一份再改。")
-    if old not in text and "\r\n" in text:
-        # Models emit \n; a file written on Windows by anything else holds \r\n. Retry in the
-        # file's own line endings rather than reporting "not found" on text that is right there.
-        crlf_old, crlf_new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
-        if crlf_old in text:
-            old, new = crlf_old, crlf_new
+    if "\r\n" in text:
+        # **文件是 CRLF,插进去的那段也得是 CRLF。**上一版只在「`old` 直接找不到」时才转,
+        # 而 `old` 是单行的时候它找得到 —— 于是 `new` 保持 LF 写进去,一个 .bat / .ps1 里
+        # 就出现混合换行。cmd 对混行的反应不是报错,是行为古怪,而这类文件正是
+        # Windows 上最常被编辑的。模型永远吐 \\n,所以先归一再按文件的换行铺开。
+        new = new.replace("\r\n", "\n").replace("\n", "\r\n")
+        if old not in text:
+            crlf_old = old.replace("\r\n", "\n").replace("\n", "\r\n")
+            if crlf_old in text:
+                old = crlf_old
     n = text.count(old)
     if n == 0:
         raise ValueError("`old` string not found in file — 先 read_file 看真实内容,"
@@ -918,6 +928,19 @@ def run_bash(command: str) -> str:
         out = out[:BASH_MAX_CHARS] + f"\n…(输出共 {len(out)} 字符,已截断到 {BASH_MAX_CHARS};用更精确的命令/grep 缩小范围)"
     return _workspace_hint(command, out, p.returncode != 0)
 
+def _console_encoding() -> str:
+    """回退用的那个编码。**Windows 上是 `oem`,不是 `locale.getpreferredencoding`。**
+
+    两件事一起修:
+    ① `PYTHONUTF8=1` 是中文 Windows 上最常见的「万能修法」,而它让
+       `getpreferredencoding` 返回 'UTF-8' —— 于是「utf-8 解不动就换本地码页」
+       变成「utf-8 解不动就再 utf-8 一遍」,回退整个空转。`oem` 不受 UTF-8 模式影响。
+    ② `_decode_console` 的注释说的是「**控制台**代码页」,而 `getpreferredencoding`
+       给的是 **ANSI** 代码页。中文 Windows 上两者恰好都是 936,所以一直没露馅;
+       西欧 Windows 上 ANSI=1252 / OEM=850,`Bär.txt` 解成 `B„r.txt` ——
+       而它 **0 个 U+FFFD**,于是被那个「谁的问号少选谁」的判据选中。"""
+    return "oem" if os.name == "nt" else locale.getpreferredencoding(False)
+
 def _decode_console(b: bytes) -> str:
     """UTF-8 优先,明显不是 UTF-8 就按**控制台代码页**再解一次。
 
@@ -931,7 +954,7 @@ def _decode_console(b: bytes) -> str:
     换行自己收:`text=True` 顺带做的 CRLF → LF,拿 bytes 之后没人做了。"""
     s = b.decode("utf-8", "replace")
     if "�" in s:
-        alt = b.decode(locale.getpreferredencoding(False), "replace")
+        alt = b.decode(_console_encoding(), "replace")
         if alt.count("�") < s.count("�"):
             s = alt
     return s.replace("\r\n", "\n")
@@ -1700,7 +1723,7 @@ MODES = ("plan", "default", "acceptEdits", "bypass")
 # (see FINDINGS): each time the anchor was the hole. False positives here cost one keypress.
 _DESTRUCTIVE = re.compile(
     r"\b(del|erase|rd|rmdir)\b"                                  # cmd.exe
-    r"|\brm\b"                                                   # posix
+    r"|(?<![-\w])rm\b"                                       # posix;`--rm` 是开关不是命令
     r"|\bRemove-Item\b|\bri\b",                                  # powershell (ri = alias)
     re.IGNORECASE)
 
@@ -1816,6 +1839,10 @@ _QUOTED = re.compile(r'"([^"\n]{1,260})"' r"|'([^'\n]{1,260})'")
 # 200 是拍的,不是量的 —— 超了会退成记目录,不会静默丢。真嫌粗了再往上调。
 _GLOB_MAX = 200
 
+# Windows 的保留设备名。`os.path.exists("nul")` 是 True,而它不是文件 ——
+# 按扩展名前那一段比(`nul` / `NUL.txt` 在 Windows 上都指同一个设备)。
+_DEVICES = {"nul", "con", "prn", "aux"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)}
+
 def _targets(cmd: str, globs: bool = True) -> set:
     """命令里提到的文件。
 
@@ -1830,6 +1857,10 @@ def _targets(cmd: str, globs: bool = True) -> set:
     **多记的代价是多弹一次框,少记的代价是文件没了。** 所以一律往多了记。
     """
     out = set(_FILENAME.findall(cmd))          # 别改成 _targets —— 这就是 _targets
+    # **设备名不是文件。**`os.path.exists("nul")` 在 Windows 上是 True,于是
+    # `type a.py > nul` 把 `nul` 也记下来;拒过一次带 `> nul` 的命令之后,此后每一条
+    # `>nul` / `2>nul` 都要弹框 —— 而那是模型最常用的静音写法。上面那句「多记的代价
+    # 是多弹一次框」在这儿不成立:多记的是一个几乎每条命令都会用到的词。
     cand = [t for t in _TOKEN.findall(cmd)]
     cand += [g for m in _QUOTED.findall(cmd) for g in m if g]   # 引号里的整段(可能带空格)
     for tok in cand:
@@ -1876,7 +1907,7 @@ def _targets(cmd: str, globs: bool = True) -> set:
     # (`..\x` 里 `..` 后面是分隔符,边界成立),从此往上一级的命令条条弹框。
     # `t.strip(".")` 只滤掉「除了点什么都没有」的,`.env` / `.gitignore` / `a.` 一个不误伤。
     return {t for t in out | {os.path.basename(t.rstrip("\\/")) for t in out}
-            if t and t.strip(".")}
+            if t and t.strip(".") and t.split(".")[0].lower() not in _DEVICES}
 
 
 # 名字必须被当成**一个独立的名字**提到,不是随便出现在某个更长的词里面。
@@ -2224,7 +2255,14 @@ def _workspace_listing(limit: int = GOAL_LISTING_MAX) -> str:
     都加一个,为判断器的方便扩大主循环的工具面,代价不对等。"""
     out = []
     for root, dirs, files in os.walk(WORKSPACE):
-        dirs[:] = [d for d in dirs if not d.startswith((".", "__")) and d != "node_modules"]
+        # **复用 `_NO_READ_DIRS`,不在这儿再写一张表。**上一版只滤点开头、双下划线和
+        # node_modules —— `venv`(没有点)、`build`、`dist`、`site-packages` 一个不滤,
+        # 而清单有上限:工作区里有个 venv,几千个文件就能把预算占满,
+        # `out/report.md` 直接不在清单里,判断器看不见交付物只能退回去信对话 ——
+        # 那正是这道闸整个设计要避开的东西。
+        # `dirs` 顺带排序:清单被截断时,至少截在一个**稳定**的位置上。
+        dirs[:] = sorted(d for d in dirs
+                         if not d.startswith((".", "__")) and d not in _NO_READ_DIRS)
         for f in sorted(files):
             p = os.path.join(root, f)
             try:

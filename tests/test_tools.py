@@ -1514,3 +1514,111 @@ def test_a_tool_without_a_description_says_so_instead_of_raising_a_bare_key(ws):
         raise AssertionError(f"裸 KeyError,模型只会收到 error: {e}")
     else:
         raise AssertionError("没有 description 也注册成功了")
+
+
+def test_a_dotenv_with_a_bom_or_a_local_codepage_comment_still_starts_talos(ws, tmp_path):
+    """`.env` 是**用记事本编辑**的那种文件 —— 它带 BOM,注释是本地码页。
+
+    两个实测:
+    ① Notepad 存的 `.env`(UTF-8 with BOM)→ 第一个键变成 `\ufeffTALOS_PROVIDER`,
+       **静默丢掉**。人改了 .env 却什么也没发生,而这是最难查的一类。
+    ② 一行 GBK 中文注释 → `UnicodeDecodeError` 在**导入时**抛出,Talos 起不来。
+       `_load_dotenv` 跑在模块最外层,外面没有 try。
+
+    同一个函数为「一个手滑的空键让 import 失败」修过一次,理由写的是
+    「模块导入时跑的、外面没有 try」—— 一模一样的形状,当时只补了空键那一格。"""
+    import agent as A
+    p = tmp_path / ".env"
+
+    p.write_bytes("\ufeffTALOS_PROVIDER=glm\n".encode("utf-8"))
+    A._DOTENV.clear()
+    A._load_dotenv(str(p))
+    assert "TALOS_PROVIDER" in A._DOTENV, f"BOM 把第一个键吃掉了:{list(A._DOTENV)}"
+
+    p.write_bytes("# 中文注释\nTALOS_X=1\n".encode("gbk"))
+    A._DOTENV.clear()
+    A._load_dotenv(str(p))                     # 不许抛 —— 抛了 Talos 就起不来
+    assert "TALOS_X" in A._DOTENV, f"本地码页的注释把整个文件废了:{list(A._DOTENV)}"
+
+
+def test_console_decoding_does_not_break_when_python_is_forced_into_utf8_mode(ws, monkeypatch):
+    """`PYTHONUTF8=1` 是中文 Windows 上最常见的「万能修法」,而它让这条回退整个失效。
+
+    `_decode_console` 的回退用 `locale.getpreferredencoding(False)`,而 UTF-8 模式下
+    它返回 'UTF-8' —— 于是「utf-8 解不动就换本地码页」变成「utf-8 解不动就再 utf-8 一遍」,
+    `dir` 一个中文名文件照样是 `����`。
+    更难看的是 `tests/test_tools.py` 那条判据**用同一个 `getpreferredencoding`
+    去写测试文件**,所以这个配置下它照样绿 —— 判据和被判对象共享同一个盲点。
+
+    顺带一条:那个函数的注释说的是「**控制台**代码页」,而 `getpreferredencoding`
+    给的是 ANSI 代码页。中文 Windows 上两者恰好都是 936,西欧 Windows 上
+    ANSI=1252 / OEM=850,`Bär.txt` 会解成 `B„r.txt` —— 而它 0 个 U+FFFD,所以被选中。"""
+    import locale
+    import os
+    import agent as A
+
+    monkeypatch.setattr(locale, "getpreferredencoding", lambda *a: "utf-8")
+    if os.name == "nt":
+        assert A._console_encoding() != "utf-8", "UTF-8 模式下回退变成了空转"
+
+    # 接线本身平台无关:回退用哪个编码,就得真按那个编码解
+    monkeypatch.setattr(A, "_console_encoding", lambda: "gbk")
+    assert A._decode_console("中文.txt".encode("gbk")) == "中文.txt"
+
+
+def test_a_windows_device_name_is_not_a_file(ws):
+    """`os.path.exists("nul")` 在 Windows 上是 True,而 nul 不是文件。
+
+    `_targets("type a.py > nul")` 记下 `nul`,于是拒过一次带 `> nul` 的命令之后,
+    此后**每一条** `>nul` / `2>nul` 都要弹框 —— 而那是模型最常用的静音写法。
+    `_targets` 的注释写着「多记的代价是多弹一次框」,那句话在这儿不成立:
+    多记的是一个所有命令都会用到的词,代价是从此每条命令都弹。"""
+    import agent as A
+    assert A._targets("type a.py > nul") == {"a.py"}, "nul 被当成文件记下了"
+    assert A._targets("dir > con") == set(), "con 也是设备名"
+
+
+def test_the_judge_does_not_spend_its_listing_budget_on_venv(ws):
+    """判断器的文件清单有上限,而 `venv/` 一个目录就能把它占满。
+
+    `_workspace_listing` 只滤掉点开头、双下划线开头和 `node_modules` ——
+    `venv`(没有点)、`build`、`dist`、`site-packages` 一个都不滤。
+    工作区里有个 venv 的话,几千个文件按 `os.walk` 的顺序进来,
+    上限一到,`out/report.md` 就**不在清单里**了 —— 判断器看不见交付物,
+    只能退回去看对话里的说法,而那正是这道闸整个设计要避开的东西。
+
+    复用 `_NO_READ_DIRS`(它已经是 `_TRASH_SKIP` 加 build/dist/site-packages),
+    不在这儿再写一张表 —— 这份记录里「同一张名单两处维护」已经记过五次。
+    顺带 `dirs` 也排一下序:清单被截断时,至少截在一个**稳定**的位置上。"""
+    import os
+    import agent as A
+    for d in ("venv", "build", "dist", "src"):
+        os.makedirs(os.path.join(A.WORKSPACE, d), exist_ok=True)
+        with open(os.path.join(A.WORKSPACE, d, "f.py"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+    with open(os.path.join(A.WORKSPACE, "report.md"), "w", encoding="utf-8") as f:
+        f.write("交付物\n")
+
+    listing = A._workspace_listing()
+    assert "report.md" in listing
+    assert "src" in listing, "正常源码目录不该被滤掉"
+    for d in ("venv", "build", "dist"):
+        assert d not in listing, f"{d}/ 占了判断器的清单预算:{listing[:200]}"
+
+
+def test_editing_a_crlf_file_does_not_leave_mixed_line_endings(ws):
+    """CRLF 的文件里插进一段多行文本,那段得也是 CRLF。
+
+    上一版只在「`old` 直接找不到」时才把两边一起转成 CRLF。而 `old` 是单行的时候
+    它**找得到** —— 于是 `new` 保持 LF 原样写进去,一个 .bat / .ps1 里就出现了混合换行。
+    cmd 对混行的反应不是报错,是**行为古怪**,而这类文件正是 Windows 上最常被编辑的。"""
+    import os
+    import agent as A
+    p = os.path.join(A.WORKSPACE, "go.bat")
+    with open(p, "wb") as f:
+        f.write(b"@echo off\r\nset X=1\r\n")
+    out, err = A.run_tool("edit_file", {"path": "go.bat", "old": "set X=1",
+                                        "new": "set X=1\nset Y=2"})
+    assert not err, out
+    raw = open(p, "rb").read()
+    assert b"\n" not in raw.replace(b"\r\n", b""), f"混合换行:{raw!r}"
