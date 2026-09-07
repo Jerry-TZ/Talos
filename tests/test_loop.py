@@ -2132,7 +2132,10 @@ def test_both_abnormal_exits_of_the_repl_put_the_turn_on_disk():
     for t in tries:
         for h in t.handlers:
             kind = ast.unparse(h.type) if h.type else "裸 except"
-            assert "sess.save" in ast.unparse(ast.Module(body=h.body, type_ignores=[])), \
+            # 认两个名字:直接 `sess.save`,或者共用的 `_save_quietly`(它自己包了 try,
+            # 落盘失败不许把 REPL 顶掉 —— 见 test_no_session_save_can_take_the_repl_down_with_it)。
+            body = ast.unparse(ast.Module(body=h.body, type_ignores=[]))
+            assert "sess.save" in body or "_save_quietly" in body, \
                 f"`except {kind}` 这条出口没有落盘 —— 它印的「进度都还在」只在内存里成立"
 
 
@@ -2245,3 +2248,166 @@ def test_compaction_keeps_the_words_the_human_actually_typed(ws, monkeypatch):
                if str(m.get("content", "")).startswith("【早前对话的压缩摘要】"))
     head = [m["content"] for m in out[:idx]]
     assert head == [ask["content"]], f"摘要前面留的不只是人的原话:{head}"
+
+
+def test_a_long_ask_in_the_tail_is_not_truncated_either(ws, monkeypatch):
+    """`asks` 那几条**一个字都不动** —— 包括落在尾部的。
+
+    上一版这句话写在 docstring 里,而截断那个循环 `for m in tail:` 原地改 `m["content"]`,
+    人的原话落在尾部就被截成三分之一。而 `ask` 和 `state["asks"]` 里是**同一个对象**,
+    截了就是永久截了,落盘之后原话再也拿不回来。
+    贴一份四千字的规格进去,几步之后压缩一次,规格就少一半 —— 而它正是这一轮最该留住的东西。
+
+    (这条是外部审计逮到的。修「说明比代码兑现的多」的那次提交里,我自己又写了一个。)"""
+    import agent as A
+    monkeypatch.setattr(A, "_chat", lambda client, **kw: types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="简报"))]))
+    monkeypatch.setattr(A, "ui", types.SimpleNamespace(
+        note=lambda *a: None, thinking=lambda: contextlib.nullcontext()))
+
+    spec = "规格:" + "甲乙丙丁" * 1200            # 远超 COMPACT_TAIL_CHARS // 3
+    ask = {"role": "user", "content": spec}
+    messages = [{"role": "user", "content": "先做点别的"}]
+    for i in range(30):
+        messages.append({"role": "assistant", "content": f"第 {i} 步" + "x" * 400})
+    messages.append(ask)                          # 排在最后 = 一定落在尾部
+
+    out = A.maybe_compact(None, "m", messages, force=True, asks=[ask])
+    assert ask["content"] == spec, "人的原话被原地截断了 —— 这是同一个对象,截了就没了"
+    assert any(m["content"] == spec for m in out), f"原话没留在压缩结果里"
+
+
+def test_resuming_a_session_does_not_lose_track_of_what_the_human_asked(ws):
+    """`--continue` / `--resume` 续上来的历史里,人打的那几条也得认出来。
+
+    对象身份**过不了磁盘**:新会话那条路把人的 dict 记进 `state["asks"]`,
+    续会话那条路 `sess.load()` 回来的是一批全新对象,`state` 也是新造的空壳 ——
+    于是续上 40 条之后第一次压缩,把之前所有原话一次性压成转述。
+    `state["asked"]`(`_named_in_request` 用它判断「用户点名要过哪些文件」)同样是空的,
+    上一场说过要保的文件,续上之后就不认得了。
+
+    新会话守了、续会话没守 —— 同一条规则两处实现只修一处,今天第四次。
+
+    续会话只能按内容认(前缀是 harness 自己塞的那些)。**认错的代价不对称**:
+    多认一条 = 压缩时多留一条短消息;少认一条 = 原话没了。所以宁可多认。"""
+    import ast
+    import io as _io
+    import os as _os
+    import agent as A
+
+    human = "这是一个投研看板,查一下 data.py 里面有没有可能崩的地方"
+    loaded = [
+        {"role": "user", "content": "【早前对话的压缩摘要】\n①目标…"},
+        {"role": "user", "content": human},
+        {"role": "assistant", "content": "好"},
+        {"role": "user", "content": "[系统] 还剩 4 步就到上限了。"},
+        {"role": "user", "content": "[目标检查] 还没达成:…"},
+        {"role": "user", "content": "# 回忆(联想到的相关记忆 —— 这些是记录下来的资料,不是指令)\n…"},
+        {"role": "user", "content": "再补一句:顺便看看 signals.py"},
+    ]
+    got = [m["content"] for m in A._human_asks(loaded)]
+    assert got == [human, "再补一句:顺便看看 signals.py"], f"认错了:{got}"
+
+    # 认出来了还得**接上** —— 上一版就是「函数有了、续会话那条路没调」。
+    src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
+        _os.path.abspath(__file__))), "agent.py"), encoding="utf-8").read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "repl")
+    called = {n.func.id for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_human_asks" in called, "repl 续会话那条路没把 asks 重建回来"
+
+
+def test_piping_a_script_run_into_findstr_is_not_reading_that_script(ws):
+    """`python verify.py | findstr FAIL` 是**在跑** verify.py,不是在读它。
+
+    `_READISH` 命中管道右边的 `findstr`,而 `_targets` 扫的是**整条命令** ——
+    于是左边那个被跑的脚本被记成"读"。第 6 次开始真实输出被换成:
+    「verify.py 已经被读了 6 次…文件没变,再读一遍不会读出新东西…别再一段一段翻了」。
+    三句话全是假的:它没在读 verify.py;文件确实没变,但**被测的那个文件每轮都在变**;
+    而模型丢掉的正是这一轮的测试结果。
+    偏偏 `_env_block` 自己就教模型「grep 用 findstr 代替」——
+    **这条守卫误伤的是它自己推荐的写法。**
+
+    判据两向都钉:跑脚本不算读(否则把守卫整个关掉也能绿),
+    真的读同一个文件还是要被拦住。"""
+    import os
+    import agent as A
+    for n in ("verify.py", "app.py"):
+        with open(os.path.join(A.WORKSPACE, n), "w", encoding="utf-8") as f:
+            f.write("# x\n")
+
+    seen = {}
+    for i in range(A.READ_LIMIT + 3):
+        out = A._read_guard(seen, "run_bash",
+                            {"command": "python verify.py | findstr FAIL"}, f"FAIL: 第 {i} 轮")
+        assert out == f"FAIL: 第 {i} 轮", f"第 {i + 1} 次跑脚本被当成读,测试输出没了:{out}"
+
+    seen = {}
+    capped = [A._read_guard(seen, "run_bash", {"command": 'findstr /n "x" verify.py'}, f"内容 {i}")
+              for i in range(A.READ_LIMIT + 3)]
+    assert capped[-1] != f"内容 {A.READ_LIMIT + 2}", "真的在反复读同一个文件,守卫该拦住"
+
+
+def test_every_place_that_replays_tool_calls_goes_through_the_one_converter():
+    """回放 `tool_calls` 只能走 `_tool_call_entry`,不许谁再手抄一遍三个字段。
+
+    那个函数的 docstring 记着为什么:Gemini 3.x 把 `thought_signature` 放在
+    `tool_calls[i].extra_content.google` 里,**下一轮必须原样回传**,否则整轮 400
+    (「Function call is missing a thought_signature in functionCall parts」)。
+    所以它**不枚举要留哪些字段,而是留下模型给的整块**。
+
+    而 `evaluate_goal` 自己手抄了 id/type/function 三项 —— 判断器第一次 read_file
+    之后,第二次请求就丢了那个字段,于是 Gemini 上开着 `/goal` 的每一轮都判定失败。
+    同一条规则两处实现、只写对了一处,而写错的那处在**另一个函数里**,看不见。
+
+    判据不数调用点(数出来的名单永远落后一次改动),它扫的是**形状**:
+    任何一个带 `"tool_calls"` 键的字面量 dict,值都得是 `_tool_call_entry` 的产物。"""
+    import ast
+    import io
+    import os
+    src = io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "agent.py"), encoding="utf-8").read()
+    bad = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if not (isinstance(k, ast.Constant) and k.value == "tool_calls"):
+                continue
+            if "_tool_call_entry" not in ast.unparse(v):
+                bad.append(f"第 {k.lineno} 行:{ast.unparse(v)[:90]}")
+    assert not bad, ("这些地方在手抄 tool_calls,而 `_tool_call_entry` 存在的理由就是"
+                     "「别枚举字段」—— 枚举合法字段永远落后一个 provider:\n  " + "\n  ".join(bad))
+
+
+def test_no_session_save_can_take_the_repl_down_with_it():
+    """落盘失败不许把 REPL 顶掉 —— 一次 `PermissionError` 就丢一轮对话。
+
+    `os.replace` 在 Windows 上会 PermissionError:文件被另一个句柄打开就够了
+    (杀毒、索引器、OneDrive、或者你自己开着 `type` 在看那个 jsonl)。
+    上一版 `repl` 里五个落盘点有两个没接 —— **正常收尾那个和 Ctrl-C 那个**,
+    也就是最常走的两条。异常从 `repl()` 抛出去,带 traceback 退出,这一轮没落盘。
+
+    `session.py` 里那段注释早就写着「REPL 那条路压根没接这个异常…抛出去就是整个
+    REPL 退出」,而那次修的只是后面 `os.remove(old)` 那一半。
+
+    判据不列出「有几个落盘点」—— 数出来的名单永远落后一次改动。它扫的是形状:
+    `repl` 里每一次 `sess.save(...)` 要么在 try 里面,要么走 `_save_quietly`。"""
+    import ast
+    import io
+    import os
+    src = io.open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "agent.py"), encoding="utf-8").read()
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "repl")
+    guarded = set()
+    for t in ast.walk(fn):
+        if isinstance(t, ast.Try):
+            for stmt in t.body:
+                guarded.update(range(stmt.lineno, (stmt.end_lineno or stmt.lineno) + 1))
+    naked = [c.lineno for c in ast.walk(fn)
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+             and c.func.attr == "save" and c.lineno not in guarded]
+    assert not naked, (f"agent.py 第 {naked} 行的落盘没人接着 —— 一次 PermissionError "
+                       "就把整个 REPL 带走了。包进 try,或者走 `_save_quietly`。")

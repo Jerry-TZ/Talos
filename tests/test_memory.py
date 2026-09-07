@@ -1956,3 +1956,35 @@ def test_a_refusal_says_what_was_refused_instead_of_something_that_never_happene
     shown = "\n".join(notes)
     assert "data.py" in shown, f"该提醒的没提醒:{shown}"
     assert "要跑的脚本" not in shown, f"del 不跑脚本,它删脚本:{shown}"
+
+
+def test_a_file_that_merely_starts_with_check_is_not_a_verification_script(ws):
+    """`checksum.py` / `checkpoint.py` / `checklist.py` / `checkout.py` 不是验证脚本。
+
+    正则原来是 `^(verify|validate|check)[\w-]*\.py$` —— 它认「以 check 开头」,
+    而这几个名字在真实仓库里到处都是。命中之后 `write_file` / `edit_file` 一律拒绝:
+    「验证脚本里一个 assert 都没有…或者别叫 verify/check/validate」。
+    模型改不了用户的文件名,**唯一的出路是往人家的 checksum.py 里塞一个没意义的 assert**。
+    这道闸本来要拦的是「模型写个 verify_x.py 只 print 不 assert」,不是用户已有的文件。
+
+    判据两向都钉:该拦的还得拦(`verify_x.py`、`check_links.py` 带分隔符的),
+    不该拦的放行。只钉一向的话,把正则改成永远不匹配也能绿。"""
+    import agent as A
+    for name in ("verify.py", "verify_x.py", "check_links.py", "validate-all.py"):
+        assert A._VERIFY_NAME.match(name), f"{name} 该被当成验证脚本"
+    for name in ("checksum.py", "checkpoint.py", "checklist.py", "checkout.py", "checker.py"):
+        assert not A._VERIFY_NAME.match(name), f"{name} 只是碰巧以 check 开头,不是验证脚本"
+
+
+def test_an_env_template_is_documentation_not_a_credential_file(ws):
+    """`.env.example` 里没有凭据 —— 它是**给人看的模板**,这个仓库自己就带一份。
+
+    上一版 `base.startswith(".env.")` 一刀切,于是「给项目建个 .env.example」
+    和「照着 .env.example 写配置说明」两件正常的事都被拒:
+    「拒绝访问…这是凭据文件…key 用环境变量传给程序即可」。
+    而 README 正让用户去复制那个文件。"""
+    import agent as A
+    for name in (".env", ".env.local", ".env.production"):
+        assert A._is_secret_path(name), f"{name} 该拦"
+    for name in (".env.example", ".env.sample", ".env.template", ".env.dist"):
+        assert not A._is_secret_path(name), f"{name} 是模板,不是凭据"

@@ -1424,3 +1424,93 @@ def test_every_entry_point_announces_a_disabled_skill():
     missing = [fn.name for fn in entries if not _calls(fn, "_note_disabled_skills")]
     assert not missing, (f"这些启动路径不会说技能被停用了:{missing} —— "
                          f"被误伤的技能从常驻清单和检索里同时消失,而没人被告知")
+
+
+def test_editing_a_file_in_the_local_codepage_does_not_destroy_it(ws, monkeypatch):
+    """中文 Windows 上一大批 .txt / .bat / .ini / .csv 是 ANSI 代码页,不是 UTF-8。
+
+    上一版 `_read_full_enc` 用 `errors="replace"` 解,解不动就是一串 U+FFFD,
+    **然后把编码报成 "utf-8"** —— `edit_file` 读完照着这个编码写回去,
+    整个文件的非 ASCII 内容当场永久没了,而且**一声不吭**:工具返回 `edited x.txt`。
+    实测 `abc / 你好世界` 编辑一个词之后,中文变成 7 个 U+FFFD。
+
+    同一个文件里的 `_decode_console` 早就写对了(先 utf-8、坏了再本地码页),
+    同一条规则两处实现、只写对了一处 —— 而写错的那处是唯一会**写回磁盘**的那条路。
+
+    判据钉两件事:解出来的文本是对的,以及**回报的编码就是它真正用的那个**
+    (只钉文本的话,报错编码这一半照样能悄悄溜回来 —— 毁数据的正是后半句)。"""
+    import io as _io
+    import locale as _locale
+    import os as _os
+    import agent as A
+
+    monkeypatch.setattr(_locale, "getpreferredencoding", lambda *a: "gbk")
+    p = _os.path.join(A.WORKSPACE, "ansi.txt")
+    with open(p, "wb") as f:
+        f.write("abc\n你好世界\n".encode("gbk"))
+
+    text, enc, lossy = A._read_full_enc("ansi.txt")
+    assert "你好世界" in text, f"本地码页的文件被解成乱码了:{text!r}"
+    assert enc.lower().replace("-", "") in ("gbk", "cp936"), f"编码报错了,写回去就没了:{enc}"
+    assert not lossy, "解得干干净净,不该报成有损"
+
+    out, err = A.run_tool("edit_file", {"path": "ansi.txt", "old": "abc", "new": "abd"})
+    assert not err, out
+    raw = open(p, "rb").read()
+    assert raw.decode("gbk") == "abd\n你好世界\n", f"编辑一次把文件毁了:{raw!r}"
+
+    # 两种编码都解不动的那种:读得到,但**不许写回去** —— 写回去就是把那些字节
+    # 永久替换成 U+FFFD。这是这条路上唯一不可逆的动作。
+    # 判的是**这一趟解码有没有丢**,不是文本里有没有 U+FFFD ——
+    # 按字符判会连读自己的源码都拦掉(那一版当场被 own_source 那条判据逮住)。
+    monkeypatch.setattr(A, "_read_full_enc",
+                        lambda path: ("abc\n�\n", "utf-8", True))
+    out, err = A.run_tool("edit_file", {"path": "ansi.txt", "old": "abc", "new": "abd"})
+    assert err and "拒绝写回去" in out, f"解不干净的文件被写回去了:{out}"
+
+
+def test_a_command_that_hits_the_timeout_actually_stops(ws, monkeypatch):
+    """那个 120 秒不是上限 —— 超时得**真的**把命令停下来。
+
+    `subprocess.run(timeout=...)` 只杀直接子进程(Windows 上那是 cmd.exe),
+    而孙进程还握着 stdout 管道,`communicate()` 会一直等到它自己退出。
+    实测:`timeout=1` 跑一个睡 6 秒的 python,**6.04 秒**才返回。
+    于是模型一句 `python -m http.server` / `npm start`,Talos 就无限期挂住,
+    而这条路 `-p` 无人值守也走 —— 没有人在旁边按 Ctrl-C。
+
+    判据钉的是**墙上时间**,不是「有没有抛 TimeoutExpired」:上一版那个异常照抛不误,
+    只是抛在孙进程自己退完之后。抛对了、时间不对,正是这条 bug 的形状。"""
+    import sys
+    import time
+    import agent as A
+    monkeypatch.setattr(A, "BASH_TIMEOUT", 2)
+    cmd = '"' + sys.executable + '" -c "import time;time.sleep(20)"'
+    t0 = time.time()
+    out, err = A.run_tool("run_bash", {"command": cmd})
+    took = time.time() - t0
+    assert err, f"超时了却报成功:{out}"
+    assert took < 12, f"上限 2 秒,实际等了 {took:.1f} 秒 —— 孙进程没被杀掉"
+
+
+def test_a_tool_without_a_description_says_so_instead_of_raising_a_bare_key(ws):
+    """`TOOL` 少了 `description`,模型收到的是 `error: 'description'` —— 一个裸 KeyError。
+
+    同一个函数为「裸报错教不了模型」修过两次(缺 TOOL/run 那条、parameters 形状那条),
+    两次都补出了照着能改的话。**只有 description 这一格漏了**,而它是 `TOOL` 里
+    唯一必填的字符串 —— 也是模型最容易忘的那一个。
+
+    判据钉的是「报错里有没有 description 这个词和一个能照抄的样子」,
+    不是「有没有抛异常」:上一版照抛不误,抛的是个没人看得懂的东西。"""
+    import os
+    import agent as A
+    p = os.path.join(A.WORKSPACE, "no_desc.py")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write("TOOL = {'parameters': {}, 'required': []}\ndef run(args):\n    return 'x'\n")
+    try:
+        A._load_tool(p)
+    except ValueError as e:
+        assert "description" in str(e) and "TOOL = {" in str(e), f"报错照抄不了:{e}"
+    except KeyError as e:
+        raise AssertionError(f"裸 KeyError,模型只会收到 error: {e}")
+    else:
+        raise AssertionError("没有 description 也注册成功了")

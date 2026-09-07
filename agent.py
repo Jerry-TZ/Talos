@@ -459,6 +459,11 @@ _SECRET_DIRS_READ = {"secrets", "credentials", "gcloud", ".gcloud", ".kube", ".a
 def _is_secret_path(full: str) -> bool:
     """严格闸:整名 + 目录名。**任何路径都要过这一道**,工作区里的也不例外。"""
     base = os.path.basename(full).lower()
+    # `.env.example` / `.sample` / `.template` / `.dist` 是**给人看的模板**,不是凭据 ——
+    # 这个仓库自己就带一份,README 还让用户去复制它。一刀切的那一版把
+    # 「建个 .env.example」和「照它写配置说明」两件正常的事一起拒了。
+    if base.endswith((".example", ".sample", ".template", ".dist")):
+        return False
     if base in _SECRET_NAMES or base.startswith(".env."):
         return True
     parts = {p.lower() for p in full.replace("/", os.sep).split(os.sep)}
@@ -569,7 +574,11 @@ def _read_full(path: str) -> str:
     return _read_full_enc(path)[0]
 
 def _read_full_enc(path: str) -> tuple:
-    """Read a text file, tolerating what Windows tools actually produce. -> (文本, 编码名)。
+    """Read a text file, tolerating what Windows tools actually produce. -> (文本, 编码名, 有没有解丢)。
+
+    第三个返回值是**这一趟解码是不是有损的**,不是「文本里有没有 U+FFFD」——
+    合法内容里就可能有那个字符(这份 agent.py 自己就有一个),按字符判是一条误伤。
+    只有写回磁盘那条路需要它,而那是唯一不可逆的动作。
 
     **编码要跟着文本一起返回**,因为 `edit_file` 读完还要写回去:它原来拿到的只有文本,
     写回时 `write_file` 一律 utf-8 —— 于是**改一个字,顺手把整个文件的编码换掉**。
@@ -613,7 +622,7 @@ def _read_full_enc(path: str) -> tuple:
     with open(full, "rb") as f:
         b = f.read(READ_MAX_BYTES + 1)
     if b[:2] in (b"\xff\xfe", b"\xfe\xff"):        # UTF-16 first: it is full of NUL bytes
-        return b.decode("utf-16", errors="replace"), "utf-16"
+        return b.decode("utf-16", errors="replace"), "utf-16", False
     if b"\x00" in b[:8192]:
         # Decoding this would hand back mojibake the model reads as content — it once
         # "verified" a .docx that way and never noticed it had read nothing.
@@ -623,8 +632,19 @@ def _read_full_enc(path: str) -> tuple:
             "xlsx 用 openpyxl、图片用 PIL。想改它也不能用 edit_file —— 用库写。")
     # `utf-8-sig` 解码时会吃掉 BOM;编码时会写回 BOM。**所以这两个名字不能混用** ——
     # 一份没有 BOM 的文件如果报成 "utf-8-sig",写回去就凭空多一个 BOM。按开头三字节分。
-    return (b.decode("utf-8-sig", errors="replace"),
-            "utf-8-sig" if b[:3] == b"\xef\xbb\xbf" else "utf-8")
+    try:
+        return (b.decode("utf-8-sig"),
+                "utf-8-sig" if b[:3] == b"\xef\xbb\xbf" else "utf-8", False)
+    except UnicodeDecodeError:
+        # **不是 UTF-8 的文本文件不是二进制。**中文/日文 Windows 上一大批 .txt / .bat /
+        # .ini / .csv 是 ANSI 代码页。上一版 `errors="replace"` 把它们解成一串 U+FFFD、
+        # 还把编码报成 "utf-8" —— `edit_file` 照着这个编码写回去,整个文件的非 ASCII
+        # 内容当场永久没了,而且一声不吭(工具返回的是 `edited x.txt`)。
+        # 同一个文件里的 `_decode_console` 早就是「先 utf-8、坏了再本地码页」——
+        # 同一条规则两处实现,只写对了一处,而写错的那处是唯一会**写回磁盘**的。
+        enc = locale.getpreferredencoding(False)
+        text = b.decode(enc, errors="replace")
+        return text, enc, text.encode(enc, "replace") != b
 
 def read_file(path: str, offset: int = 0, limit=None) -> str:
     lines = _read_full(path).splitlines(keepends=True)
@@ -642,15 +662,60 @@ def read_file(path: str, offset: int = 0, limit=None) -> str:
 AUTOTEST = os.environ.get("TALOS_AUTOTEST", "").strip()
 AUTOCOMMIT = os.environ.get("TALOS_AUTOCOMMIT", "").strip() in ("1", "true", "yes", "on")
 
+BASH_TIMEOUT = 120       # run_bash 的墙上时间上限。常量是为了判据能把它调小 —— 写死 120
+                         # 的那一版,「超时到底有没有真生效」这件事没有任何判据碰得到。
+
+def _kill_tree(p) -> None:
+    """连孙子一起杀。**只杀直接子进程等于没杀** —— 那是 shell,真正在跑的是它的孩子。"""
+    import signal
+    import subprocess
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            p.kill()
+
+def _run_capped(cmd, timeout: int, env: dict, **kw):
+    """跑一条命令,超时时把**整棵进程树**杀掉。返回 CompletedProcess。
+
+    `subprocess.run(timeout=...)` 只杀直接子进程 —— Windows 上那是 cmd.exe ——
+    而孙进程还握着 stdout 管道,`communicate()` 会一直等到它自己退出。
+    实测:`timeout=1` 跑一个睡 6 秒的 python,**6.04 秒**才返回。
+    也就是说 run_bash 那个 120 秒**从来不是上限**:一句 `python -m http.server`
+    或者 `npm start`,Talos 就无限期挂在那儿,而 `-p` 那条路上没有人能按 Ctrl-C。
+    异常照抛不误 —— 抛对了、时间不对,这正是它一直没被发现的原因。
+
+    POSIX 上 `start_new_session` 让它自成进程组,好整组杀;Windows 上靠 `taskkill /T`。
+    杀完还要再 `communicate` 一次:管道要等树里最后一个句柄关掉才收得回来。"""
+    import subprocess
+    if os.name != "nt":
+        kw["start_new_session"] = True
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         cwd=WORKSPACE, env=env, **kw)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(p)
+        try:
+            out, err = p.communicate(timeout=10)
+        except subprocess.TimeoutExpired:          # 杀不动的极端情况:别把自己也挂在这儿
+            out, err = None, None
+        raise subprocess.TimeoutExpired(cmd, timeout, output=out, stderr=err)
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
+
 def _sh(cmd: str, timeout: int = 180):
     import subprocess
     # DONTWRITEBYTECODE: two edits in the same second leave calc.py's mtime unchanged, so
     # Python reuses a stale .pyc and the suite passes against code that is no longer there —
     # a false green that autocommit would then commit. No .pyc, no stale import.
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=WORKSPACE,
-                          encoding="utf-8", errors="replace", timeout=timeout,
-                          env=dict(os.environ, PYTHONIOENCODING="utf-8",
-                                   PYTHONDONTWRITEBYTECODE="1", **_VENV_ENV))
+    # 走 `_run_capped` 不走 `subprocess.run`:自动测试跑的是**用户的**测试命令,
+    # 里面起个服务器一样能把这条路挂死。同一个毛病别只修 run_bash 那一处。
+    return _run_capped(cmd, timeout,
+                       dict(os.environ, PYTHONIOENCODING="utf-8",
+                            PYTHONDONTWRITEBYTECODE="1", **_VENV_ENV),
+                       text=True, encoding="utf-8", errors="replace")
 
 def _git(args: list, timeout: int = 60):
     import subprocess
@@ -698,7 +763,11 @@ def _autocommit(full: str) -> str:
     except Exception as e:                              # noqa: BLE001
         return f"\n[自动提交] 跳过:{str(e)[:80]}"
 
-_VERIFY_NAME = re.compile(r"^(verify|validate|check)[\w-]*\.py$", re.IGNORECASE)
+# 要求分隔符。上一版 `(verify|validate|check)[\w-]*` 认的是「以 check 开头」,
+# 于是 checksum.py / checkpoint.py / checklist.py / checkout.py 全被当成验证脚本 ——
+# 而这几个名字在真实仓库里到处都是,模型又改不了用户的文件名,唯一出路是往人家文件里
+# 塞一个没意义的 assert。这道闸要拦的是模型自己写的 verify_x.py,不是用户已有的文件。
+_VERIFY_NAME = re.compile(r"^(verify|validate|check)(?:[_-][\w-]*)?\.py$", re.IGNORECASE)
 
 def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     # `encoding` **不在工具 schema 里**(TOOLS 里的 properties 是单独写的),模型看不见也
@@ -751,7 +820,17 @@ def write_file(path: str, content: str, encoding: str = "utf-8") -> str:
     return f"wrote {len(content)} chars to {path}"      # what the model wrote is what edit_file reads back
 
 def edit_file(path: str, old: str, new: str) -> str:
-    text, enc = _read_full_enc(path)                    # FULL read — a truncated read would corrupt the edit
+    text, enc, lossy = _read_full_enc(path)             # FULL read — a truncated read would corrupt the edit
+    # **解不动就别写回去。**utf-8 和本机代码页都解不干净时只剩 `errors="replace"`,
+    # 而那些替换字符写回磁盘就是**永久**替换掉原字节。读出来给模型看没问题(它至少知道
+    # 这儿有东西),写回去不行 —— 这条路上唯一不可逆的动作就是下面那行 write_file。
+    # 判据是**这一趟解码有没有丢**,不是「文本里有没有 U+FFFD」:第一版按字符判,
+    # 而这份源码自己就含一个,于是连读自己都被拦 —— 那是一条我刚造出来的误伤。
+    if lossy:
+        raise ValueError(
+            f"{path} 按 utf-8 和本机代码页都解不干净(里面有解不出来的字节),"
+            "edit_file 拒绝写回去 —— 写回去会把那些字节永久替换掉。"
+            "先确认它的真实编码,用 run_bash 里的工具改,或者另存一份再改。")
     if old not in text and "\r\n" in text:
         # Models emit \n; a file written on Windows by anything else holds \r\n. Retry in the
         # file's own line endings rather than reporting "not found" on text that is right there.
@@ -832,8 +911,7 @@ def run_bash(command: str) -> str:
     # boundary: the command can still cd out or use absolute paths. Only a sandbox fixes that.
     # 拿 **bytes**,自己解码 —— 见 `_decode_console`。写死 encoding="utf-8" 的那一版,
     # 中文 Windows 上 `dir` 一个中文名文件,模型收到的是 `????.txt`。
-    p = subprocess.run(command, shell=True, capture_output=True, cwd=WORKSPACE,
-                       timeout=120, env=env)
+    p = _run_capped(command, BASH_TIMEOUT, env)
     out = ((_decode_console(p.stdout) + _decode_console(p.stderr)).strip()
            or f"(exit {p.returncode}, no output)")
     if len(out) > BASH_MAX_CHARS:
@@ -905,9 +983,15 @@ def _load_tool(path: str) -> str:
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)                       # runs the file -> defines TOOL + run
     meta = getattr(mod, "TOOL", None)
-    if not isinstance(meta, dict) or not callable(getattr(mod, "run", None)):
+    # `description` 一起在这儿查。**它是 TOOL 里唯一必填的字符串,也是最容易忘的那个** ——
+    # 漏了的话下面那行 `meta["description"]` 抛裸 KeyError,模型收到 `error: 'description'`。
+    # 这个函数已经为「裸报错教不了模型」修过两次(缺 TOOL/run、parameters 形状),
+    # 两次都补出了照着能改的话,只有这一格漏了。
+    if not isinstance(meta, dict) or not callable(getattr(mod, "run", None)) \
+            or not isinstance(meta.get("description"), str) or not meta["description"].strip():
         raise ValueError(                              # actionable: a bare AttributeError taught the model nothing
-            "工具文件缺少必需的两样东西。必须在**模块最外层**(不缩进)定义:\n"
+            "工具文件缺少必需的东西:模块最外层(不缩进)的 `TOOL` 字典"
+            "(里面必须有一句非空的 `description`)和 `run`。必须这么写:\n"
             "TOOL = {'description': '一句话说明何时用', 'parameters': {'参数名': {'type': 'string'}}, "
             "'required': ['参数名']}\n"
             "def run(args: dict) -> str: ...\n"
@@ -1876,7 +1960,11 @@ def check_permission(state: dict, cls: str, name: str, args: dict) -> tuple[bool
         # x.md`, and a regex can never see `python -c "os.remove('x.md')"` or a .py file that
         # does the same. Once you have said no about a name, anything mentioning that name
         # asks again — whatever it is written in.
-        cmd_nc = os.path.normcase(_with_scripts(args.get("command", "")))
+        # `denied` 是空的就别扫 —— `_with_scripts` 会对命令里每个 .py token 读到 200KB,
+        # `_targets` 还要对每个 token glob + exists 两次。`-p`/bypass 下每条命令都白付
+        # 一遍这个,而下面那个 `any(... for f in ())` 恒为 False。
+        cmd_nc = (os.path.normcase(_with_scripts(args.get("command", "")))
+                  if state.get("denied") else "")
         # Windows 上 Report.md 和 report.md 是同一个文件,而 `in` 是区分大小写的 ——
         # 拒绝 `del Report.md` 之后,`del report.md` 直接放行。normcase 在 Windows 上
         # 折大小写、在 POSIX 上原样返回,正好就是各自文件系统的语义。
@@ -2216,11 +2304,12 @@ def evaluate_goal(client, model: str, goal: str, messages: list, state: dict) ->
             if data.get("ok"):
                 return "ok", str(data.get("reason") or "")
             return "block", str(data.get("reason") or "还没有能证明完成的证据")
+        # 走 `_tool_call_entry`,别在这儿手抄三个字段 —— 那个函数存在的全部理由就是
+        # 「不枚举要留哪些字段,留下模型给的整块」。手抄的那一版在 Gemini 3.x 上丢掉
+        # `extra_content.google.thought_signature`,判断器第一次 read_file 之后
+        # 第二轮就 400,于是开着 `/goal` 的每一轮都判定失败 —— 而症状看起来像判断器坏了。
         conv.append({"role": "assistant", "content": msg.content or "",
-                     "tool_calls": [{"id": c.id, "type": "function",
-                                     "function": {"name": c.function.name,
-                                                  "arguments": c.function.arguments}}
-                                    for c in calls]})
+                     "tool_calls": [_tool_call_entry(c) for c in calls]})
         for c in calls:
             if c.function.name != "read_file":       # 白名单:判断器只准读
                 out = f"error: 判断器只能用 read_file,不能调 {c.function.name}"
@@ -2351,7 +2440,12 @@ def _repeat_guard(seen: dict, name: str, args: dict, out: str) -> str:
 STALL_LIMIT = 4      # 连着这么多次对同一个目标做同一件事、中间不看一眼 —— 开口提醒
 STALL_HARD = int(os.environ.get("TALOS_STALL_HARD", "8"))   # 提醒之后还照做到这个数 —— 交还控制权
 
-_PAYLOAD = ("content", "new_string", "old_string", "text", "body")
+# `new_string` / `old_string` 是**死名**:Talos 里没有任何工具用这两个参数名
+# (edit_file 的载荷叫 `old` / `new`)。留着它们会让读的人以为 edit_file 也被这条
+# 守卫盖住了 —— 实测连着 16 次 edit 同一个文件,计数恒为 1。
+# **删掉而不是补上**:反复改同一个文件是正常干活(`_read_guard` 的 docstring 里
+# 写的是同一句话),该被这条守卫抓的是「反复写、内容还每次都不一样」。
+_PAYLOAD = ("content", "text", "body")
 
 def _stall_key(name: str, args: dict) -> str:
     """这一次调用**指向哪儿**。含全部参数,**除了要写进去的那坨内容**。
@@ -2538,7 +2632,16 @@ def _read_guard(seen: dict, name: str, args: dict, out: str) -> str:
         #    而 `_env_block` 把 `sys.executable` 印给模型看、它就放在每条命令的开头。
         #    所以再按**身份**挡一道:realpath 等于正在跑的这个解释器,那就不是"被读的文件"。
         #    按拼写挡的判据,换个平台就漏 —— 这道闸今天已经因为拼写漏过一次了。
-        paths = {p for p in _targets(args.get("command", ""), globs=False)
+        # ③ **只看读命令后面那一段。**上一版把整条命令交给 `_targets`,于是
+        #    `python verify.py | findstr FAIL` 里管道**左边**被跑的脚本也算成"读" ——
+        #    第 6 次开始真实输出被换成「文件没变,再读一遍不会读出新东西」,而变的是
+        #    被测的那个文件,丢掉的是这一轮的测试结果。三句话全是假的。
+        #    偏偏 `_env_block` 自己教模型拿 findstr 当 grep 用:**误伤的是它推荐的写法**。
+        #    从第一个读命令的位置往后取:`type a.py` / `findstr /n "x" a.py` 照旧,
+        #    `more a.py | findstr x` 也照旧(第一个命中是 `more`,后面整段都在)。
+        _cmd = args.get("command", "")
+        _cmd = _cmd[_READISH.search(_cmd).start():]
+        paths = {p for p in _targets(_cmd, globs=False)
                  if not p.lower().endswith((".exe", ".bat", ".cmd", ".com"))
                  and os.path.normcase(os.path.realpath(_abs(p))) != _SELF
                  and (os.path.exists(p) or os.path.exists(os.path.join(WORKSPACE, p)))}
@@ -3217,6 +3320,26 @@ def _tail_start(messages: list, keep: int) -> int:
         i -= 1
     return i
 
+# harness 自己塞进 messages 的 user 消息,全都带前缀;人打的那几行不带。
+# **只给 `_human_asks` 用**,进程内一律走对象身份,不走这张表。
+_HARNESS_SAYS = ("【早前对话的压缩摘要】", "[系统]", "[目标检查]",
+                 "# 回忆(")            # recall.py 注入块的第一行
+
+def _human_asks(messages: list) -> list:
+    """从**落盘之后**读回来的历史里,认出人自己打的那几条。
+
+    对象身份过不了磁盘:新会话那条路把人的 dict 直接记进 `state["asks"]`,
+    而 `--resume` / `--continue` 拿回来的是一批全新对象、`state` 也是新造的空壳。
+    上一版于是只守住了新会话:续上四十条之后第一次压缩,把之前所有原话一次压成转述,
+    `state["asked"]`(`_named_in_request` 靠它认「用户点名要过哪些文件」)也是空的。
+
+    **认错的代价不对称**:多认一条 = 压缩时多留一条短消息;少认一条 = 原话没了。
+    所以 `_HARNESS_SAYS` 漏一个新前缀是往安全那侧偏的 —— 这跟今天别处那些
+    「枚举落后一步」不一样,那些漏一条是漏掉一次拦截。"""
+    return [m for m in messages
+            if m.get("role") == "user" and isinstance(m.get("content"), str)
+            and not m["content"].startswith(_HARNESS_SAYS)]
+
 def maybe_compact(client, model: str, messages: list, force: bool = False, asks=()) -> list:
     """History got long? Summarize the head, keep the tail verbatim. Returns the new list.
 
@@ -3279,6 +3402,11 @@ def maybe_compact(client, model: str, messages: list, force: bool = False, asks=
     # 留下的那条可能自己就超预算(`_tail_start` 现在宁可留一条也不留空)。**截断,别丢掉** ——
     # 截断模型看得见,丢掉它只会去重读一遍。
     for m in tail:
+        # **人的原话连截都不截。**上一版这个循环原地改 `m["content"]`,而它和
+        # `state["asks"]` 里是同一个对象 —— 贴一份四千字的规格进来,压缩一次就永久少一半,
+        # 落盘之后再也拿不回来。上面那句「一个字都不动」当时只兑现了头部那一半。
+        if any(m is a for a in asks):
+            continue
         if isinstance(m.get("content"), str) and len(m["content"]) > COMPACT_TAIL_CHARS // 3:
             m["content"] = m["content"][:COMPACT_TAIL_CHARS // 3] + "\n…(尾部过长,已截断)"
     # **不再合成一条 assistant。** 原来这里补一句「了解,以上是之前的进展」,让摘要读起来
@@ -3533,6 +3661,22 @@ def _budget_note(state: dict) -> str:
             "接着做就 `/compact` 压一下,能收尾就开个新会话。")
 
 
+def _save_quietly(sess, messages: list) -> bool:
+    """落盘,失败就说一句,**不许把 REPL 顶掉**。
+
+    `os.replace` 在 Windows 上会 PermissionError:文件被另一个句柄打开就够了
+    (杀毒、索引器、OneDrive、或者你自己开着 `type` 在看那个 jsonl)。
+    上一版 `repl` 五个落盘点里有两个没接 —— 正常收尾那个和 Ctrl-C 那个,也就是
+    **最常走的两条**。异常从 `repl()` 里抛出去,带 traceback 退出,这一轮对话没落盘。
+    `session.py` 那段注释早就写着「REPL 那条路压根没接这个异常」,而那次只修了
+    后面 `os.remove(old)` 那一半。"""
+    try:
+        sess.save(messages)
+        return True
+    except Exception as e:
+        ui.note(f"⚠️ 会话没存下来:{e}")
+        return False
+
 def _note_disabled_skills() -> None:
     """被红旗隔离的技能,**每条启动路径都要说一声**。
 
@@ -3560,6 +3704,9 @@ def repl(resume=None) -> None:
         sess = S.Session.new()
         messages = []
     state = {"mode": "default", "allow": set(), "view": "normal"}   # ← permission + display state
+    if messages:            # 续上来的历史:身份过不了磁盘,只能按内容认回来
+        state["asks"] = _human_asks(messages)
+        state["asked"] = "\n".join(m["content"] for m in state["asks"])
 
     ui.banner(state["mode"], PROVIDER, model)
     ui.note(f"会话 {sess.sid}" + (f" · 续上 {len(messages)} 条消息" if messages else " · 存于 .talos/sessions/"))
@@ -3726,7 +3873,6 @@ def repl(resume=None) -> None:
                 else:
                     ui.note(f"⚠️ 没删掉 {sid} —— 文件还在 .talos/sessions/,会话没动")
             continue
-        mark = len(messages)
         # Kept for the whole session, not just this turn: a file you named three turns ago is
         # still yours, and reflection — which is where the deletions happened — runs after.
         state["asked"] = state.get("asked", "") + "\n" + task
@@ -3739,7 +3885,7 @@ def repl(resume=None) -> None:
             result = agent_turn(client, model, messages, state, top=True)
         except KeyboardInterrupt:                  # Ctrl-C: stop this turn, keep the REPL and the work
             _seal(messages)
-            sess.save(messages)
+            _save_quietly(sess, messages)
             ui.note(_unchecked_goal_note(state, True, "被中断")
                     + "⛔ 已停下。做过的都留着 —— 直接说新的要求就行,或者「继续」接着做。")
             continue
@@ -3749,10 +3895,7 @@ def repl(resume=None) -> None:
             # 于是「这一轮的进度都还在」只在内存里成立:报完错直接退出,这一轮就没了。
             # 而崩掉的那一份恰恰最值钱(昨天 `once()` 修的是同一句话)。
             # 两条出口对同一件事只做了一半,又是「一条规则两处实现」。
-            try:
-                sess.save(messages)
-            except Exception as _e:
-                ui.note(f"⚠️ 会话没存下来:{_e}")
+            _save_quietly(sess, messages)
             ui.error(e)
             # 目标是会话级的,而这一轮的判断器根本没跑到。补 `once()` 那次我数的是
             # 「四条出口」,漏掉了 repl 这两条 —— 而上面那段注释正在说同一个形状。
@@ -3787,7 +3930,7 @@ def repl(resume=None) -> None:
         except Exception as e:
             ui.error(e)
         _prune_old_tool_results(messages)                          # stub old bulky tool outputs (token saver)
-        sess.save(messages)                                        # persist after every turn
+        _save_quietly(sess, messages)                              # persist after every turn
 
 # ── offline self-check (no key / no deps):  python agent.py --selfcheck ────────
 
