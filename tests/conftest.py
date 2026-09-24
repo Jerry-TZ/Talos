@@ -85,6 +85,9 @@ def _no_test_ever_writes_the_real_talos(tmp_path, monkeypatch):
     # 就会往真实的 `.talos/sessions/` 里塞垃圾,而那批文件正是往事检索和燃尽表的语料。
     # 上面那段说「枚举永远落后一步」,这就是下一步:**加功能等于给这片面新开一条路。**
     monkeypatch.setattr(session, "SESS_DIR", os.path.join(d, "sessions"))
+    # 开着 `TALOS_STREAM=1` 的终端里跑 pytest,几百条用例的假客户端会收到 stream=True
+    # 而照旧回整份 —— 全套红一片,红的原因跟被测的东西毫无关系。要测流式的自己打开。
+    monkeypatch.setattr(agent, "STREAM", False)
 
 @pytest.fixture(autouse=True)
 def _keys_stay_put():
