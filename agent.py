@@ -2410,11 +2410,35 @@ def _usage(resp):
     cached = (getattr(d, "cached_tokens", 0) or 0) if d is not None else 0
     return (getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0, cached)
 
+CHAT_TRIES = 4             # 一次调用最多试几趟(含第一趟)
+RETRY_AFTER_MAX = 60       # 服务器让等的秒数封顶 —— 别让一个离谱的头把人晾一小时
+# 服务器**答了话**、而且话是「等一下再来」的那几个状态码。按状态码认,不按文本:
+# 原来的关键词表里有 502、503 却没有 500 —— 500 试一次就放弃(FINDINGS 七十八节那个
+# 任务三趟死法是 500、500、429)。
+_RETRY_STATUS = {408, 429, 500, 502, 503, 504}
+# **钱没了不是对面忙。** 这几种 429 等多久都不会好,重试只是把报错往后推,
+# 还一路打「模型繁忙」让人以为在等。只认明确的写法,**不认 "quota" 这个词**:
+# Gemini 免费档的每分钟限流文本也是 "You exceeded your current quota",那是真限流。
+_NO_BALANCE = ("insufficient_quota", "insufficient balance", "insufficient_balance",
+               "余额不足", "exceeded_current_quota_error", "欠费")
+
+def _retry_after(e):
+    """服务器在响应头里说的等待秒数;没说、或者说的是 HTTP 日期,返回 None。"""
+    headers = getattr(getattr(e, "response", None), "headers", None) or {}
+    try:
+        ms = headers.get("retry-after-ms")
+        if ms is not None:
+            return float(ms) / 1000
+        s = headers.get("retry-after")
+        return float(s) if s is not None else None
+    except (TypeError, ValueError):
+        return None
+
 def _chat(client, **kwargs):
     """Call the model, retrying briefly on rate-limit / 'busy' / transient errors.
     Free tiers (esp. glm-4.7-flash) get congested — '当前模型用户多' is just a busy signal."""
     timeouts = 0
-    for attempt in range(3):
+    for attempt in range(CHAT_TRIES):
         t0 = time.time()
         try:
             resp = client.chat.completions.create(**kwargs)
@@ -2432,14 +2456,21 @@ def _chat(client, **kwargs):
             # 掉了一次网,`APIConnectionError("Connection error.")` —— 这串里一个既有关键词
             # 都不含,于是**不重试、直接抛**,整轮的复盘就没了(工作本身已经存盘,丢的是学习)。
             # 断网比 429 更该重试:429 是对面忙,掉线常常下一秒就好。
-            transient = (any(k in s for k in ("429", "rate limit", "ratelimit", "timeout",
-                        "timed out", "overload", "too many", "busy", "503", "502",
-                        "connection", "并发", "繁忙"))
-                        or "用户多" in str(e))
+            # 文本那张表留着:没有状态码的异常(掉线、SDK 自己的超时)只能靠它认,
+            # 而「当前模型用户多」这类说法也不保证配着 429 来。状态码是加上去的,不是换掉。
+            status = getattr(e, "status_code", None)
+            transient = ((status in _RETRY_STATUS
+                          or any(k in s for k in ("429", "rate limit", "ratelimit", "timeout",
+                                 "timed out", "overload", "too many", "busy", "503", "502",
+                                 "connection", "并发", "繁忙"))
+                          or "用户多" in str(e))
+                         and not any(k in s for k in _NO_BALANCE))
             # 但超时跟"忙"不是一回事。忙是等一下就好;超时说明这次调用本来就要跑过
             # CHAT_TIMEOUT,重试三遍就是三遍注定失败 —— 默认 300s 下,一次失败要 15 分钟
             # 才告诉你。推理模型上这是常态,不是意外。只给它一次机会。
-            timeouts += ("timed out" in s or "timeout" in s)
+            # **有状态码就不是这一种**:504 的文本是 "Gateway Timeout",原来被记成读超时、
+            # 只多给一次机会 —— 可它是网关替上游答的话,这边并没有等满 CHAT_TIMEOUT。
+            timeouts += status is None and ("timed out" in s or "timeout" in s)
             # **连不上 ≠ 对面忙,不重试。** 上面那条「掉线常常下一秒就通」说的是
             # `APIConnectionError`(连接被拒/被断,几毫秒就回来);连接**超时**是另一回事:
             # 每次要烧满 `CONNECT_TIMEOUT × 主机的地址条数`,重一次就是再等一遍。
@@ -2462,10 +2493,16 @@ def _chat(client, **kwargs):
                             f"   注意 httpx 的连接超时是**按地址**算的:多 A 记录的主机会乘上去,"
                             f"所以真实等待≈{CONNECT_TIMEOUT:g}s × 地址条数。")
                 raise
-            if attempt < 2 and transient and timeouts < 2:
+            if attempt < CHAT_TRIES - 1 and transient and timeouts < 2:
+                # 服务器说了等多久就等多久;没说就 2、4、8 秒。原来是 1、2 秒,
+                # 免费档的 429 三趟在三秒里就烧完了。
+                wait = _retry_after(e)
+                wait = min(wait, RETRY_AFTER_MAX) if wait is not None else 2 ** (attempt + 1)
                 if ui is not None:
-                    ui.note(f"模型繁忙,{2 ** attempt}s 后重试 ({attempt + 1}/2)…")
-                time.sleep(2 ** attempt)
+                    # 带上状态码:429(限流,等等就好)和 500(对面出错)人该分得清
+                    ui.note(f"模型繁忙{f'(HTTP {status})' if status else ''},"
+                            f"{wait:g}s 后重试 ({attempt + 1}/{CHAT_TRIES - 1})…")
+                time.sleep(wait)
                 continue
             raise
 
@@ -3342,8 +3379,21 @@ def consolidate(client, model: str, state: dict) -> str:
 
 # ── context compression (仿 Claude Code 的 auto-compact) ───────────────────────
 
+def _msg_chars(m: dict) -> int:
+    """一条消息**真正发出去**的量:正文 + 它发起的工具调用参数。
+
+    原来只数 `content`。而 `write_file` 写的整份文件躺在 `tool_calls[].arguments` 里 ——
+    实测 6 次 write_file、真实 12 万字符的历史,这里数出 73。压缩闸看不见它们,
+    写得越多的任务越是每步整份重发,直到 `400 Prompt exceeds max length`。"""
+    n = len(str(m.get("content") or ""))
+    for c in m.get("tool_calls") or ():
+        fn = c.get("function") if isinstance(c, dict) else getattr(c, "function", None)
+        args = fn.get("arguments") if isinstance(fn, dict) else getattr(fn, "arguments", "")
+        n += len(str(args or ""))
+    return n
+
 def _ctx_chars(messages: list) -> int:
-    return sum(len(str(m.get("content") or "")) for m in messages)
+    return sum(_msg_chars(m) for m in messages)
 
 COMPACT_KEEP = 8                        # 压缩之后原样留在末尾的消息数,见 _tail_start
 COMPACT_TAIL_CHARS = COMPACT_AT // 3    # 尾部最多占预算的三分之一 —— 光按条数留会压不下去
@@ -3362,9 +3412,11 @@ def _tail_start(messages: list, keep: int) -> int:
     # 长回答就能让「压缩完还是超阈值」,于是下一步立刻再压一次:实测连着两次
     # 「33 条 → 10 条」「11 条 → 7 条」,每一次都是一次全量缓存作废加一次额外的模型调用。
     # 这是我加尾部保留时没算到的代价 —— 保留是按条数写的,而预算一直是按字符算的。
+    # 按 `_msg_chars` 数,不按 `content`:尾部躺着几份 write_file 参数时,只数正文的话
+    # 8 条全留,压完照样超阈值 —— 跟上面那句「两个单位」是同一个根因的另一半。
     spent, j = 0, len(messages)
     while j > i:
-        spent += len(str(messages[j - 1].get("content") or ""))
+        spent += _msg_chars(messages[j - 1])
         if spent > COMPACT_TAIL_CHARS:
             break
         j -= 1
@@ -3407,6 +3459,16 @@ def _human_asks(messages: list) -> list:
     return [m for m in messages
             if m.get("role") == "user" and isinstance(m.get("content"), str)
             and not m["content"].startswith(_HARNESS_SAYS)]
+
+def _adopt_history(state: dict, messages: list) -> None:
+    """换了一段历史,就重认一遍哪些是人说的。
+
+    **三条路换历史**:启动时 `--resume`/`--continue`、REPL 里 `/resume`、`/delete` 掉
+    当前会话。上一版只有启动那条认了,另外两条切过去之后 `asks` 还是上一个会话的对象 ——
+    续上的会话一压缩,人的原话就被转述掉;`asked` 也还是旧的,「点名要过」拿上一个
+    会话的话去比这个会话的删除命令。"""
+    state["asks"] = _human_asks(messages)
+    state["asked"] = "\n".join(m["content"] for m in state["asks"])
 
 def maybe_compact(client, model: str, messages: list, force: bool = False, asks=()) -> list:
     """History got long? Summarize the head, keep the tail verbatim. Returns the new list.
@@ -3490,8 +3552,9 @@ def maybe_compact(client, model: str, messages: list, force: bool = False, asks=
     return kept + [{"role": "user", "content": "【早前对话的压缩摘要】\n" + summary}] + tail
 
 def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
-    """Stub OLD, bulky tool outputs in place so they stop getting resent every step (token saver).
-    Keeps the last `keep` messages untouched. Note: this rewrites saved history (/view shows stubs)."""
+    """Stub OLD, bulky tool outputs — and the bulky arguments of old tool calls — in place so they
+    stop getting resent every step (token saver). Keeps the last `keep` messages untouched.
+    Note: this rewrites saved history (/view shows stubs)."""
     # 「需要就重新读」得说清读的是什么。只报字符数的话,模型此时已经不知道当初读的是哪个
     # 文件了 —— 那是一句无法执行的建议。出处不用另存:发起这次调用的 tool_call 里就写着。
     by_id = {}
@@ -3526,6 +3589,37 @@ def _prune_old_tool_results(messages: list, keep: int = 8) -> None:
             m["content"] = (f"[已省略 {what} 的输出,{len(m['content'])} 字符 — 需要就重新读]"
                             if what else
                             f"[已省略工具输出,{len(m['content'])} 字符 — 需要就重新读]")
+    # **调用那一侧也有大块:模型自己写的参数。** write_file 的整份文件躺在
+    # `tool_calls[].arguments` 里,上面那段只剪 `role == "tool"`,于是写过的每个文件
+    # 永远留在历史里、每步重发。同一条规则(窗口外、超过门槛),剪法有两处不同:
+    # 剪完还得是**合法 JSON**(有的 provider 回放历史时会解析它),`path` 这类短字段留着。
+    # spawn_subagent 不剪,理由同上:那是派活的原话,重来就是重新派一次。
+    for m in old:
+        for c in (m.get("tool_calls") or []) if m.get("role") == "assistant" else ():
+            fn = c.get("function") if isinstance(c, dict) else None
+            raw = fn.get("arguments") if isinstance(fn, dict) else None
+            if (isinstance(raw, str) and len(raw) > 600
+                    and fn.get("name") != "spawn_subagent"):
+                fn["arguments"] = _stub_args(raw)
+
+def _stub_args(raw: str) -> str:
+    """把一次旧调用的参数里的大块字段换成一句话,其余原样,仍是合法 JSON。
+
+    **只说确定的事**:这是旧调用的参数,结果在紧跟着的那条工具消息里。
+    不说「已经写进去了」—— 那次调用可能被拒了、可能报错了。"""
+    try:
+        a = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        a = None
+    if not isinstance(a, dict):              # 截断的半截 JSON(输出撞上 max_tokens 就是这样)
+        return json.dumps({"已省略": f"{len(raw)} 字符的参数(旧调用,结果见紧跟着的工具消息)"},
+                          ensure_ascii=False)
+    path = a.get("path") if isinstance(a.get("path"), str) else ""
+    for k, v in a.items():
+        if isinstance(v, str) and len(v) > 600:
+            a[k] = (f"[已省略 {len(v)} 字符 — 旧调用的参数,结果见紧跟着的工具消息"
+                    + (f";文件现状用 read_file {path} 看" if path else "") + "]")
+    return json.dumps(a, ensure_ascii=False)
 
 _CORRECTION_MARKERS = ("不对", "错了", "搞错", "不是这样", "不应该", "不该", "重来", "别这样",
                        "不是这个", "写错", "wrong", "incorrect", "not what", "should have", "instead")
@@ -3773,8 +3867,7 @@ def repl(resume=None) -> None:
         messages = []
     state = {"mode": "default", "allow": set(), "view": "normal"}   # ← permission + display state
     if messages:            # 续上来的历史:身份过不了磁盘,只能按内容认回来
-        state["asks"] = _human_asks(messages)
-        state["asked"] = "\n".join(m["content"] for m in state["asks"])
+        _adopt_history(state, messages)
 
     ui.banner(state["mode"], PROVIDER, model)
     ui.note(f"会话 {sess.sid}" + (f" · 续上 {len(messages)} 条消息" if messages else " · 存于 .talos/sessions/"))
@@ -3920,6 +4013,7 @@ def repl(resume=None) -> None:
             if sid:
                 sess = S.open_session(sid)
                 messages[:] = sess.load()
+                _adopt_history(state, messages)        # 跟启动时 --resume 同一件事
                 ui.note(f"已切到会话 {sess.sid} · {len(messages)} 条消息,可继续编辑")
             else:
                 ui.note("没找到该会话 — 用 /history 看编号")
@@ -3937,6 +4031,7 @@ def repl(resume=None) -> None:
                     if sid == sess.sid:                # 删的是当前会话 → 开一个新空会话
                         sess = S.Session.new()
                         messages[:] = []
+                        _adopt_history(state, messages)
                     ui.note(f"已删除 {sid}")
                 else:
                     ui.note(f"⚠️ 没删掉 {sid} —— 文件还在 .talos/sessions/,会话没动")
