@@ -48,6 +48,7 @@ def read_task(mode: str) -> str:
     return console.input(f"[bold {C_YOU}]你[/] [dim]({mode})[/] › ").strip()
 
 HEARTBEAT = 30   # 每这么多秒往下追加一行"还活着"
+_active = None   # 正在转的那个圈 —— `progress()` 往它上面写;同一时刻只有一个(子 agent 在圈外跑)
 
 class _Thinking:
     """转圈 + 每 HEARTBEAT 秒**追加**一行「已等 Ns」。
@@ -68,8 +69,11 @@ class _Thinking:
         self._stop = threading.Event()
         self._status = None if console.legacy_windows else console.status(label, spinner="dots")
         self._label = label
+        self._said = ""                      # 流式时模型写到哪了,`progress()` 填
 
     def __enter__(self):
+        global _active
+        _active = self
         if self._status is not None:
             self._status.__enter__()
         else:
@@ -89,9 +93,20 @@ class _Thinking:
             waited += HEARTBEAT
             # 用 :.0f —— waited 是累加出来的,HEARTBEAT 非整数时会攒出
             # 0.15000000000000002 这种。生产里 HEARTBEAT=30 看不出来,测试里一眼就露。
-            console.print(f"[dim]  … 已等 {waited:.0f}s,还在等模型回话(Ctrl-C 停这一轮)[/]")
+            # 流式时换成模型写到哪了 —— legacy_windows 不开转圈,这一行是那儿唯一的进度。
+            doing = f"模型{escape(self._said)}" if self._said else "还在等模型回话"
+            console.print(f"[dim]  … 已等 {waited:.0f}s,{doing}(Ctrl-C 停这一轮)[/]")
+
+    def progress(self, said: str) -> None:
+        self._said = said
+        if self._status is not None:
+            # 转圈的**文字**原地换,不追加 —— 秒数那条说过原地重绘会刷屏,但那是
+            # legacy_windows 上;这里 `_status` 存在就说明不是那种控制台。
+            self._status.update(f"[{C_MODEL}]模型{escape(said)}[/]")
 
     def __exit__(self, *exc):
+        global _active
+        _active = None
         self._stop.set()
         return self._status.__exit__(*exc) if self._status is not None else False
 
@@ -99,6 +114,12 @@ class _Thinking:
 def thinking():
     """上下文管理器:模型思考时转个圈,并定期报"还活着"。"""
     return _Thinking(f"[{C_MODEL}]模型思考中…[/]")
+
+def progress(said: str) -> None:
+    """流式时模型写到哪了(「在写 write_file(x.py) · 12,000 字」),显示在转圈上和心跳里。
+    转圈之外调它什么也不做。"""
+    if _active is not None:
+        _active.progress(said)
 
 def took(seconds: float) -> None:
     """调用回来之后报一次耗时 —— 跟上面的心跳配套:心跳说"还活着",这条说"花了多久"。"""

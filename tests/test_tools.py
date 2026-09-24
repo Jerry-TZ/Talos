@@ -950,6 +950,27 @@ def test_a_long_call_says_it_is_still_alive(monkeypatch):
     assert beats, f"长调用期间一行心跳都没有:{lines!r}"
     assert "0.1s" not in " ".join(beats), f"秒数没取整:{beats!r}"
 
+def test_what_the_stream_has_written_so_far_shows_up_in_the_heartbeat(monkeypatch):
+    """流式时 `ui.progress` 报的那句,心跳行里也要有 —— 老 Windows 控制台上不开转圈,
+    心跳是那儿**唯一**看得见的东西。
+
+    那句话里有模型写的 path,而 path 是模型给的:`[red]` 这种东西不转义就被 rich 当成
+    样式吃掉(轻则字没了,重则 MarkupError 把这一轮打断)。
+    转圈之外调 `progress` 什么都不该发生 —— 流式只在转圈里跑,但别让它因为这个炸。"""
+    import time
+    ui = pytest.importorskip("console_ui", reason="需要 rich(界面层的可选依赖)")
+    lines = []
+    monkeypatch.setattr(ui.console, "print", lambda *a, **k: lines.append(str(a[0]) if a else ""))
+    monkeypatch.setattr(ui, "HEARTBEAT", 0.05)
+    with ui.thinking():
+        ui.progress("在写 write_file([red]x.py) · 12,000 字")
+        time.sleep(0.25)
+    ui.progress("转圈已经停了")
+    beats = [ln for ln in lines if "已等" in ln]
+    assert any("12,000 字" in b for b in beats), f"心跳里没有流式进度:{beats!r}"
+    assert any("\\[red]x.py" in b for b in beats), f"模型给的 path 没转义就进了 rich:{beats!r}"
+    assert not any("转圈已经停了" in ln for ln in lines)
+
 def test_no_provider_key_survives_startup(tmp_path):
     """启动那一刻,六个 provider 的 key 一个都不该留在 `os.environ` 里。
 

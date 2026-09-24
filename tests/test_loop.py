@@ -6,7 +6,7 @@ import pytest
 
 def _ui():
     n = lambda *a, **k: None
-    return types.SimpleNamespace(thinking=lambda: contextlib.nullcontext(),
+    return types.SimpleNamespace(thinking=lambda: contextlib.nullcontext(), progress=n,
                                  show_tool=n, denied=n, think=n, assistant_text=n, note=n, error=n)
 
 def _msg(content=None, tool_calls=None, usage=None):
@@ -2687,3 +2687,196 @@ def test_switching_sessions_inside_the_repl_re_reads_who_said_what(ws, monkeypat
     assert [a["content"] for a in asks] == ["新的活"], \
         f"删掉的会话里的原话还挂在 asks 上:{[a['content'] for a in asks]}"
     assert b_human not in asked, "已删掉的会话的原话还在参与「点名」判断"
+
+
+# ── 流式(TALOS_STREAM=1):拼回来的必须跟整份返回的是同一个东西 ─────────────────
+# 形状照 openai 2.x 的 `ChatCompletionChunk` 造(真对象在本机核对过),不 import openai。
+def _d(content=None, reasoning=None, tool_calls=None):
+    """一块增量。`reasoning_content` 是 DeepSeek / Kimi 的字段,SDK 不认识,挂在 extra 上。"""
+    delta = types.SimpleNamespace(content=content, tool_calls=tool_calls,
+                                  reasoning_content=reasoning)
+    return types.SimpleNamespace(choices=[types.SimpleNamespace(index=0, delta=delta,
+                                                                finish_reason=None)], usage=None)
+
+def _frag(index, cid=None, name=None, args=None, extra=None):
+    """工具调用的一个碎片。OpenAI 的拆法:第一片给 index/id/name,后面只有 index + 一段参数。"""
+    return types.SimpleNamespace(index=index, id=cid, type="function" if cid else None,
+                                 function=types.SimpleNamespace(name=name, arguments=args),
+                                 model_extra=extra or {})
+
+def _split(s, n):
+    return [s[i:i + n] for i in range(0, len(s), n)]
+
+class _Stream:
+    """流式返回:能迭代、有 close()。给了 `die` 就在吐完之后抛它 —— 流到一半断掉。"""
+    def __init__(self, chunks, die=None):
+        self.chunks, self.die, self.closed = chunks, die, False
+    def __iter__(self):
+        yield from self.chunks
+        if self.die is not None:
+            raise self.die
+    def close(self):
+        self.closed = True
+
+class _KwClient(_Client):
+    """跟 `_Client` 一样,外加记下每次调用带了哪些参数。"""
+    def __init__(self, script):
+        super().__init__(script)
+        self.kw = []
+    def _c(self, **k):
+        self.kw.append(k)
+        return super()._c(**k)
+
+
+def test_a_streamed_turn_leaves_exactly_what_a_whole_reply_would(ws, monkeypatch):
+    """同一轮,流式跑一遍、整份跑一遍:返回值、历史、token 账**逐项相同**。
+
+    流式只该换「怎么拿到这份回复」,不该换「回复是什么」。拼回来的对象后面还有四千行
+    代码要读(工具分发、落盘、压缩、回放),哪一处的字段对不上,都是在真跑到那条路径时才炸。
+    所以判据不去逐个字段比,直接比**下游看到的全部结果**。
+
+    参数故意切成 5 个字符一片、两个调用交错不了(OpenAI 的拆法是一个调用拆完再下一个);
+    用量在最后一块,那一块 `choices` 是空的 —— 这是 `include_usage` 的真实形状。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    usage = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20,
+                                  prompt_tokens_details=types.SimpleNamespace(cached_tokens=60))
+    a1, a2 = '{"command": "echo alpha"}', '{"command": "echo beta"}'
+    whole = [_msg(content="先看看", usage=usage,
+                  tool_calls=[_tc("run_bash", a1, "c1"), _tc("run_bash", a2, "c2")]),
+             _msg(content="两个都跑完了。", usage=usage)]
+    last = types.SimpleNamespace(choices=[], usage=usage)
+    streamed = [
+        _Stream([_d(reasoning="要跑"), _d(reasoning="两条"), _d(content="先"), _d(content="看看"),
+                 _d(tool_calls=[_frag(0, "c1", "run_bash", "")]),
+                 *[_d(tool_calls=[_frag(0, args=p)]) for p in _split(a1, 5)],
+                 _d(tool_calls=[_frag(1, "c2", "run_bash", "")]),
+                 *[_d(tool_calls=[_frag(1, args=p)]) for p in _split(a2, 5)],
+                 last]),
+        _Stream([_d(content="两个都"), _d(content="跑完了。"), last])]
+    runs = {}
+    for how, script, on in (("整份", whole, False), ("流式", streamed, True)):
+        monkeypatch.setattr(A, "STREAM", on)
+        client = _KwClient(script)
+        msgs = [{"role": "user", "content": "跑两条"}]
+        state = {"mode": "bypass", "allow": set()}
+        out = A.agent_turn(client, "m", msgs, state)
+        runs[how] = (out, msgs, state["tok"], client.kw)
+    assert runs["流式"][0] == runs["整份"][0] == "两个都跑完了。"
+    assert runs["流式"][1] == runs["整份"][1], "流式拼回来的历史跟整份返回的不一样"
+    assert runs["流式"][2] == runs["整份"][2], "流式的 token 账跟整份的不一样(用量那一块丢了?)"
+    assert "alpha" in str(runs["流式"][1]) and "beta" in str(runs["流式"][1]), "两个调用没都跑"
+    # 开着的时候要用量;关着的时候一个流式参数都不带 —— 默认关,就得真的是原来那条路
+    assert all(k.get("stream") is True and k.get("stream_options") == {"include_usage": True}
+               for k in runs["流式"][3]), runs["流式"][3]
+    assert not any("stream" in k or "stream_options" in k for k in runs["整份"][3])
+
+
+def test_streamed_tool_calls_are_told_apart_the_way_each_provider_sends_them(monkeypatch):
+    """几家拆工具调用的方式不一样,拼法得都认:
+
+    - OpenAI / DeepSeek:每片带 `index`,按它归位(上一条判据)
+    - Gemini 3:**每个调用一整块、不给 `index`**,`thought_signature` 挂在这一块的
+      `extra_content` 上 —— 签名丢了,下一轮回放当场 400(`_tool_call_entry` 那条记着)
+    - 有的每一片都重复同一个 `id`:那还是**同一个**调用,不能拆成两个
+
+    不给 index 时靠 id 分:id 变了是新调用,没变(或没给)是接着上一个。
+    这条判据还顺带钉了「不需要界面也能拼」:`ui` 是 None。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", None)
+    sig = {"google": {"thought_signature": "sig-1"}}
+    gem = _Stream([_d(tool_calls=[_frag(None, "g1", "read_file", '{"path": "a.py"}',
+                                        {"extra_content": sig})]),
+                   _d(tool_calls=[_frag(None, "g2", "read_file", '{"path": "b.py"}')])])
+    calls = A._collect(gem).choices[0].message.tool_calls
+    assert [(c.id, c.function.name, c.function.arguments) for c in calls] == [
+        ("g1", "read_file", '{"path": "a.py"}'), ("g2", "read_file", '{"path": "b.py"}')], (
+        "不给 index 的两个调用被粘成了一个(或者拆错了)")
+    assert A._tool_call_entry(calls[0])["extra_content"] == sig, "Gemini 的签名在流式里被抄丢了"
+    assert gem.closed, "流收完没关"
+
+    rep = _Stream([_d(tool_calls=[_frag(None, "d1", "write_file", '{"path": "x.py", ')]),
+                   _d(tool_calls=[_frag(None, "d1", None, '"content": "hi"}')])])
+    calls = A._collect(rep).choices[0].message.tool_calls
+    assert len(calls) == 1 and calls[0].function.arguments == '{"path": "x.py", "content": "hi"}'
+
+    # 没给 id:工具结果要拿 `tool_call_id` 对回这个调用,None 发出去就是 null,下一轮 400
+    anon = A._collect(_Stream([_d(tool_calls=[_frag(0, None, "run_bash", '{"command": "ls"}')])]))
+    assert anon.choices[0].message.tool_calls[0].id, "没给 id 的调用拼出来 id 是空的"
+
+    plain = A._collect(_Stream([_d(content="就这样")])).choices[0].message
+    assert plain.content == "就这样" and plain.tool_calls is None, (
+        "没有工具调用时 tool_calls 得是 None,跟整份返回一样 —— 循环拿它判断这一轮是不是说完了")
+
+
+def test_stream_usage_is_read_from_wherever_the_provider_puts_it(monkeypatch):
+    """用量不回来,会话预算提醒和缓存命中率就静悄悄地全是 0 —— 不报错,只是数不对。
+
+    OpenAI / DeepSeek 把它放在最后一块上(那一块 `choices` 是空的);Kimi 放在最后一块的
+    `choices[0].usage` 里 —— SDK 不认识这个位置,给的是**原样的 dict**,而 `_usage`
+    按属性读。两种都得认,dict 里嵌的 dict 也得能按属性读。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", None)
+    obj = types.SimpleNamespace(prompt_tokens=100, completion_tokens=20,
+                                prompt_tokens_details=types.SimpleNamespace(cached_tokens=60))
+    openai_style = _Stream([_d(content="好"), types.SimpleNamespace(choices=[], usage=obj)])
+    assert A._usage(A._collect(openai_style)) == (100, 20, 60)
+
+    fin = types.SimpleNamespace(index=0, delta=types.SimpleNamespace(content=None, tool_calls=None),
+                                finish_reason="stop",
+                                usage={"prompt_tokens": 100, "completion_tokens": 20,
+                                       "prompt_tokens_details": {"cached_tokens": 60}})
+    kimi_style = _Stream([_d(content="好"), types.SimpleNamespace(choices=[fin], usage=None)])
+    assert A._usage(A._collect(kimi_style)) == (100, 20, 60), "Kimi 放在 choices[0] 里的用量没认出来"
+
+
+def test_a_stream_that_breaks_midway_starts_over_instead_of_splicing(monkeypatch):
+    """流到一半断了:整次重来,不接着拼。
+
+    原来 `_chat` 的重试只包住 `create()`,而流式的错误**在读到一半时**才出来 ——
+    拼在 `_chat` 外面的话,断线就直接抛出去了,重试那一整套(状态码、退避、余额)全不管用。
+    所以拼这一步放在重试**里面**:断了就按原来的规矩认(掉线是 "connection",会重试),
+    重来的那一趟从零开始,前一趟收到的半截一个字都不带过来。
+
+    Ctrl-C 也在读到一半时来。它不是 Exception,不重试,但**连接得关**。"""
+    import agent as A
+    monkeypatch.setattr(A.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(A, "ui", _ui())
+    # httpx 断流时的原话
+    broken = _Stream([_d(content="写到一半")], die=Exception(
+        "peer closed connection without sending complete message body (incomplete chunked read)"))
+    whole = _Stream([_d(content="完整的回答")])
+    resp = A._chat(_Client([broken, whole]), stream=True)
+    assert resp.choices[0].message.content == "完整的回答", "断掉那一趟的半截被拼进来了"
+    assert broken.closed and whole.closed
+
+    stopped = _Stream([_d(content="写到一半")], die=KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        A._chat(_Client([stopped]), stream=True)
+    assert stopped.closed, "Ctrl-C 之后连接没关"
+
+
+def test_while_streaming_the_spinner_says_what_is_being_written(monkeypatch):
+    """流式要换来的就是这一行:等待的时候知道模型在干什么、干了多少。
+
+    原来只有转圈和每 30 秒一句「已等 Ns」—— 单次调用 16s 到 235s 都有,分不出慢和卡死,
+    活着的调用被 Ctrl-C 掉过好几次。最该看见进度的是写大文件:参数就是整份文件,几分钟,
+    所以工具名和 path 都要报(`path` 在参数开头才报得出来,在后面就只报工具名)。
+
+    path 用 Windows 写法:参数是 JSON,`src\\app.py` 在里面是转义过的两个反斜杠,
+    按「引号之间不含反斜杠」去抠的话只抠得出 `src`。"""
+    import json
+    import agent as A
+    said = []
+    ui = _ui()
+    ui.progress = said.append
+    monkeypatch.setattr(A, "ui", ui)
+    args = json.dumps({"path": "src\\app.py", "content": "x" * 12000})
+    A._collect(_Stream([_d(reasoning="先想想"), _d(content="好,"),
+                        _d(tool_calls=[_frag(0, "c1", "write_file", "")]),
+                        *[_d(tool_calls=[_frag(0, args=p)]) for p in _split(args, 500)]]))
+    assert said, "流式期间一次进度都没报"
+    assert "思考" in said[0] and "3" in said[0], said[:2]
+    assert "回复" in said[1] and "2" in said[1], said[:2]
+    assert "write_file" in said[-1] and "(src\\app.py)" in said[-1] and f"{len(args):,}" in said[-1], (
+        f"写大文件时没说在写哪个文件、写了多少:{said[-1]!r}")

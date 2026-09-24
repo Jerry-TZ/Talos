@@ -32,6 +32,7 @@ import platform
 import re
 import sys
 import time
+import types
 
 # .env is loaded from the launch directory, which in a coding agent is very often somebody
 # else's repository. Config is fine to pick up there; a command to execute is not — that turns
@@ -260,6 +261,13 @@ CHAT_TIMEOUT = float(os.environ.get("TALOS_TIMEOUT", "300"))
 # 后面也没法用。宁可这条稍紧,反正连不上会当场说清楚原因,不像超时那样一声不吭。
 CONNECT_TIMEOUT = float(os.environ.get("TALOS_CONNECT_TIMEOUT", "5"))
 SLOW_CALL = float(os.environ.get("TALOS_SLOW_CALL", "15"))   # 超过这么久的调用才报耗时
+# 流式:主循环那一次调用边生成边收,转圈那一行实时报「在写 write_file(x.py) · 12,000 字」。
+# **默认关**:六家的流式细节各不一样(Gemini 不给 index、Kimi 把用量塞进 choices[0]),
+# 写它的时候手上没有 key,只照文档和造出来的块核对过。开着跑稳了再改默认。
+# 只影响看得见的那一处 —— 判断器、压缩摘要、复盘你看不到,流了也没用。
+STREAM = os.environ.get("TALOS_STREAM", "").strip() in ("1", "true", "yes", "on")
+# 不带 include_usage,流式默认**不回用量**:会话预算提醒和缓存命中率就静悄悄地全是 0
+_STREAM_KW = {"stream": True, "stream_options": {"include_usage": True}}
 
 ui = None            # 界面 handle, set by repl(); kept out of module scope so --selfcheck is dep-free
 _RUNTIME = {}        # live client/model/state (+ subagent depth), set in agent_turn so tools like
@@ -2436,6 +2444,97 @@ def _retry_after(e):
     except (TypeError, ValueError):
         return None
 
+def _ns(v):
+    """dict → 能按属性读的对象,递归。Kimi 把流式的用量放在 `choices[0].usage`,SDK 不认识
+    这个位置,给的是原样的 dict —— 而 `_usage` 按属性读,读 dict 只会静悄悄地拿到 0。"""
+    if isinstance(v, dict):
+        return types.SimpleNamespace(**{k: _ns(x) for k, x in v.items()})
+    return v
+
+# 参数是 JSON:Windows 路径在里面是 `src\\app.py`,抠的时候得认转义,抠完再解一遍
+_PATH_ARG = re.compile(r'"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+def _collect(stream):
+    """把一次流式调用拼回**跟整份返回一模一样**的形状:`resp.choices[0].message` 带
+    content / tool_calls / reasoning_content,`resp.usage` 带用量。下游那几千行一行不用改 ——
+    流式换的只是「怎么拿到这份回复」,不是「回复是什么」。
+
+    工具调用是拼的重点,几家拆法不一样:
+    - OpenAI / DeepSeek:每片带 `index`,第一片给 id 和名字,后面只有一段段参数
+    - Gemini 3:**不给 `index`**,每个调用一整块,`thought_signature` 挂在这一块的
+      `extra_content` 上(丢了下一轮当场 400,见 `_tool_call_entry`)
+    - 有的每一片都重复同一个 id —— 那还是同一个调用
+    所以有 index 按 index 归位;没有就看 id:变了是新调用,没变或没给是接着上一个。
+    名字是**赋值**不是拼接(没有哪家把名字拆开发,而重复发名字的有)。
+
+    一边拼一边报进度(`ui.progress`),最该报的是写大文件:参数就是整份文件,要写几分钟。
+    流收完、断掉、被 Ctrl-C 打断,连接都关。"""
+    text, think, calls, at, usage = [], [], [], {}, None
+    n_text = n_think = 0
+    try:
+        for chunk in stream:
+            usage = getattr(chunk, "usage", None) or usage
+            for ch in (getattr(chunk, "choices", None) or ())[:1]:
+                usage = getattr(ch, "usage", None) or usage          # Kimi 放在这儿
+                d = getattr(ch, "delta", None)
+                if d is None:
+                    continue
+                said = None
+                r = _reasoning(d)
+                if r:
+                    think.append(r)
+                    n_think += len(r)
+                    said = f"在思考 · {n_think:,} 字"
+                if getattr(d, "content", None):
+                    text.append(d.content)
+                    n_text += len(d.content)
+                    said = f"在写回复 · {n_text:,} 字"
+                for tc in getattr(d, "tool_calls", None) or ():
+                    i, cid = getattr(tc, "index", None), getattr(tc, "id", None)
+                    f = getattr(tc, "function", None)
+                    if i is not None and i in at:
+                        c = calls[at[i]]
+                    elif i is None and calls and not (cid and cid != calls[-1]["id"]):
+                        c = calls[-1]
+                    else:
+                        c = {"id": cid, "name": "", "args": [], "n": 0, "path": None, "extra": {}}
+                        calls.append(c)
+                        if i is not None:
+                            at[i] = len(calls) - 1
+                    c["id"] = c["id"] or cid
+                    if getattr(f, "name", None):
+                        c["name"] = f.name
+                    a = getattr(f, "arguments", None)
+                    if a:
+                        c["args"].append(a)
+                        c["n"] += len(a)
+                        # path 只在参数开头找:在后面的话要一遍遍 join 整份文件去搜,不值
+                        if c["path"] is None and c["n"] - len(a) < 300:
+                            m = _PATH_ARG.search("".join(c["args"])[:300])
+                            try:
+                                c["path"] = json.loads(f'"{m.group(1)}"') if m else None
+                            except ValueError:
+                                c["path"] = m.group(1)
+                    c["extra"].update({k: v for k, v in
+                                       (getattr(tc, "model_extra", None) or {}).items()
+                                       if v is not None})
+                    where = f"({c['path']})" if c["path"] else ""
+                    said = f"在写 {c['name']}{where} · {c['n']:,} 字"
+                if said and ui is not None:
+                    ui.progress(said)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    # 没给 id 的补一个:工具结果靠 `tool_call_id` 对回调用,None 发回去是 null,下一轮 400
+    tool_calls = [types.SimpleNamespace(
+        id=c["id"] or f"call_{k}", type="function", model_extra=c["extra"],
+        function=types.SimpleNamespace(name=c["name"], arguments="".join(c["args"])))
+        for k, c in enumerate(calls)] or None
+    msg = types.SimpleNamespace(content="".join(text) or None, tool_calls=tool_calls,
+                                reasoning_content="".join(think) or None)
+    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)], usage=_ns(usage))
+
 def _chat(client, **kwargs):
     """Call the model, retrying briefly on rate-limit / 'busy' / transient errors.
     Free tiers (esp. glm-4.7-flash) get congested — '当前模型用户多' is just a busy signal."""
@@ -2444,6 +2543,10 @@ def _chat(client, **kwargs):
         t0 = time.time()
         try:
             resp = client.chat.completions.create(**kwargs)
+            # 流式的错**在读到一半时**才出来,所以拼这一步必须在 try 里面:断流跟连不上
+            # 走同一套认法(掉线是 "connection",重试),重来那一趟从零拼,半截不带过来。
+            if kwargs.get("stream"):
+                resp = _collect(resp)
             # 慢调用才报。快的不值一行,而推理模型上"这一次比平常久得多"正是你想知道的事。
             took = time.time() - t0
             if ui is not None and took >= SLOW_CALL:
@@ -3014,7 +3117,7 @@ def agent_turn(client, model: str, messages: list, state: dict, query: str = "",
             resp = _chat(client, model=model,
                          messages=([{"role": "system", "content": system}]
                                    + _with_recall(messages, recalled, slot)),
-                         tools=tool_specs())
+                         tools=tool_specs(), **(_STREAM_KW if STREAM else {}))
         state["tok"]["steps"] += 1
         _in, _out, _cached = _usage(resp)
         for _k, _v in zip(("in", "out", "cached"), (_in, _out, _cached)):
