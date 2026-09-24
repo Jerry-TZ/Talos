@@ -1959,7 +1959,7 @@ def test_a_refusal_says_what_was_refused_instead_of_something_that_never_happene
 
 
 def test_a_file_that_merely_starts_with_check_is_not_a_verification_script(ws):
-    """`checksum.py` / `checkpoint.py` / `checklist.py` / `checkout.py` 不是验证脚本。
+    r"""`checksum.py` / `checkpoint.py` / `checklist.py` / `checkout.py` 不是验证脚本。
 
     正则原来是 `^(verify|validate|check)[\w-]*\.py$` —— 它认「以 check 开头」,
     而这几个名字在真实仓库里到处都是。命中之后 `write_file` / `edit_file` 一律拒绝:

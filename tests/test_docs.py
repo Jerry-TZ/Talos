@@ -118,3 +118,33 @@ def test_the_test_count_the_docs_advertise_is_the_real_one():
     assert not wrong, (
         f"文档宣传的测试数跟 tests/ 里真实的 {real} 条对不上:\n  " + "\n  ".join(wrong)
         + "\n加判据是这个项目每天在干的事,所以这个数**每天都会陈** —— 这条就是为它存在的。")
+
+
+# `| `claude`(默认) | `ANTHROPIC_API_KEY` | claude-haiku-4-5 |`
+_PROVIDER_ROW = re.compile(r"^\|\s*`(\w+)`[^|]*\|\s*`(\w+)`\s*\|\s*([\w.\-]+)\s*\|", re.M)
+
+
+def test_the_provider_table_in_the_readme_is_what_the_code_does():
+    """README 那张 provider 表 == `agent.PROVIDERS`:哪几家、读哪个 key、默认哪个模型。
+
+    **默认模型会被供应商下线,而且下得很快。** 2026-09 核对时,六家里有三家的默认值
+    已经调不通了:`moonshot-v1-8k`(整个 v1 系列 8 月 31 日下线)、`deepseek-chat`
+    (7 月 24 日停用)、`gemini-2.0-flash`(6 月 1 日关停)。那次是两边一起改的 ——
+    这条判据管的是**下一次只改了一边**:读者照着 README 设了 provider,跑起来却是另一个模型。
+
+    README 可以写去掉日期后缀的名字(`claude-haiku-4-5` 对 `claude-haiku-4-5-20251001`),
+    那是同一个模型的别名;别的一律要逐字相同。"""
+    import agent
+    readme = io.open(os.path.join(HOME, "README.md"), encoding="utf-8").read()
+    rows = {p: (key, model) for p, key, model in _PROVIDER_ROW.findall(readme)}
+    assert set(rows) == set(agent.PROVIDERS), (
+        f"README 表里的 provider 跟代码对不上:多了 {sorted(set(rows) - set(agent.PROVIDERS))}、"
+        f"少了 {sorted(set(agent.PROVIDERS) - set(rows))}")
+    wrong = []
+    for p, (key, model) in sorted(rows.items()):
+        want_key, _url, want_model = agent.PROVIDERS[p]
+        if key != want_key:
+            wrong.append(f"{p}:README 写 key {key},代码读 {want_key}")
+        if not (model == want_model or want_model.startswith(model + "-")):
+            wrong.append(f"{p}:README 写默认 {model},代码默认 {want_model}")
+    assert not wrong, "README 的 provider 表跟代码对不上:\n  " + "\n  ".join(wrong)
