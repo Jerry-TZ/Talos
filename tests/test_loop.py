@@ -2689,8 +2689,34 @@ def test_switching_sessions_inside_the_repl_re_reads_who_said_what(ws, monkeypat
     assert b_human not in asked, "已删掉的会话的原话还在参与「点名」判断"
 
 
-# ── 流式(TALOS_STREAM=1):拼回来的必须跟整份返回的是同一个东西 ─────────────────
+# ── 流式(默认开,TALOS_STREAM=0 关):拼回来的必须跟整份返回的是同一个东西 ──────
 # 形状照 openai 2.x 的 `ChatCompletionChunk` 造(真对象在本机核对过),不 import openai。
+def test_streaming_is_on_unless_you_turn_it_off(tmp_path):
+    """默认开,`TALOS_STREAM=0`(或 false/no/off)关。
+
+    必须**真的起一个进程**:这个开关在 import 时读环境变量,而 conftest 为了让假客户端
+    照旧回整份,把每条测试里的 `STREAM` 都钉成了关 —— 在测试进程里看,它永远是关的。
+    同 `test_no_provider_key_survives_startup` 那条的道理。
+
+    cwd 放在空的 tmp 目录:启动时会读当前目录的 `.env`,别让本机那份替判据做决定。"""
+    import os
+    import subprocess
+    import sys
+    import agent as A
+    code = f"import sys; sys.path.insert(0, {A.HOME!r}); import agent; print(agent.STREAM)"
+    base = {k: v for k, v in os.environ.items() if k != "TALOS_STREAM"}
+    def run(**env):
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(tmp_path), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=dict(base, PYTHONIOENCODING="utf-8", **env))
+        assert r.returncode == 0, "探针进程没起来:" + (r.stderr or "")[-800:]
+        return r.stdout.strip()
+    assert run() == "True", "没设 TALOS_STREAM 时流式没开"
+    for off in ("0", "false", "no", "off", " OFF "):
+        assert run(TALOS_STREAM=off) == "False", f"TALOS_STREAM={off!r} 没关掉流式"
+    assert run(TALOS_STREAM="1") == "True"
+
+
 def _d(content=None, reasoning=None, tool_calls=None):
     """一块增量。`reasoning_content` 是 DeepSeek / Kimi 的字段,SDK 不认识,挂在 extra 上。"""
     delta = types.SimpleNamespace(content=content, tool_calls=tool_calls,
