@@ -2830,6 +2830,32 @@ def test_stream_usage_is_read_from_wherever_the_provider_puts_it(monkeypatch):
     assert A._usage(A._collect(kimi_style)) == (100, 20, 60), "Kimi 放在 choices[0] 里的用量没认出来"
 
 
+def test_cached_tokens_are_read_from_whichever_field_the_provider_fills():
+    """缓存命中数原来只认 OpenAI 那一处(`prompt_tokens_details.cached_tokens`)。
+
+    按现在的文档,DeepSeek、Kimi、GLM、Gemini 也都填这一处 —— FINDINGS 里那些实测命中率
+    (81.5%、94%)就是这么量出来的,所以**日常不是 0**。但 DeepSeek 和 Kimi 各有自己的老字段,
+    而只带老字段的响应还在(旧接口、中转网关;any-llm、Operit 都报过 DeepSeek 命中被丢成 0):
+    DeepSeek 的 `prompt_cache_hit_tokens`,Kimi 顶层的 `cached_tokens`。
+    撞上的时候命中**静悄悄地记成 0** —— 不报错,只是账不对,而 cache_trace 正是拿来
+    判断缓存优化有没有效的样本。"""
+    import agent as A
+    U = types.SimpleNamespace
+    def resp(**u):
+        return U(usage=U(prompt_tokens=100, completion_tokens=20, **u))
+    assert A._usage(resp(prompt_tokens_details=U(cached_tokens=60))) == (100, 20, 60)
+    assert A._usage(resp(prompt_tokens_details=None, prompt_cache_hit_tokens=60,
+                         prompt_cache_miss_tokens=40)) == (100, 20, 60), "DeepSeek 的老字段没认"
+    assert A._usage(resp(cached_tokens=60)) == (100, 20, 60), "Kimi 顶层的 cached_tokens 没认"
+    # SDK 给的 details 可能在、但 cached_tokens 是 None
+    assert A._usage(resp(prompt_tokens_details=U(cached_tokens=None),
+                         prompt_cache_hit_tokens=60)) == (100, 20, 60)
+    # 流式里 Kimi 那份用量是原样 dict,经 `_ns` 之后同样认
+    assert A._usage(U(usage=A._ns({"prompt_tokens": 100, "completion_tokens": 20,
+                                   "cached_tokens": 60}))) == (100, 20, 60)
+    assert A._usage(resp()) == (100, 20, 0), "哪家都没报就是 0,不是报错"
+
+
 def test_a_stream_that_breaks_midway_starts_over_instead_of_splicing(monkeypatch):
     """流到一半断了:整次重来,不接着拼。
 
