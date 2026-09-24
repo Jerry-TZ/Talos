@@ -262,10 +262,11 @@ CHAT_TIMEOUT = float(os.environ.get("TALOS_TIMEOUT", "300"))
 CONNECT_TIMEOUT = float(os.environ.get("TALOS_CONNECT_TIMEOUT", "5"))
 SLOW_CALL = float(os.environ.get("TALOS_SLOW_CALL", "15"))   # 超过这么久的调用才报耗时
 # 流式:主循环那一次调用边生成边收,转圈那一行实时报「在写 write_file(x.py) · 12,000 字」。
-# **默认关**:六家的流式细节各不一样(Gemini 不给 index、Kimi 把用量塞进 choices[0]),
-# 写它的时候手上没有 key,只照文档和造出来的块核对过。开着跑稳了再改默认。
+# **默认开,`TALOS_STREAM=0` 关。** 六家的流式细节各不一样(Gemini 不给 index、Kimi 把
+# 用量塞进 choices[0]),写它的时候手上没有 key,只照文档和造出来的块核对过 —— 所以哪家
+# 跑出毛病,先关掉它回到整份返回那条老路,再来看是哪一块没拼对。
 # 只影响看得见的那一处 —— 判断器、压缩摘要、复盘你看不到,流了也没用。
-STREAM = os.environ.get("TALOS_STREAM", "").strip() in ("1", "true", "yes", "on")
+STREAM = os.environ.get("TALOS_STREAM", "").strip().lower() not in ("0", "false", "no", "off")
 # 不带 include_usage,流式默认**不回用量**:会话预算提醒和缓存命中率就静悄悄地全是 0
 _STREAM_KW = {"stream": True, "stream_options": {"include_usage": True}}
 
