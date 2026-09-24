@@ -91,14 +91,16 @@ _load_dotenv()   # BEFORE reading TALOS_PROVIDER / keys below
 
 # ── providers: 大家都讲 OpenAI 兼容 API,只有 base_url + 模型名不同 ────────────────
 # base_url 稳定;模型名常变 —— 用 TALOS_MODEL 环境变量覆盖成你有权限的那个。
+# 默认模型 2026-09 核对过:moonshot-v1 整个系列(8/31)、deepseek-chat(7/24)、
+# gemini-2.0-flash(6/1)都已下线,换成了各家当前的对应档。README 那张表跟这里由判据绑着。
 PROVIDERS = {
     #  name        key 环境变量          base_url (None = OpenAI 官方)                                默认模型
     "claude":   ("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/",                            "claude-haiku-4-5-20251001"),
     "openai":   ("OPENAI_API_KEY",    None,                                                        "gpt-4o-mini"),
-    "gemini":   ("GEMINI_API_KEY",    "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-2.0-flash"),
-    "deepseek": ("DEEPSEEK_API_KEY",  "https://api.deepseek.com/v1",                               "deepseek-chat"),
+    "gemini":   ("GEMINI_API_KEY",    "https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-3.5-flash"),
+    "deepseek": ("DEEPSEEK_API_KEY",  "https://api.deepseek.com/v1",                               "deepseek-flash"),
     "glm":      ("ZHIPUAI_API_KEY",   "https://open.bigmodel.cn/api/paas/v4",                      "glm-4.7-flash"),
-    "kimi":     ("MOONSHOT_API_KEY",  "https://api.moonshot.cn/v1",                                "moonshot-v1-8k"),
+    "kimi":     ("MOONSHOT_API_KEY",  "https://api.moonshot.cn/v1",                                "kimi-k2.6"),
 }
 PROVIDER = os.environ.get("TALOS_PROVIDER", "claude").lower()
 
