@@ -265,12 +265,29 @@ def _drop_dont_use(text: str) -> str:
     return _DONT_USE.sub("", text)
 
 def _edges(nodes: list) -> dict:
+    """边权 `shared / max(|A|,|B|)`,至少共享 `EDGE_MIN` 个关键词才连。
+
+    **只数真共享关键词的那几对。** 原来两两比较,每轮顶层请求、复盘、子 agent 各建一遍,
+    而节点数跟着会话数涨(每个会话的第一句是一个「往事」)。实测每次 `recall()`:
+    500 个会话 0.23s,1500 个 1.3s,3000 个 4.6s。倒排之后在真实中文语料
+    (FINDINGS 的句子)上快 5~8 倍,图一模一样。
+
+    **每行的邻居按下标升序排**,跟两两比较那一版逐项相同:`_activate` 按这个顺序
+    累加浮点数,顺序变了末位就可能变,同分的两条在排名里就可能换位。"""
+    idx = {}
+    for i, n in enumerate(nodes):
+        for k in n["kw"]:
+            idx.setdefault(k, []).append(i)
     E = {}
-    for i in range(len(nodes)):
-        for j in range(i + 1, len(nodes)):
-            shared = len(nodes[i]["kw"] & nodes[j]["kw"])
-            if shared >= EDGE_MIN:
-                w = shared / max(len(nodes[i]["kw"]), len(nodes[j]["kw"]))
+    for i, n in enumerate(nodes):
+        shared = {}
+        for k in n["kw"]:
+            for j in idx[k]:
+                if j > i:
+                    shared[j] = shared.get(j, 0) + 1
+        for j in sorted(shared):
+            if shared[j] >= EDGE_MIN:
+                w = shared[j] / max(len(n["kw"]), len(nodes[j]["kw"]))
                 E.setdefault(i, {})[j] = w
                 E.setdefault(j, {})[i] = w
     return E

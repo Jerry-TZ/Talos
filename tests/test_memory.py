@@ -2035,3 +2035,65 @@ def test_a_command_line_switch_is_not_the_rm_command(ws):
     for cmd in ("rm -rf build", "sudo rm x", "del a.txt", "Remove-Item x",
                 "python -c 'x' && rm y"):
         assert A._DESTRUCTIVE.search(cmd), f"这条真的在删东西:{cmd}"
+
+
+# ── 建图:只比共享关键词的那几对 ──────────────────────────────────────────────
+def _pairwise_edges(nodes):
+    """两两比较的参照实现 —— 就是 `recall._edges` 原来的样子,留在这儿当尺子。"""
+    import recall as R
+    E = {}
+    for i in range(len(nodes)):
+        for j in range(i + 1, len(nodes)):
+            shared = len(nodes[i]["kw"] & nodes[j]["kw"])
+            if shared >= R.EDGE_MIN:
+                w = shared / max(len(nodes[i]["kw"]), len(nodes[j]["kw"]))
+                E.setdefault(i, {})[j] = w
+                E.setdefault(j, {})[i] = w
+    return E
+
+
+def test_the_recall_graph_is_exactly_the_pairwise_one():
+    """换建图算法不许换图。**连每一行里邻居的顺序都要一样**:`_activate` 按这个顺序
+    累加浮点数,顺序一变末位就可能变,同分的两条在排名里就可能换位 ——
+    那就不是「只是变快了」,是悄悄改了检索结果。
+
+    语料故意挑小词表:大量节点对恰好共享 1 个(不连边)、2 个(`EDGE_MIN`,刚好连边)
+    或更多关键词,还有完全相同的集合 —— 边界都踩到。"""
+    import random
+    import recall as R
+    rnd = random.Random(0)
+    vocab = [f"k{i}" for i in range(40)]
+    nodes = [{"kw": set(rnd.sample(vocab, rnd.randint(1, 8)))} for _ in range(300)]
+    nodes += [{"kw": set(nodes[i]["kw"])} for i in range(0, 300, 37)]     # 完全相同的集合
+    want, got = _pairwise_edges(nodes), R._edges(nodes)
+    assert sum(len(r) for r in want.values()) > 1000, "样本太稀,边界没踩到"
+    assert set(got) == set(want), "连了边的节点集合变了"
+    diff = [i for i in want if list(got[i].items()) != list(want[i].items())]
+    assert not diff, f"{len(diff)} 行的邻居或顺序变了,例如第 {diff[0]} 行"
+
+
+def test_building_the_recall_graph_does_not_compare_every_pair():
+    """原来的 `_edges` 两两比较,每一轮顶层请求、复盘、子 agent 都各建一遍图。
+    节点数随会话数涨(每个会话的第一句是一个「往事」节点,`-p` 和 benchmark 每跑一次
+    就多一个)。实测每次 `recall()`:500 个会话 0.23s,1500 个 1.3s,3000 个 4.6s。
+
+    这条拿**同一台机器上的两两比较**当基线,不写死秒数:稀疏语料(每个节点只跟
+    同组两三个节点共享关键词)上,只比共享关键词的那几对应该快出一个量级。
+    门槛放在 5 倍,实测是几十倍,留足 CI 机器的抖动。"""
+    import time
+    import recall as R
+    nodes = []
+    for g in range(300):                          # 300 组 × 3 个节点,组内共享 3 个词
+        common = {f"g{g}a", f"g{g}b", f"g{g}c"}
+        nodes += [{"kw": common | {f"n{g}_{k}_{j}" for j in range(12)}} for k in range(3)]
+
+    def timed(fn):
+        t = time.perf_counter()
+        out = fn(nodes)
+        return time.perf_counter() - t, out
+    slow, want = timed(_pairwise_edges)           # 抖动只会让基线更慢,测一次就够
+    fast, got = min((timed(R._edges) for _ in range(3)), key=lambda r: r[0])
+    assert got == want, "先得是同一张图,快才有意义"
+    assert fast * 5 < slow, (
+        f"建图 {fast * 1000:.0f} ms,两两比较 {slow * 1000:.0f} ms —— "
+        "它还在比较每一对节点,会话一多每轮检索就要几秒")

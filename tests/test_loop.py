@@ -1024,10 +1024,11 @@ def test_a_subagent_cannot_reset_the_parents_repeat_counter(ws, monkeypatch):
             if m.get("role") == "tool" and "第 3 次" in str(m.get("content"))]
     assert hits, "子agent 插了一脚,父轮的打转计数就被清零了"
 
-def test_a_timeout_is_retried_like_any_other_busy_signal():
+def test_a_timeout_is_retried_like_any_other_busy_signal(monkeypatch):
     """SDK 抛的是 "Request timed out.",里面没有 "timeout" 这个词 —— 刚给客户端设完超时
     才发现,超时本身正好落在重试判据之外,等于设了个「一次就放弃」的开关。"""
     import agent as A
+    monkeypatch.setattr(A.time, "sleep", lambda _s: None)
     assert A._chat(_Client([Exception("Request timed out."), "OK"])) == "OK"
 
 def test_only_a_slow_call_reports_how_long_it_took(monkeypatch):
@@ -2309,13 +2310,18 @@ def test_resuming_a_session_does_not_lose_track_of_what_the_human_asked(ws):
     assert got == [human, "再补一句:顺便看看 signals.py"], f"认错了:{got}"
 
     # 认出来了还得**接上** —— 上一版就是「函数有了、续会话那条路没调」。
+    # 走 `_adopt_history`:repl 里换历史的路不止启动这一条,每条路是否都接上了,
+    # 由 `test_switching_sessions_inside_the_repl_re_reads_who_said_what` 真跑一遍来钉。
     src = _io.open(_os.path.join(_os.path.dirname(_os.path.dirname(
         _os.path.abspath(__file__))), "agent.py"), encoding="utf-8").read()
     fn = next(n for n in ast.walk(ast.parse(src))
               if isinstance(n, ast.FunctionDef) and n.name == "repl")
     called = {n.func.id for n in ast.walk(fn)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
-    assert "_human_asks" in called, "repl 续会话那条路没把 asks 重建回来"
+    assert "_adopt_history" in called, "repl 续会话那条路没把 asks 重建回来"
+    state = {}
+    A._adopt_history(state, loaded)
+    assert [m["content"] for m in state["asks"]] == got and human in state["asked"]
 
 
 def test_piping_a_script_run_into_findstr_is_not_reading_that_script(ws):
@@ -2411,3 +2417,273 @@ def test_no_session_save_can_take_the_repl_down_with_it():
              and c.func.attr == "save" and c.lineno not in guarded]
     assert not naked, (f"agent.py 第 {naked} 行的落盘没人接着 —— 一次 PermissionError "
                        "就把整个 REPL 带走了。包进 try,或者走 `_save_quietly`。")
+
+
+# ── 上下文预算里漏掉的那一半:模型写进 tool_calls 的参数 ─────────────────────────
+def _sent_chars(messages):
+    """一段历史**真正发出去**的量:正文 + 每条 assistant 的 tool_calls 参数。
+
+    **故意不调 `_ctx_chars`** —— 被量的就是它,拿它当尺子等于让它给自己打分。"""
+    n = 0
+    for m in messages:
+        n += len(str(m.get("content") or ""))
+        for c in m.get("tool_calls") or ():
+            fn = c["function"] if isinstance(c, dict) else c.function
+            n += len(str((fn.get("arguments") if isinstance(fn, dict) else fn.arguments) or ""))
+    return n
+
+
+def _writes(n, size, start=0):
+    """n 次 write_file,每次写 size 字符 —— 模型一个接一个写大文件的那种历史。"""
+    import json
+    out = []
+    for i in range(start, start + n):
+        body = f"# m{i}\n" + "x = 1\n" * (size // 6)
+        out.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"w{i}", "type": "function",
+             "function": {"name": "write_file",
+                          "arguments": json.dumps({"path": f"m{i}.py", "content": body})}}]})
+        out.append({"role": "tool", "tool_call_id": f"w{i}", "content": f"wrote m{i}.py"})
+    return out
+
+
+def test_what_the_model_wrote_counts_toward_the_context_budget():
+    """`write_file` 的内容躺在 assistant 消息的 `tool_calls[].arguments` 里,不在 `content` 里。
+
+    `_ctx_chars` 原来只数 `content`。实测:6 次 write_file、每次 1.8 万字符,
+    真实历史 123,922 字符,它报 **73**。于是压缩永远不触发,而写得越多的任务
+    —— 恰恰是最贵的那种 —— 每一步都把所有写过的文件原样重发一遍,直到
+    `400 Prompt exceeds max length`。尺子只量了一半,闸就只守了一半。"""
+    import agent as A
+    msgs = [{"role": "user", "content": "写 6 个模块"}] + _writes(6, 18000)
+    real = _sent_chars(msgs)
+    assert real > A.COMPACT_AT, "样本本身没超预算,这条判据测不出东西"
+    assert A._ctx_chars(msgs) >= real, (
+        f"历史真实有 {real} 字符,`_ctx_chars` 只数出 {A._ctx_chars(msgs)} —— "
+        "tool_calls 里的参数没算进去,压缩闸看不见它们")
+
+
+def test_old_tool_call_arguments_are_stubbed_like_old_tool_output():
+    """旧的大块**参数**跟旧的大块**工具输出**是同一种东西:早就用过了,还在每步重发。
+
+    `_prune_old_tool_results` 只剪 `role == "tool"`,于是 write_file 写进去的整份文件
+    永远留在历史里。剪法跟工具输出同一条规则(窗口外、超过门槛),而且:
+    - 剪完的参数还得是**合法 JSON** —— 有的 provider 回放历史时会解析它;
+    - `path` 留着 —— 省略提示要能照着走(「要看现状就 read_file 它」);
+    - `spawn_subagent` 不剪 —— 跟它的返回不剪是同一个理由,那是派活的原话。"""
+    import json
+    import agent as A
+    task = "读一下季报,把要点列出来" + "要点" * 400
+    msgs = [{"role": "user", "content": "写模块"},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "s", "type": "function",
+                 "function": {"name": "spawn_subagent", "arguments": json.dumps({"task": task})}}]},
+            {"role": "tool", "tool_call_id": "s", "content": "子agent 的结论"}]
+    msgs += _writes(10, 5000)
+    A._prune_old_tool_results(msgs)
+
+    assert json.loads(msgs[1]["tool_calls"][0]["function"]["arguments"])["task"] == task, \
+        "派子 agent 的原话被剪了 —— 那一份重来就是重新派一次活"
+    old = [m for m in msgs[3:-8] if m["role"] == "assistant"]
+    recent = [m for m in msgs[-8:] if m["role"] == "assistant"]
+    assert old and recent, "样本切分不对"
+    for m in old:
+        a = json.loads(m["tool_calls"][0]["function"]["arguments"])   # 剪完还得能解析
+        assert a["path"].startswith("m"), f"path 被一起剪没了:{a}"
+        assert a["content"].startswith("[已省略"), f"窗口外的大块参数没剪:{str(a)[:80]}"
+        assert a["path"] in a["content"], f"省略提示没说去哪儿看:{a['content']}"
+    for m in recent:
+        a = json.loads(m["tool_calls"][0]["function"]["arguments"])
+        assert len(a["content"]) >= 5000, "窗口里的也剪了 —— 正在用的那几条不能动"
+    assert _sent_chars(msgs) < A.COMPACT_AT, (
+        f"剪完还有 {_sent_chars(msgs)} 字符 —— 这一级便宜手段没起作用")
+
+
+def test_a_turn_that_writes_big_files_does_not_resend_all_of_them(ws, monkeypatch):
+    """上面两条是函数级的;这条钉**循环真的在用它们** —— 每一次请求都在预算里。
+
+    脚本化模型连写 12 个 6000 字符的文件。修之前最后一次请求带着全部 12 份
+    (约 7.2 万字符);修之后窗口外的参数每步被剪掉,每次请求都压在 `COMPACT_AT` 以下,
+    而且不用花钱叫模型压缩(这份脚本里没有给压缩准备回答,叫了就会错位)。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "run_tool", lambda name, args: (f"wrote {args.get('path')}", False))
+    sizes = []
+
+    class _Rec(_Client):
+        def _c(self, **k):
+            sizes.append(_sent_chars(k["messages"][1:]))    # 在发出那一刻量 —— 之后还会被剪
+            return super()._c(**k)
+
+    script = []
+    for m in _writes(12, 6000)[::2]:
+        c = m["tool_calls"][0]
+        script.append(_msg(tool_calls=[_tc("write_file", c["function"]["arguments"], cid=c["id"])]))
+    script.append(_msg(content="done"))
+    msgs = [{"role": "user", "content": "写 12 个模块"}]
+    A.agent_turn(_Rec(script), "m", msgs, {"mode": "bypass", "allow": set()})
+    assert len(sizes) == 13, f"脚本没按预期走完:{len(sizes)} 次请求"
+    assert max(sizes) < A.COMPACT_AT, (
+        f"有一次请求带了 {max(sizes)} 字符(预算 {A.COMPACT_AT})—— "
+        "写过的文件在每一步被原样重发")
+
+
+def test_compaction_budgets_the_tail_by_what_is_actually_sent(ws, monkeypatch):
+    """尾部的字符预算也得按**真正发出去的量**算。
+
+    `_tail_start` 原来只数 `content`:尾部 8 条里躺着 4 份 9000 字符的 write_file 参数,
+    它数出来是几十个字符,于是 8 条全留 —— 压完还有 3.6 万字符,超过阈值,
+    下一步立刻再压一次(`test_compaction_must_actually_get_under_the_threshold`
+    记过这个形状,当时的根因是「单位不一致」,这是同一个根因的另一半)。"""
+    import agent as A
+    monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A, "_chat", lambda c, **kw: _msg(content="简报"))
+    ask = {"role": "user", "content": "写 9 个模块"}
+    out = A.maybe_compact(None, "m", [ask] + _writes(9, 9000), force=True, asks=[ask])
+    assert _sent_chars(out) < A.COMPACT_AT, (
+        f"压完还有 {_sent_chars(out)} 字符(阈值 {A.COMPACT_AT})—— 下一步会再压一次")
+    seen = set()
+    for m in out:                                   # 缩尾巴不许缩出落单的工具结果
+        for c in m.get("tool_calls") or ():
+            seen.add(c["id"])
+        if m.get("role") == "tool":
+            assert m["tool_call_id"] in seen, f"落单的工具结果 {m['tool_call_id']}"
+    assert any(m.get("role") == "tool" for m in out), "尾巴全丢了"
+
+
+# ── 重试按状态码认,不按报错里恰好有哪几个字 ───────────────────────────────────
+class _StatusError(Exception):
+    """openai `APIStatusError` 的形状:`.status_code`、`.response.headers`,
+    文本是 `Error code: 500 - {...}`。离线判据不 import openai,照着它的形状造一个
+    (真对象的这三处在本机用 openai 2.x 核对过)。"""
+    def __init__(self, code, body, headers=None):
+        super().__init__(f"Error code: {code} - {body}")
+        self.status_code = code
+        self.body = body
+        self.response = types.SimpleNamespace(status_code=code, headers=headers or {})
+
+
+def test_a_server_error_is_retried_and_a_gateway_timeout_is_not_a_read_timeout(monkeypatch):
+    """重试判据原来是在报错文本里找关键词,表里有 502、503,**没有 500**。
+
+    实测三处:500 试 1 次就放弃;504 的文本是 `Gateway Timeout`,撞上 "timeout" 被记成
+    **读超时**,只多给一次机会;真正的客户端错(400)照旧不该重试。FINDINGS 七十八节
+    那个任务连排三趟,死法是 500、500、429 —— 前两趟一次重试都没有。
+
+    状态码是服务器**答了话**的证据:504 是网关替上游说「没等到」,不是这边等满了
+    `CHAT_TIMEOUT`,所以不该吃「超时只给一次机会」那条规矩。"""
+    import agent as A
+    monkeypatch.setattr(A.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(A, "ui", _ui())
+    e500 = lambda: _StatusError(500, {"error": {"code": "500", "message": "Internal Error"}})
+    assert A._chat(_Client([e500(), "OK"])) == "OK", "500 没重试"
+    e504 = lambda: _StatusError(504, {"error": {"message": "Gateway Timeout"}})
+    assert A._chat(_Client([e504(), e504(), "OK"])) == "OK", \
+        "504 被当成读超时了 —— 第二次就放弃"
+    bad = _Client([_StatusError(400, {"error": {"message": "invalid request"}}), "OK"])
+    with pytest.raises(Exception, match="400"):
+        A._chat(bad)
+    assert bad.i == 1, "400 是请求本身错了,重试只是把同一个错再拿一遍"
+
+
+def test_an_exhausted_balance_is_not_retried(monkeypatch):
+    """**钱没了不是对面忙。** 429 有两种:限流(等一下就好)和额度耗尽(等多久都不会好)。
+    原来两种一样重试,还打「模型繁忙,Ns 后重试」—— 人照着那句话等,等来的还是同一个错。
+    退避拉长之后这一档更贵,所以要认出来直接报。
+
+    **反例必须一起钉**:Gemini 免费档的**每分钟限流**文本也是 "You exceeded your current
+    quota",那是真的限流,要重试。所以判据只认明确是「余额/额度用完」的那几种写法,
+    不认 "quota" 这个词。"""
+    import agent as A
+    sleeps = []
+    monkeypatch.setattr(A.time, "sleep", sleeps.append)
+    monkeypatch.setattr(A, "ui", _ui())
+    for body in ({"error": {"code": "1113", "message": "余额不足或无可用资源包,请充值。"}},   # glm
+                 {"error": {"code": "insufficient_quota",                                    # openai
+                            "message": "You exceeded your current quota, please check your plan"}}):
+        c = _Client([_StatusError(429, body), "OK"])
+        with pytest.raises(Exception, match="429"):
+            A._chat(c)
+        assert c.i == 1 and sleeps == [], f"额度耗尽还在重试:{body}"
+    gemini = _StatusError(429, [{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                                           "message": "You exceeded your current quota, please "
+                                                      "check your plan and billing details."}}])
+    assert A._chat(_Client([gemini, "OK"])) == "OK", \
+        "Gemini 的每分钟限流被当成额度耗尽了 —— 它等一下就好"
+
+
+def test_retry_after_is_honoured_and_capped(monkeypatch):
+    """服务器说了等多久,就等多久 —— 原来一律 1s、2s,对免费档的 429 太短,
+    三次在三秒里烧完。上限是为了别让一个离谱的头把人晾一小时:超过就按上限等,
+    等完再试一次,还不行照旧报错。"""
+    import agent as A
+    sleeps = []
+    monkeypatch.setattr(A.time, "sleep", sleeps.append)
+    monkeypatch.setattr(A, "ui", _ui())
+    busy = {"error": {"message": "rate limit reached"}}
+    for headers, want in (({"retry-after": "7"}, 7), ({"retry-after-ms": "1500"}, 1.5),
+                          ({"retry-after": "86400"}, A.RETRY_AFTER_MAX)):
+        sleeps.clear()
+        assert A._chat(_Client([_StatusError(429, busy, headers), "OK"])) == "OK"
+        assert sleeps == [want], f"{headers} → 实际等了 {sleeps}"
+    # 头是 HTTP 日期(或者根本没有)就退回指数退避,不许因为解析不了而崩
+    sleeps.clear()
+    date = {"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}
+    assert A._chat(_Client([_StatusError(503, busy, date), "OK"])) == "OK"
+    assert len(sleeps) == 1 and sleeps[0] > 0
+
+
+def test_switching_sessions_inside_the_repl_re_reads_who_said_what(ws, monkeypatch):
+    """`--resume` 启动那条路会按内容把人的原话认回来(`_human_asks`);
+    REPL 里敲 `/resume` 那条路**没有**,`/delete` 掉当前会话那条也没有。
+
+    于是切过去之后 `state["asks"]` 还是**上一个会话**的对象:续上的会话一压缩,
+    人的原话被转述掉 —— 正是 `_human_asks` 当初要修的那件事。`state["asked"]` 也是旧的,
+    「你在请求里点名要过它」那句提示拿上一个会话的话去比这个会话的删除命令。
+
+    上一版的判据只查「repl 里调用过 `_human_asks`」—— 启动那一处就满足了,
+    另外两条路一直漏着。这里改成真的把 REPL 跑一遍。"""
+    import json
+    import os
+    import sys
+    import agent as A
+    import session as S
+    b_human = "把 report.md 的标题改成季度总结"
+    os.makedirs(S.SESS_DIR, exist_ok=True)
+    with open(os.path.join(S.SESS_DIR, "20260101-000000__b.jsonl"), "w", encoding="utf-8") as f:
+        for m in ({"role": "user", "content": b_human}, {"role": "assistant", "content": "好"}):
+            f.write(json.dumps(m, ensure_ascii=False) + "\n")
+
+    tasks = iter(["先删掉 alpha.md", "/resume 20260101-000000", "继续",
+                  "/delete 20260101-000000", "新的活"])
+
+    def read_task(_mode):
+        try:
+            return next(tasks)
+        except StopIteration:
+            raise EOFError
+    n = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, "console_ui", types.SimpleNamespace(
+        read_task=read_task, banner=n, note=n, answer=n, error=n,
+        ask_yes=lambda *a: True, thinking=lambda: contextlib.nullcontext()))
+    monkeypatch.setattr(A, "ui", None)           # repl 会 `global ui` 换掉它,这行负责还原
+    monkeypatch.setattr(A, "make_client", lambda: (None, "m"))
+    seen = []
+
+    def turn(client, model, messages, state, top=False):
+        seen.append((list(messages), list(state.get("asks", ())), state.get("asked", "")))
+        return "ok"
+    monkeypatch.setattr(A, "agent_turn", turn)
+    A.repl()
+    assert len(seen) == 3, f"脚本没按预期走完:{len(seen)} 轮"
+
+    msgs, asks, asked = seen[1]                  # /resume 之后的第一轮
+    resumed = next(m for m in msgs if m.get("content") == b_human)
+    assert any(a is resumed for a in asks), \
+        "续上的会话里人的原话没认回来 —— 一压缩就会被转述掉"
+    assert "alpha.md" not in asked, "「点名要过」还在拿上一个会话的话来比"
+
+    msgs, asks, asked = seen[2]                  # /delete 当前会话、开新会话之后
+    assert [a["content"] for a in asks] == ["新的活"], \
+        f"删掉的会话里的原话还挂在 asks 上:{[a['content'] for a in asks]}"
+    assert b_human not in asked, "已删掉的会话的原话还在参与「点名」判断"

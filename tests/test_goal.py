@@ -28,6 +28,7 @@ def _judge_reads(path, cid="j1"):
 def _run(monkeypatch, script, goal="产物正确", view="quiet", **extra):
     import agent as A
     monkeypatch.setattr(A, "ui", _ui())
+    monkeypatch.setattr(A.time, "sleep", lambda _s: None)   # 判断器崩的那几条会走重试退避
     state = {"mode": "bypass", "allow": set(), "view": view, "goal": goal, **extra}
     messages = [{"role": "user", "content": "干活"}]
     out = A.agent_turn(_Client(script), "m", messages, state, top=True)
@@ -516,6 +517,7 @@ def test_a_crash_after_a_block_says_the_deliverable_is_known_wrong(ws, monkeypat
     notes = []
     monkeypatch.setattr(console_ui, "note", lambda s, *a, **k: notes.append(s))
     monkeypatch.setattr(console_ui, "error", lambda *a, **k: None)
+    monkeypatch.setattr(A.time, "sleep", lambda _s: None)   # 那个 429 会先走一次重试退避
     monkeypatch.chdir(ws)
     monkeypatch.setenv("TALOS_GOAL", "report.md 里 8 个数都对")
     client = _Client([
