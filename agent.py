@@ -2412,12 +2412,18 @@ def _reasoning(msg) -> str:
     return str(extra.get("reasoning_content") or extra.get("reasoning") or "")
 
 def _usage(resp):
-    """Token usage from a response (0s if the provider doesn't report it). -> (in, out, cached)."""
+    """Token usage from a response (0s if the provider doesn't report it). -> (in, out, cached).
+
+    缓存命中先认 OpenAI 那一处;没有再认两家自己的老字段 —— DeepSeek 的
+    `prompt_cache_hit_tokens`、Kimi 顶层的 `cached_tokens`。现在的文档里两家也都填
+    OpenAI 那处,但只带老字段的响应还有(旧接口、中转网关),那时命中静悄悄地记成 0。"""
     u = getattr(resp, "usage", None)
     if not u:
         return (0, 0, 0)
     d = getattr(u, "prompt_tokens_details", None)
-    cached = (getattr(d, "cached_tokens", 0) or 0) if d is not None else 0
+    cached = (((getattr(d, "cached_tokens", 0) if d is not None else 0)
+               or getattr(u, "prompt_cache_hit_tokens", 0) or getattr(u, "cached_tokens", 0))
+              or 0)
     return (getattr(u, "prompt_tokens", 0) or 0, getattr(u, "completion_tokens", 0) or 0, cached)
 
 CHAT_TRIES = 4             # 一次调用最多试几趟(含第一趟)
